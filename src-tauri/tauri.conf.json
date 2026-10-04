@@ -1,0 +1,48 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "ImageSage",
+  "version": "0.1.0",
+  "identifier": "com.robmirabelle.imagesage",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:14410",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "ImageSage",
+        "width": 1360,
+        "height": 880,
+        "minWidth": 960,
+        "minHeight": 640,
+        "visible": false,
+        "decorations": false,
+        "transparent": false,
+        "shadow": true,
+        "backgroundColor": "#22252f"
+      }
+    ],
+    "security": { "csp": null }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis"],
+    "icon": ["icons/icon.ico"],
+    "resources": ["icons/icon.ico"],
+    "fileAssociations": [
+      {
+        "ext": ["imagesage"],
+        "name": "ImageSage.Document",
+        "description": "ImageSage document"
+      }
+    ],
+    "windows": {
+      "nsis": {
+        "template": "installer.nsi"
+      }
+    }
+  }
+}
