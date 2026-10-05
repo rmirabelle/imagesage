@@ -12,3 +12,15 @@ src-tauri/gen
 Thumbs.db
 *.log
 icon-pack.zip
+
+# Documents and images saved in the project folder while testing
+*.imagesage
+/*.png
+/*.jpg
+/*.jpeg
+
+# DirectML runtime, copied from the ort build by src-tauri/build.rs
+src-tauri/DirectML.dll
+
+# TypeScript build cache
+*.tsbuildinfo

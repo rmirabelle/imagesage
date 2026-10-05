@@ -96,7 +96,7 @@ export function rectBox(rect: Rect, sent: SentRegion): [number, number, number, 
   ];
 }
 
-/** The painted area of a mask (paint strokes only), clamped to the image; null when nothing is painted. */
+/** The painted area of a mask (paint strokes and subjects, not erase strokes), clamped to the image; null when nothing is painted. */
 export function maskBounds(strokes: MaskStroke[], imageWidth: number, imageHeight: number): Rect | null {
   let left = Infinity;
   let top = Infinity;
@@ -104,6 +104,13 @@ export function maskBounds(strokes: MaskStroke[], imageWidth: number, imageHeigh
   let bottom = -Infinity;
   for (const stroke of strokes) {
     if (stroke.erase) continue;
+    if (stroke.image) {
+      const area = stroke.image.bounds;
+      left = Math.min(left, area.x);
+      top = Math.min(top, area.y);
+      right = Math.max(right, area.x + area.width);
+      bottom = Math.max(bottom, area.y + area.height);
+    }
     for (const [x, y] of stroke.points) {
       left = Math.min(left, x - stroke.radius);
       top = Math.min(top, y - stroke.radius);
@@ -576,4 +583,43 @@ export function blendMasked(
     }
   }
   return output;
+}
+/** The area where an alpha channel (one value per pixel) is at least `threshold`; null when it is nowhere. */
+export function alphaBounds(alpha: Uint8ClampedArray, width: number, height: number, threshold: number): Rect | null {
+  let left = width, top = height, right = -1, bottom = -1;
+  for (let y = 0; y < height; y++) {
+    const row = y * width;
+    for (let x = 0; x < width; x++) {
+      if (alpha[row + x] < threshold) continue;
+      if (x < left) left = x;
+      if (x > right) right = x;
+      if (y < top) top = y;
+      bottom = y;
+    }
+  }
+  return right < 0 ? null : { x: left, y: top, width: right - left + 1, height: bottom - top + 1 };
+}
+
+/** A rectangle grown by `pad` pixels on each side, kept inside the image. */
+export function padRect(rect: Rect, pad: number, imageWidth: number, imageHeight: number): Rect {
+  const x = Math.max(0, rect.x - pad);
+  const y = Math.max(0, rect.y - pad);
+  return {
+    x,
+    y,
+    width: Math.min(imageWidth, rect.x + rect.width + pad) - x,
+    height: Math.min(imageHeight, rect.y + rect.height + pad) - y
+  };
+}
+
+/**
+ * Keeps a detected subject only near the area the user marked. `near` is that
+ * area blurred outward, so a rough mark that cuts into the subject does not cut
+ * it; where `near` is weak the subject fades out. Changes `subject` in place.
+ */
+export function limitToArea(subject: Uint8ClampedArray, near: Uint8ClampedArray) {
+  for (let pixel = 0; pixel < subject.length; pixel++) {
+    subject[pixel] = Math.round(subject[pixel] * Math.min(1, near[pixel] * 4 / 255));
+  }
+  return subject;
 }

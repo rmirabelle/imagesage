@@ -1,6 +1,6 @@
 [package]
 name = "imagesage"
-version = "0.1.0"
+version = "0.2.0"
 description = "Generate images with OpenAI and refine them one region at a time"
 authors = ["Rob Mirabelle"]
 edition = "2021"
@@ -26,6 +26,8 @@ futures-util = "0.3"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "io-util", "sync", "time"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream", "multipart"] }
 keyring = { version = "3", features = ["windows-native"] }
+ort = { version = "=2.0.0-rc.13", features = ["directml"] }
+sha2 = "0.10"
 
 [target.'cfg(windows)'.dependencies]
 tauri-plugin-single-instance = "2"
@@ -38,3 +40,7 @@ windows = { version = "0.61.3", features = [
   "Win32_UI_Shell",
   "Win32_UI_WindowsAndMessaging"
 ] }
+
+# Dependencies (image resizing, PNG encoding) are optimized in dev builds too, so local AI masks are fast while testing.
+[profile.dev.package."*"]
+opt-level = 2

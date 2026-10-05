@@ -1,8 +1,22 @@
-# ImageSage
+# Image Sage
 
-An AI image editor for Windows that works in layers. It is built with Tauri 2, React 19, and Rust.
+An AI image generator and editor for Windows that includes professional photo editing tools. 
 
-ImageSage creates an image from a prompt, then lets you change it one part at a time. Each AI edit becomes its own layer, so you can mask it, adjust it, transform it, retry it with a better prompt, or delete it, without generating the whole image again.
+Image Sage generates an image from a prompt, then lets you change it one part at a time. Each AI edit becomes its own layer, so you can mask it, adjust it, transform it, retry it with a better prompt, or delete it.
+
+At the time this app was created, the frontier LLM for image generation is ChatGPT Seedance 2.5. No other model comes close. But even GPT has a weakness.
+
+## Combating Diminishing Returns
+
+You generate an image using GPT. The results are amazing. 
+
+You then ask GPT to edit your image, making an adjustment to one area of the image. This engages GPT in an entirely new way. Your first generation was *text-to-image*. This and future edits are *image-to-image*.
+
+GPT faithfully adjusts the original image, making the edit you specify, initially with excellent results.
+
+But there's a problem. If you look carefully, GPT's modified image is returned with brand new artifacts. Color becomes "patchy". Previously sharp edges lose definition. Lines lose precision. Noise appears. These are subtle imperfections, but they are additive.
+
+Continue making edits and the original image quality is gradually l
 
 ---
 

@@ -28,6 +28,8 @@ import { parseManifest } from "../editor/document";
 interface Props {
   onCancel: () => void;
   onOpen: (path: string) => void;
+  /** The dialog's heading; "Open" when absent. */
+  title?: string;
 }
 
 type EntryKind = "folder" | "document" | "image";
@@ -303,7 +305,7 @@ const entryIcon = (entry: BrowseEntry) => {
   return <FileImage size={17} weight="duotone" className="open-entry-icon image" />;
 };
 
-export function OpenDialog({ onCancel, onOpen }: Props) {
+export function OpenDialog({ onCancel, onOpen, title = "Open" }: Props) {
   const [places, setPlaces] = useState<BrowsePlace[]>([]);
   const [listing, setListing] = useState<BrowseListing | null>(null);
   const [notice, setNoticeState] = useState<Notice>(null);
@@ -819,7 +821,7 @@ export function OpenDialog({ onCancel, onOpen }: Props) {
         <header className="save-dialog-header open-dialog-header" onPointerDown={startMove}>
           <div className="save-dialog-title-icon"><FolderOpen size={22} weight="fill" /></div>
           <div>
-            <h2 id="open-file-title">Open</h2>
+            <h2 id="open-file-title">{title}</h2>
             <p>Choose an ImageSage document or a PNG or JPEG image.</p>
           </div>
           <button className="save-dialog-close" onClick={onCancel} aria-label="Close open dialog" data-help="Close">

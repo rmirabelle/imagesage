@@ -6,7 +6,10 @@ mod flux;
 mod openai;
 mod pricing;
 mod recovery;
+mod models;
 mod requests;
+mod sam;
+mod subject;
 mod updater;
 
 use std::{path::Path, sync::Mutex};
@@ -79,6 +82,8 @@ pub fn run() {
         )
         .manage(PendingOpenDocument(Mutex::new(initial_document)))
         .manage(requests::AiRequests::default())
+        .manage(subject::SubjectModel::default())
+        .manage(sam::SamModel::default())
         .setup(|app| {
             restore_main_window(app.handle());
             Ok(())
@@ -111,6 +116,11 @@ pub fn run() {
             recovery::recovery_remove,
             recovery::recovery_remove_path,
             requests::ai_cancel,
+            models::model_status,
+            models::model_download,
+            subject::subject_mask,
+            sam::sam_encode,
+            sam::sam_mask,
             take_pending_open_document,
             updater::check_for_update,
             updater::download_and_run_installer,

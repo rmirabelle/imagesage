@@ -32,11 +32,22 @@ export type DocumentOrigin =
   | { kind: "generated"; prompt: string; model: string; quality: string; size: string; cost?: number }
   | { kind: "imported"; fileName: string };
 
-/** One brush stroke of a painted mask, in image pixels. Erase strokes remove paint. */
+/** A detected subject used as a mask stroke: a PNG data URL at the image size whose alpha is the subject, and the subject's area. */
+export interface MaskImage {
+  src: string;
+  bounds: Rect;
+}
+
+/**
+ * One brush stroke of a painted mask, in image pixels. Erase strokes remove
+ * paint. A stroke with `image` paints that picture's alpha instead of a brush
+ * path; its `points` are empty.
+ */
 export interface MaskStroke {
   radius: number;
   erase: boolean;
   points: [number, number][];
+  image?: MaskImage;
 }
 
 /**
@@ -63,6 +74,8 @@ export interface EditStep {
   layerMask?: string;
   maskHides?: boolean;
   hidden?: boolean;
+  /** How the layer mixes with the layers below it; absent is Normal. */
+  blend?: BlendMode;
   /** The mask is kept but not used, so the whole layer shows. */
   maskOff?: boolean;
   /** A name the user gave the layer; the layers list shows it instead of the prompt. */
@@ -80,13 +93,21 @@ export interface EditStep {
 }
 
 /** The kinds of layer adjustment. */
-export type AdjustmentKind = "brightness" | "hueSaturation" | "opacity";
+/** The blend modes a layer can use besides Normal. */
+export type BlendMode = "screen" | "overlay";
+
+export type AdjustmentKind = "brightness" | "contrast" | "hueSaturation" | "opacity" | "blur";
 
 /**
  * One adjustment of a layer. A layer can have several, even of the same kind;
  * they apply in order. Brightness uses `value` (-100 to 100); Hue/Saturation
  * uses `hue` (-180 to 180 degrees) and `saturation` (-100 to 100), and keeps
  * `value` at 0. Opacity uses `value` as a percent (0 to 100); 100 is no change.
+ * Contrast uses `value` as its amount (-100 to 100), `pivot` as the middle
+ * gray it pushes away from (0 to 100), `curve` as how much the change rolls off
+ * near black and white instead of clipping (0 to 100), and `color` as how much
+ * it works on each color instead of on brightness only (0 to 100). Blur uses
+ * `value` as its radius in image pixels (0 to 100).
  * For the others, 0 is no change. `off` keeps it
  * but does not use it. `mask` is a PNG whose alpha is where the adjustment
  * applies (with `maskHides`, where it does not); no mask means it applies to
@@ -98,6 +119,9 @@ export interface Adjustment {
   value: number;
   hue?: number;
   saturation?: number;
+  pivot?: number;
+  curve?: number;
+  color?: number;
   off?: boolean;
   /** `off` was set by the layer's "all adjustments" switch, so that switch turns it back on. */
   offByAll?: boolean;

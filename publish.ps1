@@ -172,7 +172,7 @@ Invoke-Native -FailureMessage "Could not create tag $tag" { git tag -a $tag -m "
 Invoke-Native -FailureMessage "Could not push tag $tag" { git push origin $tag }
 
 Write-Host "==> Publishing GitHub release $tag ..." -ForegroundColor Cyan
-Invoke-Native -FailureMessage "Could not create GitHub release $tag" { gh release create $tag $assetPath --verify-tag --title "ImageSage $tag" --generate-notes }
+Invoke-Native -FailureMessage "Could not create GitHub release $tag" { gh release create $tag $assetPath --verify-tag --title "ImageSage $tag" --generate-notes --latest }
 
 $publishedReleaseJson = Invoke-Native -FailureMessage "Could not verify GitHub release $tag" { gh release view $tag --json tagName,isDraft,isPrerelease,assets }
 $publishedRelease = $publishedReleaseJson | ConvertFrom-Json
@@ -194,9 +194,13 @@ if ($latestRelease.tag_name -ne $tag -or $latestAssets -notcontains $assetName) 
 }
 
 Write-Host "==> Removing superseded releases ..." -ForegroundColor Cyan
+<#
+  Releases tagged "model-*" hold the subject model that the app downloads on
+  first use. They are not app releases, so they are never deleted here.
+#>
 $priorReleases = @(Invoke-Native -FailureMessage "Could not list existing GitHub releases" { gh release list --limit 100 --json tagName -q '.[].tagName' })
 foreach ($priorTag in $priorReleases) {
-  if ($priorTag -and $priorTag -ne $tag) {
+  if ($priorTag -and $priorTag -ne $tag -and -not $priorTag.StartsWith("model-")) {
     Write-Host "    - deleting $priorTag"
     Invoke-Native -FailureMessage "Could not delete superseded release $priorTag" { gh release delete $priorTag --yes --cleanup-tag }
   }

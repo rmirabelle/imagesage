@@ -4,6 +4,8 @@ import tailwindcss from "@tailwindcss/vite";
 import path from "node:path";
 
 const host = process.env.TAURI_DEV_HOST;
+/** The project folder with forward slashes, for watch patterns. */
+const ROOT = __dirname.replace(/\\/g, "/");
 const DEV_PORT = 14410;
 const HMR_PORT = 14411;
 const PREVIEW_PORT = 14412;
@@ -17,7 +19,11 @@ export default defineConfig({
     strictPort: true,
     host: host || false,
     hmr: host ? { protocol: "ws", host, port: HMR_PORT } : undefined,
-    watch: { ignored: ["**/src-tauri/**"] }
+    /**
+     * Saved documents and exported images in the project folder must not
+     * reload the dev app (Tailwind also skips what .gitignore lists).
+     */
+    watch: { ignored: ["**/src-tauri/**", "**/*.imagesage", "**/*.imagesage.saving", ...["png", "jpg", "jpeg"].map((extension) => `${ROOT}/*.${extension}`)] }
   },
   preview: {
     port: PREVIEW_PORT,

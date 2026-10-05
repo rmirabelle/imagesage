@@ -86,6 +86,9 @@ enum StreamEvent {
     Ignored,
 }
 
+/// How long a stream may send nothing before the request fails.
+const STREAM_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+
 fn parse_event(data: &str) -> StreamEvent {
     let Ok(value) = serde_json::from_str::<Value>(data) else {
         return StreamEvent::Ignored;
@@ -114,7 +117,11 @@ fn parse_event(data: &str) -> StreamEvent {
             };
         }
         return StreamEvent::Failed("OpenAI finished without returning an image.".into());
-    } else if kind == "error" || value.get("error").is_some() {
+    } else if kind == "error"
+        || kind.ends_with(".failed")
+        || kind.ends_with(".incomplete")
+        || value.get("error").is_some()
+    {
         let message = value
             .pointer("/error/message")
             .or_else(|| value.get("message"))
@@ -205,7 +212,13 @@ async fn stream_image(
     let mut stream = response.bytes_stream();
     let mut buffer = SseBuffer::default();
     let mut pending_utf8 = Vec::new();
-    while let Some(chunk) = stream.next().await {
+    loop {
+        // A stream that goes quiet for too long ends with an error, so a request never waits forever.
+        let Ok(next) = tokio::time::timeout(STREAM_IDLE_TIMEOUT, stream.next()).await else {
+            eprintln!("[imagesage] OpenAI stream idle timeout");
+            return Err("OpenAI stopped sending data before the image was finished. Try again.".into());
+        };
+        let Some(chunk) = next else { break };
         let chunk = chunk.map_err(|error| transport_error(&error))?;
         pending_utf8.extend_from_slice(&chunk);
         // Keep any incomplete UTF-8 sequence at the end for the next chunk.
@@ -225,12 +238,72 @@ async fn stream_image(
                         usage,
                     });
                 }
-                StreamEvent::Failed(message) => return Err(message),
-                StreamEvent::Ignored => {}
+                StreamEvent::Failed(message) => {
+                    eprintln!("[imagesage] OpenAI stream error: {}", payload.chars().take(600).collect::<String>());
+                    return Err(message);
+                }
+                StreamEvent::Ignored => {
+                    eprintln!("[imagesage] OpenAI stream event ignored: {}", payload.chars().take(600).collect::<String>());
+                }
             }
         }
     }
+    eprintln!("[imagesage] OpenAI stream closed without an image");
     Err("The connection closed before OpenAI finished the image.".into())
+}
+
+/// A refusal that a dev build acts out instead of calling OpenAI.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum SimulatedFailure {
+    /// OpenAI refuses the prompt before it starts (HTTP 400 from the safety system).
+    Blocked,
+    /// OpenAI starts, then sends an error event in the stream.
+    StreamError,
+}
+
+/**
+ * In dev builds only, a prompt that starts with `[test:blocked]` or
+ * `[test:stream-error]` acts out an OpenAI refusal, so the app's handling of
+ * blocked requests can be tested without sending a violating prompt.
+ */
+fn simulated_failure(prompt: &str) -> Option<SimulatedFailure> {
+    if !cfg!(debug_assertions) {
+        return None;
+    }
+    let prompt = prompt.trim_start();
+    if prompt.starts_with("[test:blocked]") {
+        Some(SimulatedFailure::Blocked)
+    } else if prompt.starts_with("[test:stream-error]") {
+        Some(SimulatedFailure::StreamError)
+    } else {
+        None
+    }
+}
+
+async fn send_or_simulate(
+    reporter: ProgressReporter,
+    builder: reqwest::RequestBuilder,
+    simulated: Option<SimulatedFailure>,
+) -> Result<AiImage, String> {
+    let Some(failure) = simulated else {
+        return stream_image(reporter, builder).await;
+    };
+    reporter.stage("sending");
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    match failure {
+        SimulatedFailure::Blocked => Err(describe_error(
+            400,
+            "{\"error\":{\"message\":\"Your request was rejected by the safety system (simulated).\",\"code\":\"moderation_blocked\"}}",
+        )),
+        SimulatedFailure::StreamError => {
+            reporter.stage("generating");
+            tokio::time::sleep(std::time::Duration::from_secs(4)).await;
+            match parse_event("{\"type\":\"error\",\"error\":{\"message\":\"Your request was rejected by the safety system (simulated, in the stream).\"}}") {
+                StreamEvent::Failed(message) => Err(message),
+                _ => Err("The simulated stream error was not recognized.".into()),
+            }
+        }
+    }
 }
 
 #[tauri::command]
@@ -240,6 +313,7 @@ pub async fn ai_generate(
     request: GenerateRequest,
 ) -> Result<AiImage, String> {
     let key = credentials::api_key(Provider::OpenAi)?;
+    let simulated = simulated_failure(&request.prompt);
     let body = json!({
         "model": request.model,
         "prompt": request.prompt,
@@ -255,7 +329,7 @@ pub async fn ai_generate(
         .bearer_auth(key)
         .json(&body);
     requests::run_cancellable(app, &requests, request.request_id, move |reporter| {
-        stream_image(reporter, builder)
+        send_or_simulate(reporter, builder, simulated)
     })
     .await
 }
@@ -298,6 +372,7 @@ async fn run_edit(
 ) -> Result<AiImage, String> {
     let key = credentials::api_key(Provider::OpenAi)?;
     let part = png_part(&request.image_png, "image", "image.png")?;
+    let simulated = simulated_failure(&request.prompt);
     let mut form = reqwest::multipart::Form::new()
         .text("model", request.model)
         .text("prompt", request.prompt)
@@ -319,7 +394,7 @@ async fn run_edit(
         .bearer_auth(key)
         .multipart(form);
     requests::run_cancellable(app, &requests, request.request_id, move |reporter| {
-        stream_image(reporter, builder)
+        send_or_simulate(reporter, builder, simulated)
     })
     .await
 }
@@ -522,6 +597,15 @@ mod tests {
         let event = parse_event("{\"type\":\"error\",\"error\":{\"message\":\"blocked\"}}");
         assert_eq!(event, StreamEvent::Failed("blocked".into()));
         assert_eq!(parse_event("not json"), StreamEvent::Ignored);
+        assert!(matches!(parse_event("{\"type\":\"image_edit.failed\"}"), StreamEvent::Failed(_)));
+        assert!(matches!(parse_event("{\"type\":\"image_generation.incomplete\"}"), StreamEvent::Failed(_)));
+    }
+
+    #[test]
+    fn test_prompts_act_out_refusals_in_dev_builds() {
+        assert_eq!(simulated_failure("[test:blocked] a cat"), Some(SimulatedFailure::Blocked));
+        assert_eq!(simulated_failure("  [test:stream-error]"), Some(SimulatedFailure::StreamError));
+        assert_eq!(simulated_failure("a cat [test:blocked]"), None);
     }
 
     #[test]

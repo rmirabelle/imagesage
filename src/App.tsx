@@ -3,10 +3,12 @@ import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { save } from "@tauri-apps/plugin-dialog";
-import { CheckCircle, FolderOpen, MagicWand, SpinnerGap, WarningCircle, X } from "@phosphor-icons/react";
+import { CheckCircle, FolderOpen, MagicWand, SpinnerGap, Warning, WarningCircle, X } from "@phosphor-icons/react";
 import { AboutDialog } from "./components/AboutDialog";
 import { ConnectDialog, type SettingsSection } from "./components/ConnectDialog";
 import { Editor, type Notice } from "./components/Editor";
+import { HelpDialog } from "./components/HelpDialog";
+import type { HelpTopic } from "./lib/help";
 import { NewImageDialog, type GeneratedImage } from "./components/NewImageDialog";
 import { OpenDialog } from "./components/OpenDialog";
 import { Tooltips } from "./components/Tooltips";
@@ -69,6 +71,7 @@ type DocumentPanelProps = {
   /** Saves to the document's file; `saveAs` (or a document never saved) asks for a file first. */
   onSave: (id: string, saveAs?: boolean) => Promise<void>;
   onExport: (id: string, dataUrl: string, format: SaveFormat) => Promise<boolean>;
+  onExportVideo: (id: string, video: Blob) => Promise<boolean>;
   onNotice: (notice: Notice) => void;
   onEditFinished: () => void;
 };
@@ -123,10 +126,18 @@ export default function App() {
   const [startupUpdate, setStartupUpdate] = useState<UpdateInfo | null>(null);
   const pendingCloseDocument = documents.find((document) => document.id === pendingCloseDocumentId) ?? null;
 
-  const showNotice = useCallback((next: Notice) => {
-    setNotice(next);
-    if (next?.tone === "success") window.setTimeout(() => setNotice((current) => current === next ? null : current), next.action ? 10000 : 3200);
-  }, []);
+  const showNotice = useCallback((next: Notice) => setNotice(next), []);
+  /** The pointer is over the notice; it does not close by itself meanwhile. */
+  const [noticeHovered, setNoticeHovered] = useState(false);
+  const [helpTopic, setHelpTopic] = useState<HelpTopic | null>(null);
+  /** Success and warning messages close by themselves; errors stay until closed. */
+  useEffect(() => {
+    if (!notice || notice.tone === "error" || noticeHovered) return;
+    const delay = notice.tone === "warning" ? 8000 : notice.action ? 10000 : 3200;
+    const timer = window.setTimeout(() => setNotice(null), delay);
+    return () => window.clearTimeout(timer);
+  }, [notice, noticeHovered]);
+  useEffect(() => setNoticeHovered(false), [notice]);
 
   const setSettings = useCallback((next: AiSettings) => {
     setSettingsState(next);
@@ -368,6 +379,19 @@ export default function App() {
     };
   }, [openPath]);
 
+  /**
+   * The webview reloads the whole app on F5 and Ctrl+R, as a browser would,
+   * which could lose unsaved work. Both are blocked here; the editor uses
+   * Ctrl+R as Redo.
+   */
+  useEffect(() => {
+    const blockReload = (event: KeyboardEvent) => {
+      if (event.key === "F5" || (event.ctrlKey && event.key.toLowerCase() === "r")) event.preventDefault();
+    };
+    window.addEventListener("keydown", blockReload, true);
+    return () => window.removeEventListener("keydown", blockReload, true);
+  }, []);
+
   /** Closing the window quits ImageSage, so ask first when work is unsaved. */
   useEffect(() => {
     if (!isTauri()) return;
@@ -462,6 +486,33 @@ export default function App() {
       updateDocument(documentId, { saving: false });
     }
   }, [showNotice, updateDocument]);
+
+  /** Saves a video slideshow as an MP4 file next to where images are exported. */
+  const exportVideo = useCallback(async (documentId: string, video: Blob) => {
+    if (!isTauri()) {
+      showNotice({ tone: "error", message: "Exporting is available in the ImageSage desktop app." });
+      return false;
+    }
+    const document = documentsRef.current.find((candidate) => candidate.id === documentId);
+    if (!document) return false;
+    const chosenPath = await save({
+      title: "Export video slideshow",
+      defaultPath: `${document.name.replace(/\.[^.]+$/, "")} slideshow.mp4`,
+      filters: [{ name: "MP4 video", extensions: ["mp4"] }]
+    });
+    if (!chosenPath) return false;
+    const path = chosenPath.toLowerCase().endsWith(".mp4") ? chosenPath : `${chosenPath}.mp4`;
+    /** The video goes to Rust as a data URL; the file reader makes it without a slow loop over the bytes. */
+    const dataUrl = await new Promise<string>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result));
+      reader.onerror = () => reject(reader.error ?? new Error("Could not read the video."));
+      reader.readAsDataURL(video);
+    });
+    await invoke("save_image", { path, dataUrl });
+    showNotice({ tone: "success", message: `Exported ${path}` });
+    return true;
+  }, [showNotice]);
 
   const exportImage = useCallback(async (documentId: string, dataUrl: string, format: SaveFormat) => {
     const extension = format === "png" ? "png" : "jpg";
@@ -656,6 +707,7 @@ export default function App() {
             onBusyChange={setBusy}
             onSave={saveDocument}
             onExport={exportImage}
+            onExportVideo={exportVideo}
             onNotice={showNotice}
             onEditFinished={refreshCredits}
           />
@@ -663,9 +715,20 @@ export default function App() {
       </div>
 
       {notice && (
-        <div className={`notice ${notice.tone}`}>
-          {notice.tone === "success" ? <CheckCircle size={19} weight="fill" /> : <WarningCircle size={19} weight="fill" />}
+        <div className={`notice ${notice.tone}`} onPointerEnter={() => setNoticeHovered(true)} onPointerLeave={() => setNoticeHovered(false)}>
+          {notice.tone === "success" ? <CheckCircle size={19} weight="fill" /> : notice.tone === "warning" ? <Warning size={19} weight="fill" /> : <WarningCircle size={19} weight="fill" />}
           <span>{notice.message}</span>
+          {notice.help && (
+            <button
+              className="notice-link"
+              onClick={() => {
+                setHelpTopic(notice.help!);
+                setNotice(null);
+              }}
+            >
+              More info
+            </button>
+          )}
           {notice.action && (
             <button
               className="notice-action"
@@ -680,6 +743,8 @@ export default function App() {
           <button onClick={() => setNotice(null)} aria-label="Dismiss">×</button>
         </div>
       )}
+
+      {helpTopic && <HelpDialog topic={helpTopic} onClose={() => setHelpTopic(null)} />}
 
       {(pendingCloseDocument || quitPending) && (
         <div

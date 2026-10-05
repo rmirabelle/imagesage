@@ -1,3 +1,4 @@
+import { contrastFilterUrl, type ContrastParams } from "./contrast";
 import type { Adjustment, AdjustmentKind, LayerAdjust } from "./types";
 
 /**
@@ -23,10 +24,10 @@ export function moveLayer<T>(history: T[], from: number, to: number, above: bool
 export const adjustList = (adjust: LayerAdjust | undefined): LayerAdjust => Array.isArray(adjust) ? adjust : [];
 
 /** The name of each kind of adjustment, for chips and menus. */
-export const ADJUSTMENT_LABELS: Record<AdjustmentKind, string> = { brightness: "Brightness", hueSaturation: "Hue/Saturation", opacity: "Opacity" };
+export const ADJUSTMENT_LABELS: Record<AdjustmentKind, string> = { brightness: "Brightness", contrast: "Contrast", hueSaturation: "Hue/Saturation", opacity: "Opacity", blur: "Blur" };
 
 /** A number an adjustment keeps. */
-export type AdjustmentField = "value" | "hue" | "saturation";
+export type AdjustmentField = "value" | "hue" | "saturation" | "pivot" | "curve" | "color";
 
 /**
  * The sliders of each kind of adjustment: which number, its name, its range,
@@ -35,15 +36,32 @@ export type AdjustmentField = "value" | "hue" | "saturation";
  */
 export const ADJUSTMENT_FIELDS: Record<AdjustmentKind, { field: AdjustmentField; label: string; min: number; max: number; unit: string; neutral: number; signed: boolean }[]> = {
   brightness: [{ field: "value", label: "Brightness", min: -100, max: 100, unit: "", neutral: 0, signed: true }],
+  /** Only Amount changes the image by itself; the other three shape how it does. */
+  contrast: [
+    { field: "value", label: "Amount", min: -100, max: 100, unit: "", neutral: 0, signed: true },
+    { field: "pivot", label: "Middle", min: 0, max: 100, unit: "%", neutral: 50, signed: false },
+    { field: "curve", label: "Soft ends", min: 0, max: 100, unit: "%", neutral: 50, signed: false },
+    { field: "color", label: "Color", min: 0, max: 100, unit: "%", neutral: 100, signed: false }
+  ],
   hueSaturation: [
     { field: "hue", label: "Hue", min: -180, max: 180, unit: "°", neutral: 0, signed: true },
     { field: "saturation", label: "Saturation", min: -100, max: 100, unit: "", neutral: 0, signed: true }
   ],
-  opacity: [{ field: "value", label: "Opacity", min: 0, max: 100, unit: "%", neutral: 100, signed: false }]
+  opacity: [{ field: "value", label: "Opacity", min: 0, max: 100, unit: "%", neutral: 100, signed: false }],
+  blur: [{ field: "value", label: "Radius", min: 0, max: 100, unit: " px", neutral: 0, signed: false }]
 };
 
-/** One number of an adjustment; a number it does not keep is 0. */
-export const adjustmentNumber = (adjustment: Adjustment, field: AdjustmentField) => adjustment[field] ?? 0;
+/** One number of an adjustment; a number it does not keep is its neutral value, or 0. */
+export const adjustmentNumber = (adjustment: Adjustment, field: AdjustmentField) =>
+  adjustment[field] ?? ADJUSTMENT_FIELDS[adjustment.kind].find((item) => item.field === field)?.neutral ?? 0;
+
+/** The settings of a contrast adjustment, each from 0 to 1 (the amount from -1 to 1). */
+export const contrastParams = (adjustment: Adjustment): ContrastParams => ({
+  amount: adjustmentNumber(adjustment, "value") / 100,
+  pivot: adjustmentNumber(adjustment, "pivot") / 100,
+  curve: adjustmentNumber(adjustment, "curve") / 100,
+  color: adjustmentNumber(adjustment, "color") / 100
+});
 
 /** A new adjustment of a kind, with no change yet. */
 export const newAdjustment = (kind: AdjustmentKind): Adjustment => resetAdjustment({ id: newAdjustmentId(), kind, value: 0 });
@@ -78,6 +96,8 @@ export function adjustmentFilter(adjustment?: Adjustment): string | null {
     ].filter(Boolean);
     return parts.length ? parts.join(" ") : null;
   }
+  if (adjustment.kind === "blur") return adjustment.value > 0 ? `blur(${adjustment.value}px)` : null;
+  if (adjustment.kind === "contrast") return adjustment.value ? contrastFilterUrl(contrastParams(adjustment)) : null;
   return adjustment.value ? `brightness(${(100 + adjustment.value) / 100})` : null;
 }
 

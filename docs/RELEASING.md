@@ -74,8 +74,28 @@ generated executable and NSIS script again after the release build.
 
 Do not run `publish.ps1` until the local installer has passed the manual check.
 The script creates and verifies the new public release first, then deletes every
-older release and its tag. If verification fails before cleanup, older releases
+older release and its tag, except the `model-*` releases. If verification fails before cleanup, older releases
 are intentionally preserved.
+
+## Subject model
+
+The app's local models are downloaded on first use from `model-*` releases in
+this repo. Each is a prerelease that is never marked latest, so the update
+check never sees it, and `publish.ps1` never deletes releases tagged `model-*`.
+`src-tauri/src/models.rs` pins each file's URL, size and SHA-256; a new model
+needs a new `model-*` release and new constants there.
+
+- `model-birefnet-v1`: BiRefNet general (MIT, github.com/ZhengPeng7/BiRefNet),
+  converted to fp16 by `tools/model/convert_birefnet.py`. Used by Select
+  subject and Auto-mask subject (`subject.rs`).
+- `model-sam2-small-v1`: SAM 2.1 Small (Apache 2.0,
+  github.com/facebookresearch/sam2), encoder and decoder exported by
+  `tools/model/export_sam2.py`. Used by click to select (`sam.rs`).
+
+ONNX Runtime is linked into `imagesage.exe`. Its GPU backend, `DirectML.dll`,
+is copied by `src-tauri/build.rs` into `src-tauri/` (gitignored) and bundled as
+a resource, so the installer puts it next to the exe. Check that it is there
+after a local install.
 
 ## Windows PowerShell 5.1 note
 

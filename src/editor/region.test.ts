@@ -13,7 +13,10 @@ import {
   spillAlpha,
   isDownscaled,
   marginFor,
+  alphaBounds,
+  limitToArea,
   maskBounds,
+  padRect,
   pickResolution,
   planRegion,
   selectionBox,
@@ -25,6 +28,7 @@ import {
   fitWithinWholeImageLimits,
   type RegionOptions
 } from "./region";
+import type { MaskStroke } from "./types";
 
 const OPTIONS: RegionOptions = { minMargin: 10, marginRatio: 0.04, maxResolution: "2k" };
 const NO_EDGES = { left: false, top: false, right: false, bottom: false };
@@ -178,6 +182,31 @@ describe("brush mask", () => {
     ];
     expect(maskBounds(strokes, 1000, 1000)).toEqual({ x: 90, y: 90, width: 120, height: 40 });
     expect(maskBounds([strokes[1]], 1000, 1000)).toBeNull();
+  });
+
+  it("finds the area of an alpha channel and pads it inside the image", () => {
+    const alpha = new Uint8ClampedArray([
+      0, 0, 0, 0,
+      0, 200, 7, 0,
+      0, 0, 9, 0
+    ]);
+    expect(alphaBounds(alpha, 4, 3, 8)).toEqual({ x: 1, y: 1, width: 2, height: 2 });
+    expect(alphaBounds(alpha, 4, 3, 201)).toBeNull();
+    expect(padRect({ x: 1, y: 1, width: 2, height: 2 }, 5, 4, 3)).toEqual({ x: 0, y: 0, width: 4, height: 3 });
+    expect(padRect({ x: 10, y: 10, width: 5, height: 5 }, 2, 100, 100)).toEqual({ x: 8, y: 8, width: 9, height: 9 });
+  });
+
+  it("keeps the subject near the marked area and fades it away from it", () => {
+    const subject = new Uint8ClampedArray([255, 255, 255, 200]);
+    expect(Array.from(limitToArea(subject, new Uint8ClampedArray([0, 32, 64, 255])))).toEqual([0, 128, 255, 200]);
+  });
+
+  it("includes a selected subject in the painted area", () => {
+    const subject: MaskStroke = { radius: 0, erase: false, points: [], image: { src: "data:image/png;base64,", bounds: { x: 300, y: 50, width: 100, height: 500 } } };
+    const brush: MaskStroke = { radius: 10, erase: false, points: [[100, 100]] };
+    expect(maskBounds([subject], 1000, 1000)).toEqual({ x: 300, y: 50, width: 100, height: 500 });
+    expect(maskBounds([subject, brush], 1000, 1000)).toEqual({ x: 90, y: 50, width: 310, height: 500 });
+    expect(maskBounds([subject, brush], 350, 1000)).toEqual({ x: 90, y: 50, width: 260, height: 500 });
   });
 
   it("covers the painted area with a square inside the image", () => {

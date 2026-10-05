@@ -1,6 +1,7 @@
+import { contrastFilterIds, contrastTable, parseContrastFilterId } from "./contrast";
 import { pathBetween } from "./history";
 import { GPT_MASK_INSET, blendMasked, blendSelection, selectionAlpha, spillAlpha, type BlendOptions } from "./region";
-import type { EditStep, MaskStroke, Point, Rect, SentRegion, SquareSelection } from "./types";
+import type { BlendMode, EditStep, MaskStroke, Point, Rect, SentRegion, SquareSelection } from "./types";
 
 export const loadImage = (src: string) => new Promise<HTMLImageElement>((resolve, reject) => {
   const image = new Image();
@@ -193,6 +194,8 @@ export interface LayerCanvases {
   mask: HTMLCanvasElement | null;
   maskHides: boolean;
   adjustments: AdjustCanvases[];
+  /** How the finished layer mixes with what is below it; absent is Normal. */
+  blend?: BlendMode;
 }
 
 let layerScratch: HTMLCanvasElement | null = null;
@@ -200,11 +203,69 @@ let adjustScratch: HTMLCanvasElement | null = null;
 const sizedScratch = (canvas: HTMLCanvasElement | null, width: number, height: number) =>
   canvas && canvas.width === width && canvas.height === height ? canvas : createCanvas(width, height);
 
+const SVG_NS = "http://www.w3.org/2000/svg";
+/** An alpha table that keeps every value except 254/255, which becomes fully opaque. */
+const OPAQUE_FIX = Array.from({ length: 256 }, (_, index) => (index >= 254 ? 1 : index / 255).toFixed(4)).join(" ");
+let filterHost: SVGSVGElement | null = null;
+
+/**
+ * Makes sure every contrast filter named in a canvas filter string exists in
+ * the page, because a canvas can use an SVG filter only by its id. The SVG is
+ * not hidden with display:none, which would turn its filters off.
+ */
+export function ensureSvgFilters(filter: string) {
+  for (const id of contrastFilterIds(filter)) {
+    if (window.document.getElementById(id)) continue;
+    const params = parseContrastFilterId(id);
+    if (!params) continue;
+    if (!filterHost) {
+      filterHost = window.document.createElementNS(SVG_NS, "svg");
+      filterHost.setAttribute("aria-hidden", "true");
+      filterHost.setAttribute("style", "position:absolute;width:0;height:0;overflow:hidden;pointer-events:none");
+      window.document.body.appendChild(filterHost);
+    }
+    const table = contrastTable(params).map((value) => value.toFixed(4)).join(" ");
+    const transfer = (input: string, result: string) => `
+      <feComponentTransfer in="${input}" result="${result}">
+        <feFuncR type="table" tableValues="${table}"/>
+        <feFuncG type="table" tableValues="${table}"/>
+        <feFuncB type="table" tableValues="${table}"/>
+      </feComponentTransfer>`;
+    const color = params.color.toFixed(3);
+    const brightnessOnly = (1 - params.color).toFixed(3);
+    /**
+     * "each" applies the curve to each color. "bright" applies it to brightness
+     * only: the curve of the brightness, minus the brightness, is added to every
+     * color (shifted by 0.5, because filter values cannot go below 0). Then
+     * the two are blended by the Color setting. The 0.5 shift leaves opaque
+     * pixels at 254/255, so the last step maps that back to fully opaque.
+     */
+    const element = window.document.createElementNS(SVG_NS, "filter");
+    element.setAttribute("id", id);
+    element.setAttribute("color-interpolation-filters", "sRGB");
+    element.innerHTML = `
+      ${transfer("SourceGraphic", "each")}
+      <feColorMatrix in="SourceGraphic" type="matrix" result="lum"
+        values="0.2126 0.7152 0.0722 0 0  0.2126 0.7152 0.0722 0 0  0.2126 0.7152 0.0722 0 0  0 0 0 1 0"/>
+      ${transfer("lum", "curved")}
+      <feComposite in="curved" in2="lum" operator="arithmetic" k1="0" k2="1" k3="-1" k4="0.5" result="delta"/>
+      <feComposite in="SourceGraphic" in2="delta" operator="arithmetic" k1="0" k2="1" k3="1" k4="-0.5" result="bright"/>
+      <feComposite in="bright" in2="each" operator="arithmetic" k1="0" k2="${brightnessOnly}" k3="${color}" k4="0" result="blended"/>
+      <feComponentTransfer in="blended"><feFuncA type="table" tableValues="${OPAQUE_FIX}"/></feComponentTransfer>`;
+    filterHost.appendChild(element);
+  }
+}
+
 /** Draws one layer onto a context: its image, its adjustments through their masks, then hidden where its mask is clear. */
 export function drawLayer(context: CanvasRenderingContext2D, layer: LayerCanvases) {
   if (!layer.mask && layer.adjustments.every((adjustment) => !adjustment.mask)) {
-    context.filter = layer.adjustments.map((adjustment) => adjustment.filter).join(" ") || "none";
+    const filter = layer.adjustments.map((adjustment) => adjustment.filter).join(" ") || "none";
+    /** The SVG filters must exist before the canvas reads the filter string. */
+    ensureSvgFilters(filter);
+    context.filter = filter;
+    context.globalCompositeOperation = layer.blend ?? "source-over";
     context.drawImage(layer.image, 0, 0);
+    context.globalCompositeOperation = "source-over";
     context.filter = "none";
     return;
   }
@@ -246,6 +307,7 @@ export function drawLayer(context: CanvasRenderingContext2D, layer: LayerCanvase
     /** A canvas cannot filter onto itself, so the adjusted copy is made on a second canvas. */
     const adjusted = adjustScratch.getContext("2d")!;
     adjusted.globalCompositeOperation = "copy";
+    ensureSvgFilters(adjustment.filter);
     adjusted.filter = adjustment.filter;
     adjusted.drawImage(layerScratch, 0, 0);
     adjusted.filter = "none";
@@ -262,7 +324,9 @@ export function drawLayer(context: CanvasRenderingContext2D, layer: LayerCanvase
     scratch.drawImage(layer.mask, 0, 0);
   }
   scratch.globalCompositeOperation = "source-over";
+  context.globalCompositeOperation = layer.blend ?? "source-over";
   context.drawImage(layerScratch, 0, 0);
+  context.globalCompositeOperation = "source-over";
 }
 
 /**
@@ -376,6 +440,41 @@ export function scaledCanvas(source: HTMLCanvasElement, width: number, height: n
   return canvas;
 }
 
+/** Decoded subject masks by their data URL, the most recent few. `loadMaskImages` fills it; drawing needs it filled. */
+const maskImages = new Map<string, HTMLCanvasElement>();
+const MASK_IMAGE_CACHE = 6;
+let tintScratch: HTMLCanvasElement | null = null;
+
+/** Decodes the subject masks of these strokes, so `drawMaskStrokes` can draw them. */
+export async function loadMaskImages(strokes: MaskStroke[]) {
+  for (const stroke of strokes) {
+    if (!stroke.image) continue;
+    const { src } = stroke.image;
+    const canvas = maskImages.get(src) ?? await canvasFromDataUrl(src);
+    maskImages.delete(src);
+    maskImages.set(src, canvas);
+  }
+  while (maskImages.size > MASK_IMAGE_CACHE) maskImages.delete(maskImages.keys().next().value!);
+}
+
+/** Whether every subject mask of these strokes is decoded. */
+export const maskImagesLoaded = (strokes: MaskStroke[]) => strokes.every((stroke) => !stroke.image || maskImages.has(stroke.image.src));
+
+/** A subject mask filled with one color, on a scratch canvas that the next call reuses. */
+function tintedMaskImage(src: string, color: string) {
+  const image = maskImages.get(src);
+  if (!image) throw new Error("The subject mask is not loaded yet.");
+  tintScratch = sizedScratch(tintScratch, image.width, image.height);
+  const context = tintScratch.getContext("2d")!;
+  context.globalCompositeOperation = "copy";
+  context.drawImage(image, 0, 0);
+  context.globalCompositeOperation = "source-in";
+  context.fillStyle = color;
+  context.fillRect(0, 0, image.width, image.height);
+  context.globalCompositeOperation = "source-over";
+  return tintScratch;
+}
+
 /**
  * Draws mask strokes onto a 2D context. The caller sets the transform from
  * image pixels to the target canvas. Paint is opaque here; the editor shows the
@@ -386,6 +485,10 @@ export function drawMaskStrokes(context: CanvasRenderingContext2D, strokes: Mask
   context.lineJoin = "round";
   for (const stroke of strokes) {
     context.globalCompositeOperation = stroke.erase ? "destination-out" : "source-over";
+    if (stroke.image) {
+      context.drawImage(tintedMaskImage(stroke.image.src, color), 0, 0);
+      continue;
+    }
     context.strokeStyle = color;
     context.fillStyle = color;
     context.lineWidth = stroke.radius * 2;

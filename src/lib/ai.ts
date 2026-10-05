@@ -122,7 +122,7 @@ export const clearApiKey = (provider: Provider) => invoke<void>("clear_api_key",
 export const testApiKey = (provider: Provider, key: string | null, model: string) =>
   invoke<string>("test_api_key", { provider, key, model });
 
-export type AiStage = "describing" | "sending" | "generating" | "partial" | "finishing";
+export type AiStage = "describing" | "sending" | "generating" | "partial" | "finishing" | "downloading" | "loading" | "detecting" | "preparing" | "encoding";
 
 export interface AiProgress {
   requestId: string;
@@ -171,10 +171,10 @@ export interface DescribePayload {
 
 export const CANCELLED_MESSAGE = "The request was cancelled.";
 
-async function runWithProgress<T = AiImage>(
-  command: "ai_generate" | "flux_edit" | "ai_edit_whole" | "ai_edit_masked" | "describe_scene",
+export async function runWithProgress<T = AiImage>(
+  command: "ai_generate" | "flux_edit" | "ai_edit_whole" | "ai_edit_masked" | "describe_scene" | "model_download" | "subject_mask" | "sam_encode",
   requestId: string,
-  payload: GeneratePayload | EditPayload | WholeEditPayload | MaskedEditPayload | DescribePayload,
+  payload: GeneratePayload | EditPayload | WholeEditPayload | MaskedEditPayload | DescribePayload | Record<string, unknown>,
   onProgress: (progress: AiProgress) => void
 ) {
   const stop = await listen<AiProgress>("ai-progress", (event) => {
@@ -208,8 +208,10 @@ export const describeScene = (requestId: string, payload: DescribePayload, onPro
 /**
  * A request can be cancelled only before the service accepts it. From
  * "generating" on, the service finishes and charges whether or not ImageSage waits.
+ * Local subject work can always be cancelled.
  */
-export const canCancel = (stage: AiStage | null) => stage === null || stage === "describing" || stage === "sending";
+const CANCELLABLE: (AiStage | null)[] = [null, "describing", "sending", "downloading", "loading", "detecting", "preparing"];
+export const canCancel = (stage: AiStage | null) => CANCELLABLE.includes(stage);
 
 export const cancelAiRequest = (requestId: string) => invoke<void>("ai_cancel", { requestId });
 
@@ -223,6 +225,11 @@ export const stageLabel = (stage: AiStage | null, service = "OpenAI") => {
     case "generating": return "Generating…";
     case "partial": return "Refining…";
     case "finishing": return "Stitching…";
+    case "downloading": return "Downloading the model…";
+    case "loading": return "Loading the model…";
+    case "preparing": return "Preparing the image…";
+    case "encoding": return "Making the video…";
+    case "detecting": return "Finding the subject…";
     default: return "Preparing…";
   }
 };

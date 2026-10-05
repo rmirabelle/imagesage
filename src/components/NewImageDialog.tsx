@@ -219,12 +219,13 @@ export function NewImageDialog({ settings, connected, onRequestConnect, onSettin
           {(busy || partial || error) && (
             <section className="new-image-preview">
               {partial ? <img src={partial} alt="Partial preview" /> : <div className="new-image-preview-empty" />}
+              {/* Status and errors float centered over the preview, like the editor's messages. */}
               {busy && (
-                <div className="new-image-status" role="status">
-                  <SpinnerGap className="spin" size={18} /> {stageLabel(stage)}
+                <div className="preview-alert" role="status">
+                  <SpinnerGap className="spin" size={18} /> <span>{stageLabel(stage)}</span>
                 </div>
               )}
-              {error && <div className="settings-check error"><WarningCircle size={16} weight="fill" /><span>{error}</span></div>}
+              {error && <div className="preview-alert error" role="alert"><WarningCircle size={18} weight="fill" /><span>{error}</span></div>}
             </section>
           )}
         </div>

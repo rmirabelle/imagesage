@@ -17,7 +17,8 @@
   `Invoke-Native` helper. Windows PowerShell 5.1 otherwise aborts on harmless
   stderr output (see `docs/RELEASING.md`).
 - The publish workflow intentionally deletes superseded releases only after the
-  new release and its installer asset pass verification.
+  new release and its installer asset pass verification. It never deletes
+  `model-*` releases; they hold the subject model.
 
 ## Development process
 
@@ -29,6 +30,11 @@
 - All AI HTTP calls live in Rust: OpenAI creates new images (`src-tauri/src/openai.rs`),
   FLUX Fill edits selections (`src-tauri/src/flux.rs`). Both API keys
   stay in Windows Credential Manager and never reach the webview.
+- Local AI masks run through ONNX Runtime: subject detection with BiRefNet in
+  `src-tauri/src/subject.rs`, click to select with SAM 2.1 in
+  `src-tauri/src/sam.rs`. `src-tauri/src/models.rs` downloads the models on
+  first use from this repo's `model-*` releases, which `publish.ps1` keeps;
+  see `docs/RELEASING.md`.
 - Region math and blending live in `src/editor/region.ts` and are unit-tested
   (`npm test`). Keep them free of DOM code.
 - In managed Codex sessions, prefer process-local Git `safe.directory` variables

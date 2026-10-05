@@ -1,4 +1,4 @@
-import type { Adjustment, DocumentOrigin, EditStep, LayerAdjust, MaskStroke, SentRegion, SquareSelection } from "./types";
+import type { Adjustment, DocumentOrigin, EditStep, LayerAdjust, MaskImage, MaskStroke, SentRegion, SquareSelection } from "./types";
 
 export const IMAGESAGE_DOCUMENT_FORMAT = "imagesage-document";
 /** Version 2 stores steps as layers; version 1 (before/after tiles) still opens. */
@@ -107,6 +107,24 @@ const parseAdjustment = (value: unknown, fallbackId: string): Adjustment | undef
     const percent = optionalAdjustNumber(value.value, 100);
     return { id, kind: "opacity", value: percent === undefined ? 100 : Math.max(0, percent), ...flags };
   }
+  if (value.kind === "blur") {
+    return { id, kind: "blur", value: Math.max(0, optionalAdjustNumber(value.value, 100) ?? 0), ...flags };
+  }
+  if (value.kind === "contrast") {
+    const percent = (field: unknown, fallback: number) => {
+      const number = optionalAdjustNumber(field, 100);
+      return number === undefined ? fallback : Math.max(0, number);
+    };
+    return {
+      id,
+      kind: "contrast",
+      value: optionalAdjustNumber(value.value, 100) ?? 0,
+      pivot: percent(value.pivot, 50),
+      curve: percent(value.curve, 50),
+      color: percent(value.color, 100),
+      ...flags
+    };
+  }
   if (value.kind === "hueSaturation") {
     return { id, kind: "hueSaturation", value: 0, hue: optionalAdjustNumber(value.hue, 180) ?? 0, saturation: optionalAdjustNumber(value.saturation, 100) ?? 0, ...flags };
   }
@@ -139,11 +157,21 @@ const optionalCost = (value: Record<string, unknown>) =>
 const isPoint = (value: unknown): value is [number, number] =>
   Array.isArray(value) && value.length === 2 && value.every((part) => typeof part === "number" && Number.isFinite(part));
 
+const parseMaskImage = (value: unknown): MaskImage | undefined => {
+  if (!isRecord(value) || typeof value.src !== "string" || !value.src.startsWith("data:image/png;base64,") || !isRecord(value.bounds)) return undefined;
+  const { x, y, width, height } = value.bounds;
+  const numbers = [x, y, width, height];
+  if (!numbers.every((part) => typeof part === "number" && Number.isFinite(part))) return undefined;
+  return { src: value.src, bounds: { x: x as number, y: y as number, width: width as number, height: height as number } };
+};
+
 /** Reads a saved brush mask; drops anything malformed rather than failing the whole document. */
 const parseMask = (value: unknown): MaskStroke[] | undefined => {
   if (!Array.isArray(value)) return undefined;
   const strokes = value.flatMap((stroke): MaskStroke[] => {
     if (!isRecord(stroke) || !Array.isArray(stroke.points) || typeof stroke.radius !== "number") return [];
+    const image = parseMaskImage(stroke.image);
+    if (image) return [{ radius: 0, erase: stroke.erase === true, points: [], image }];
     const points = stroke.points.filter(isPoint);
     return points.length ? [{ radius: stroke.radius, erase: stroke.erase === true, points }] : [];
   });
@@ -178,6 +206,7 @@ const parseStep = (value: unknown): ManifestStep => {
     ...optionalStrings(value, ["before", "after", "layer", "layerMask"]),
     ...(value.maskHides === true ? { maskHides: true } : {}),
     ...(value.hidden === true ? { hidden: true } : {}),
+    ...(value.blend === "screen" || value.blend === "overlay" ? { blend: value.blend } : {}),
     ...(value.maskOff === true ? { maskOff: true } : {}),
     ...(typeof value.name === "string" && value.name ? { name: value.name } : {}),
     ...(parseAdjust(value.adjust) ? { adjust: parseAdjust(value.adjust) } : {}),
