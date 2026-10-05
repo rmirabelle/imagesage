@@ -37,6 +37,7 @@ const SECTIONS: { title: string; shortcuts: Shortcut[] }[] = [
       { keys: [["X"]], action: "Swap the brush between Show and Hide" },
       { keys: [["Alt"]], action: "Hold to paint the other of Show and Hide" },
       { keys: [["R"]], action: "Show or hide the red mask view" },
+      { keys: [["Ctrl", "I"]], action: "Invert the mask" },
       { keys: [["Ctrl", "Z"]], action: "Undo a mask change" },
       { keys: [["Ctrl", "Y"], ["Ctrl", "R"]], action: "Redo a mask change" },
       { keys: [["Esc"]], action: "Turn off the Mask tool" }

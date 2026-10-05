@@ -157,7 +157,7 @@ function UpdateSection({
       <div className="about-update-result">
         <div className="about-update-status"><CircleNotch className="spin" size={16} /> Downloading version {state.info.latestVersion}{percent === null ? "…" : ` — ${percent}%`}</div>
         <div className="about-update-progress"><i style={{ width: `${percent ?? 10}%` }} /></div>
-        <small>The installer will open when the download finishes. ImageSage will close automatically.</small>
+        <small>When the download finishes, ImageSage closes, installs the update with no setup pages, and opens again.</small>
       </div>
     );
   }

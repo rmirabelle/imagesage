@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -100,6 +100,21 @@ export default function App() {
     setKeyStatuses((current) => ({ ...current, [provider]: status }));
   }, []);
   const [notice, setNotice] = useState<Notice>(null);
+  /** The middle of the active image's work area, where messages show; null centers them in the window. */
+  const [noticeCenter, setNoticeCenter] = useState<{ left: number; top: number } | null>(null);
+  useLayoutEffect(() => {
+    if (!notice) return;
+    const place = () => {
+      const area = activeDocumentId
+        ? window.document.querySelector<HTMLElement>(`#image-panel-${CSS.escape(activeDocumentId)} .editor-workspace`)
+        : null;
+      const rect = area?.getBoundingClientRect();
+      setNoticeCenter(rect && rect.width > 0 && rect.height > 0 ? { left: rect.left + rect.width / 2, top: rect.top + rect.height / 2 } : null);
+    };
+    place();
+    window.addEventListener("resize", place);
+    return () => window.removeEventListener("resize", place);
+  }, [notice, activeDocumentId]);
   const [aboutOpen, setAboutOpen] = useState(false);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const [openDialogOpen, setOpenDialogOpen] = useState(false);
@@ -697,7 +712,7 @@ export default function App() {
       </div>
 
       {notice && (
-        <div className={`notice ${notice.tone}`} onPointerEnter={() => setNoticeHovered(true)} onPointerLeave={() => setNoticeHovered(false)}>
+        <div className={`notice ${notice.tone}`} style={noticeCenter ?? undefined} onPointerEnter={() => setNoticeHovered(true)} onPointerLeave={() => setNoticeHovered(false)}>
           {notice.tone === "success" ? <CheckCircle size={19} weight="fill" /> : notice.tone === "warning" ? <Warning size={19} weight="fill" /> : <WarningCircle size={19} weight="fill" />}
           <span>{notice.message}</span>
           {notice.action && (

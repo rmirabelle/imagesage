@@ -90,6 +90,7 @@ Image Sage.
 | `X` | Swap the mask brush between Show and Hide |
 | `Alt` (held) | Paint the other of Show and Hide (Mask) |
 | `R` | Show or hide the red mask view |
+| `Ctrl+I` | Invert the selected mask (Mask tool on) |
 | `Ctrl+Z` / `Ctrl+Y` (or `Ctrl+R`) | Undo / redo a mask change |
 | `Esc` | Turn off the Mask tool, or cancel Regenerate |
 | `Enter` / `Esc` | Apply / cancel a Transform |

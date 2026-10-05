@@ -1074,7 +1074,7 @@ select option:disabled { color: #777d8e; }
 .notice {
   position: fixed;
   z-index: 100;
-  /* Every message sits in the middle of the window. */
+  /* Every message sits in the middle of the image area; App sets left and top. With no image open, it sits in the middle of the window. */
   top: 50%;
   left: 50%;
   transform: translate(-50%, -50%);

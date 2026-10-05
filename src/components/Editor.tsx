@@ -232,6 +232,43 @@ const setPrepTarget = (prep: MaskPrep, mask: HTMLCanvasElement | null, hides: bo
     adjustment.hides = hides;
   }
 };
+/** Largest side of the small copy that `maskCoverage` reads. */
+const COVERAGE_PROBE_SIDE = 256;
+/**
+ * Whether a mask shows its whole layer, hides all of it, or neither. It reads
+ * a small copy of the mask, so it stays fast for large images. With `hides`,
+ * the painted area is the hidden one.
+ */
+const maskCoverage = (mask: HTMLCanvasElement, hides: boolean): "shows-all" | "hides-all" | "mixed" => {
+  const scale = Math.min(1, COVERAGE_PROBE_SIDE / Math.max(mask.width, mask.height));
+  const probe = createCanvas(Math.max(1, Math.round(mask.width * scale)), Math.max(1, Math.round(mask.height * scale)));
+  const context = probe.getContext("2d", { willReadFrequently: true })!;
+  context.imageSmoothingEnabled = true;
+  context.imageSmoothingQuality = "high";
+  context.drawImage(mask, 0, 0, probe.width, probe.height);
+  const pixels = context.getImageData(0, 0, probe.width, probe.height).data;
+  let lowest = 255;
+  let highest = 0;
+  for (let index = 3; index < pixels.length; index += 4) {
+    lowest = Math.min(lowest, pixels[index]);
+    highest = Math.max(highest, pixels[index]);
+    if (lowest < 255 && highest > 0) return "mixed";
+  }
+  /** Fully painted, or not painted at all. */
+  if (lowest === 255) return hides ? "hides-all" : "shows-all";
+  return hides ? "shows-all" : "hides-all";
+};
+/**
+ * The brush mode that can change a mask: Hide when the mask shows its whole
+ * layer, Show when it hides all of it, else null (both modes can change it).
+ * A part without a mask gets one from the first stroke, so it has no forced mode.
+ */
+const forcedMaskMode = (prep: MaskPrep): boolean | null => {
+  const { mask, hides } = prepTarget(prep);
+  if (!mask) return null;
+  const coverage = maskCoverage(mask, hides);
+  return coverage === "shows-all" ? false : coverage === "hides-all" ? true : null;
+};
 /** The prepared layer, ready to draw. */
 const prepLayer = (prep: MaskPrep): LayerCanvases => ({
   image: prep.image,
@@ -925,6 +962,8 @@ export function Editor({
         if (cancelled || maskStrokeRef.current || gradientRef.current) return;
         Object.assign(prepared, parts);
         redrawLayerMaskRef.current();
+        const forced = forcedMaskMode(prepared);
+        if (forced !== null) setMaskShows(forced);
       })().catch(() => { /* Painting waits until the mask is ready. */ });
       return () => { cancelled = true; };
     }
@@ -941,6 +980,8 @@ export function Editor({
       if (cancelled) return;
       maskPrepRef.current = { ...parts, below, above };
       redrawLayerMaskRef.current();
+      const forced = forcedMaskMode(maskPrepRef.current);
+      if (forced !== null) setMaskShows(forced);
     })().catch(() => { /* Painting waits until the layers are ready. */ });
     return () => { cancelled = true; };
   }, [compositeOf, decodeLayer, imageDocument.base, imageDocument.baseAdjust, imageDocument.history, imageDocument.historyIndex, imageDocument.id, imageDocument.surface, isMaskTool, layerCanvases, targetPart]);
@@ -1947,6 +1988,11 @@ export function Editor({
         event.preventDefault();
         if (documentRef.current.historyIndex > 0) void startResize(documentRef.current.historyIndex);
       }
+      /** Ctrl+I inverts the mask the Mask tool paints, as in Photoshop. */
+      if (event.ctrlKey && event.key.toLowerCase() === "i" && !typing && isMaskTool && targetPart) {
+        event.preventDefault();
+        void partAction(documentRef.current.historyIndex, targetPart, "mask-invert");
+      }
       /** Ctrl+J duplicates the selected layer, as in Photoshop. */
       if (event.ctrlKey && event.key.toLowerCase() === "j" && !typing) {
         event.preventDefault();
@@ -2327,7 +2373,16 @@ export function Editor({
         return;
       }
       /** Alt does the other one of Show and Hide while it is held. */
-      const shows = maskShows !== event.altKey;
+      let shows = maskShows !== event.altKey;
+      /**
+       * A mask that shows its whole layer can only be painted to hide, and one
+       * that hides all of it only to show; the mode switches by itself.
+       */
+      const forced = forcedMaskMode(prep);
+      if (forced !== null && forced !== shows) {
+        shows = forced;
+        if (!event.altKey) setMaskShows(forced);
+      }
       /**
        * A part without a mask gets an empty one. Painting Show then shows (or
        * applies) only what is painted; painting Hide hides only what is painted.
@@ -2761,7 +2816,8 @@ export function Editor({
             note: `${formatElapsed(now - job.startedAt)}${replaced ? ` · replaces ${replaced.name || "a layer"}` : ""}`,
             onCancel: canCancel(job.stage) ? () => cancelJob(job.requestId) : undefined,
             selected: job.requestId === selectedJob,
-            onSelect: () => setSelectedJob(job.requestId)
+            onSelect: () => setSelectedJob(job.requestId),
+            ...(job.replaceId ? { replaces: job.replaceId } : {})
           };
         })}
         thumbnails={thumbnails}

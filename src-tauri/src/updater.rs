@@ -190,12 +190,20 @@ fn emit_progress(app: &AppHandle, downloaded: u64, total: u64) {
     );
 }
 
+/**
+ * NSIS flags for an unattended upgrade, as in DB Sage: `/P` (passive) skips
+ * every page and takes the default choices (uninstall the old version, keep
+ * app data), and `/R` starts the app again when the install finishes.
+ */
+const INSTALLER_ARGS: [&str; 2] = ["/P", "/R"];
+
 #[cfg(windows)]
 fn launch_detached(path: &PathBuf) -> Result<()> {
     use std::os::windows::process::CommandExt;
     const DETACHED_PROCESS: u32 = 0x0000_0008;
     const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
     std::process::Command::new(path)
+        .args(INSTALLER_ARGS)
         .creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP)
         .spawn()
         .with_context(|| format!("spawn {}", path.display()))?;
@@ -205,6 +213,7 @@ fn launch_detached(path: &PathBuf) -> Result<()> {
 #[cfg(not(windows))]
 fn launch_detached(path: &PathBuf) -> Result<()> {
     std::process::Command::new(path)
+        .args(INSTALLER_ARGS)
         .spawn()
         .with_context(|| format!("spawn {}", path.display()))?;
     Ok(())

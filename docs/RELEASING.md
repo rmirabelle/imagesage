@@ -23,9 +23,13 @@ XSage desktop applications:
   rerun offers repair/reinstall or uninstall; a newer manual installer offers the
   upgrade flow. Windows Settings also contains the normal uninstall entry.
 - ImageSage is a normal windowed application: closing its window quits it (after
-  an unsaved-work prompt). The installer template is copied unchanged from
-  IconSage (`D:/Code/IconSage/src-tauri/installer.nsi`). In-app updates exit
-  ImageSage before launching setup.
+  an unsaved-work prompt). The installer template is copied from IconSage
+  (`D:/Code/IconSage/src-tauri/installer.nsi`) with one change, the same as DB
+  Sage's: in passive mode (`/P`), `PageLeaveReinstall` takes the first choice
+  (uninstall the old version, keep app data) without showing the page.
+- In-app updates exit ImageSage, then run setup with `/P /R`: no setup pages,
+  and the app starts again when the install finishes. Passive mode still
+  creates the Start Menu and desktop shortcuts with the explicit icon path.
 - The OpenAI API key is entered by the user at runtime and stored in Windows
   Credential Manager. No key or token is ever embedded in the binary.
 

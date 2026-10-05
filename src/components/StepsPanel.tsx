@@ -99,7 +99,8 @@ interface Props {
 }
 
 /** An AI edit that is still running: its status, prompt, a short note (time, what it replaces), and Cancel while possible. */
-export type PendingLayer = { id: string; status: string; prompt: string; note: string; onCancel?: () => void; selected: boolean; onSelect: () => void };
+/** A running AI edit. `replaces` is the id of the layer a regenerate replaces; its row takes that layer's place in the list. */
+export type PendingLayer = { id: string; status: string; prompt: string; note: string; onCancel?: () => void; selected: boolean; onSelect: () => void; replaces?: string };
 
 /** A layer being dragged to a new place: where it started, and where it would land. */
 type LayerDrag = { from: number; pointerId: number; startY: number; moved: boolean; to: number | null; above: boolean };
@@ -700,7 +701,7 @@ export const StepsPanel = memo(function StepsPanel({ documentId, origin, baseAdj
         ? item(part, "mask-toggle", <Prohibit size={15} />, maskOff ? "Enable mask" : "Disable mask")
         : item(part, part === "mask" ? "add-mask" : "mask-add", <MaskIcon size={15} />, "Add mask", { note: part === "mask" ? "Ctrl+M · hides all" : "hides all" }),
       item(part, "click-select", <CursorClick size={15} />, "Click to select…", { note: "click the image" }),
-      ...(hasMask ? [item(part, "mask-invert", <CircleHalf size={15} />, "Invert mask")] : []),
+      ...(hasMask ? [item(part, "mask-invert", <CircleHalf size={15} />, "Invert mask", { note: "Ctrl+I" })] : []),
       ...(hasMask ? [item(part, "mask-copy", <Copy size={15} />, "Copy mask")] : []),
       ...(canPasteMask ? [item(part, "mask-paste", <ClipboardText size={15} />, "Paste mask", { note: hasMask ? "replaces this one" : undefined })] : []),
       item(part, "linear", <Gradient size={15} />, "Linear gradient", { note: "drag on image" }),
@@ -720,6 +721,32 @@ export const StepsPanel = memo(function StepsPanel({ documentId, origin, baseAdj
       item(part, "delete", <Trash size={15} />, `Delete ${name.toLowerCase()}`, { danger: true })
     ];
   };
+
+  /** The row of a running AI edit: its stage, prompt, time, and a Cancel button while it can still be cancelled. */
+  const renderPending = (item: PendingLayer) => (
+    <li key={item.id} className={`steps-row pending-row ${item.selected ? "active" : ""}`} aria-busy="true" onClick={item.onSelect}>
+      <span className="steps-eye-spacer" aria-hidden="true" />
+      <div className="steps-card">
+        <div className="steps-item" data-help={`${item.prompt}
+
+Click to show its progress on the image.`}>
+          <span className="steps-thumb pending-thumb"><SpinnerGap className="spin" size={22} /></span>
+          <span className="steps-text">
+            <strong className="steps-name">{item.status}</strong>
+            <span className="steps-prompt">{item.prompt}</span>
+            <small>{item.note}</small>
+          </span>
+        </div>
+        {item.onCancel && (
+          <div className="layer-strip">
+            <button className="layer-strip-add" onClick={(event) => { event.stopPropagation(); item.onCancel?.(); }} data-help="Cancel this AI edit">
+              <StopCircle size={12} weight="bold" /> <span>Cancel</span>
+            </button>
+          </div>
+        )}
+      </div>
+    </li>
+  );
 
   return (
     collapsed ? (
@@ -791,33 +818,14 @@ export const StepsPanel = memo(function StepsPanel({ documentId, origin, baseAdj
         </button>
       </div>
       <ol className="steps-list" ref={listRef}>
-        {pending.map((item) => (
-          <li key={item.id} className={`steps-row pending-row ${item.selected ? "active" : ""}`} aria-busy="true" onClick={item.onSelect}>
-            <span className="steps-eye-spacer" aria-hidden="true" />
-            <div className="steps-card">
-              <div className="steps-item" data-help={`${item.prompt}
-
-Click to show its progress on the image.`}>
-                <span className="steps-thumb pending-thumb"><SpinnerGap className="spin" size={22} /></span>
-                <span className="steps-text">
-                  <strong className="steps-name">{item.status}</strong>
-                  <span className="steps-prompt">{item.prompt}</span>
-                  <small>{item.note}</small>
-                </span>
-              </div>
-              {item.onCancel && (
-                <div className="layer-strip">
-                  <button className="layer-strip-add" onClick={(event) => { event.stopPropagation(); item.onCancel?.(); }} data-help="Cancel this AI edit">
-                    <StopCircle size={12} weight="bold" /> <span>Cancel</span>
-                  </button>
-                </div>
-              )}
-            </div>
-          </li>
-        ))}
+        {/* New edits wait at the top; a regenerate waits in the place of the layer it replaces. */}
+        {pending.filter((item) => !item.replaces || !shownNodes.some((node) => history[node - 1]?.id === item.replaces)).map(renderPending)}
         {searchTerm && !shownNodes.length && <li className="steps-empty">No layers match “{search.trim()}”.</li>}
         {shownNodes.map((node) => {
           const step = node > 0 ? history[node - 1] : null;
+          /** While a regenerate runs, its waiting row replaces the old layer's row; the old layer comes back if it fails. */
+          const replacing = step ? pending.find((item) => item.replaces === step.id) : undefined;
+          if (replacing) return renderPending(replacing);
           const prompt = step
             ? step.prompt
             : origin.kind === "generated" ? origin.prompt : origin.fileName || "Opened image";

@@ -302,7 +302,16 @@ Function PageReinstallUpdateSelection
   ${EndIf}
 FunctionEnd
 Function PageLeaveReinstall
-  ${NSD_GetState} $R2 $R1
+  ; Passive installs (ImageSage's in-app updater) take the first radio choice
+  ; without showing the page: reinstall the same version in place, or
+  ; uninstall the previous version before installing the new one. The
+  ; uninstaller also runs passively, so its "Delete app data" box stays
+  ; unchecked and user data is kept.
+  ${If} $PassiveMode = 1
+    StrCpy $R1 1
+  ${Else}
+    ${NSD_GetState} $R2 $R1
+  ${EndIf}
 
   ; If migrating from Wix, always uninstall
   ${If} $WixMode = 1
