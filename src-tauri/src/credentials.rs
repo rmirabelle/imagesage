@@ -7,27 +7,24 @@ use serde::Deserialize;
  */
 const SERVICE: &str = "ImageSage";
 
-/// Which service a key belongs to: OpenAI creates new images, FLUX edits selections.
+/// Which service a key belongs to: OpenAI creates new images and makes every edit.
 #[derive(Clone, Copy, Deserialize, PartialEq, Debug)]
 #[serde(rename_all = "lowercase")]
 pub enum Provider {
     #[serde(rename = "openai")]
     OpenAi,
-    Flux,
 }
 
 impl Provider {
     fn account(self) -> &'static str {
         match self {
             Provider::OpenAi => "openai-api-key",
-            Provider::Flux => "flux-api-key",
         }
     }
 
     fn label(self) -> &'static str {
         match self {
             Provider::OpenAi => "OpenAI",
-            Provider::Flux => "FLUX",
         }
     }
 }
@@ -59,16 +56,16 @@ pub fn validate_key_shape(key: &str) -> Result<(), String> {
     Ok(())
 }
 
+/**
+ * The start and end of a key, so the user can tell keys apart. A real OpenAI
+ * key shows its first 12 and last 8 characters; a short key shows at most a
+ * quarter of its length at each end, so most of it stays hidden.
+ */
 fn hint(key: &str) -> String {
-    let tail: String = key
-        .chars()
-        .rev()
-        .take(4)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .collect();
-    let head: String = key.chars().take(3).collect();
+    let chars: Vec<char> = key.chars().collect();
+    let quarter = chars.len() / 4;
+    let head: String = chars[..quarter.min(12)].iter().collect();
+    let tail: String = chars[chars.len() - quarter.min(8)..].iter().collect();
     format!("{head}…{tail}")
 }
 
@@ -112,6 +109,22 @@ pub fn clear_api_key(provider: Provider) -> Result<(), String> {
 }
 
 /// Checks a key (the given one, or the saved one) and returns a short success message.
+/// The page where users create and manage their OpenAI API keys.
+const OPENAI_API_KEYS_URL: &str = "https://platform.openai.com/api-keys";
+
+/**
+ * Opens the OpenAI API keys page in the default browser. The URL is fixed
+ * here, so the webview cannot use this command to open any other address.
+ */
+#[tauri::command]
+pub fn open_api_keys_page() -> Result<(), String> {
+    std::process::Command::new("explorer")
+        .arg(OPENAI_API_KEYS_URL)
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| format!("Could not open the browser: {error}"))
+}
+
 #[tauri::command]
 pub async fn test_api_key(
     provider: Provider,
@@ -128,7 +141,6 @@ pub async fn test_api_key(
     };
     match provider {
         Provider::OpenAi => crate::openai::test_key(key, &model).await,
-        Provider::Flux => crate::flux::test_key(key).await,
     }
 }
 
@@ -138,7 +150,9 @@ mod tests {
 
     #[test]
     fn hint_shows_only_the_ends_of_the_key() {
-        assert_eq!(hint("sk-proj-abcdefghijklmnop1234"), "sk-…1234");
+        assert_eq!(hint("sk-proj-abcdefghijklmnop1234"), "sk-proj…nop1234");
+        let long = format!("sk-proj-ABCD{}wxyz5678", "x".repeat(140));
+        assert_eq!(hint(&long), "sk-proj-ABCD…wxyz5678");
     }
 
     #[test]
@@ -155,9 +169,6 @@ mod tests {
             serde_json::from_str::<Provider>("\"openai\"").unwrap(),
             Provider::OpenAi
         );
-        assert_eq!(
-            serde_json::from_str::<Provider>("\"flux\"").unwrap(),
-            Provider::Flux
-        );
+        assert!(serde_json::from_str::<Provider>("\"flux\"").is_err());
     }
 }

@@ -20,10 +20,11 @@ export default defineConfig({
     host: host || false,
     hmr: host ? { protocol: "ws", host, port: HMR_PORT } : undefined,
     /**
-     * Saved documents and exported images in the project folder must not
-     * reload the dev app (Tailwind also skips what .gitignore lists).
+     * Saved documents, exported images and Markdown docs in the project
+     * folder must not reload the dev app (Tailwind also skips what
+     * .gitignore lists, and looks only in src; see index.css).
      */
-    watch: { ignored: ["**/src-tauri/**", "**/*.imagesage", "**/*.imagesage.saving", ...["png", "jpg", "jpeg"].map((extension) => `${ROOT}/*.${extension}`)] }
+    watch: { ignored: ["**/src-tauri/**", "**/*.md", "**/*.imagesage", "**/*.imagesage.saving", ...["png", "jpg", "jpeg"].map((extension) => `${ROOT}/*.${extension}`)] }
   },
   preview: {
     port: PREVIEW_PORT,

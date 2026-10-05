@@ -5,10 +5,9 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { save } from "@tauri-apps/plugin-dialog";
 import { CheckCircle, FolderOpen, MagicWand, SpinnerGap, Warning, WarningCircle, X } from "@phosphor-icons/react";
 import { AboutDialog } from "./components/AboutDialog";
+import { ShortcutsDialog } from "./components/ShortcutsDialog";
 import { ConnectDialog, type SettingsSection } from "./components/ConnectDialog";
 import { Editor, type Notice } from "./components/Editor";
-import { HelpDialog } from "./components/HelpDialog";
-import type { HelpTopic } from "./lib/help";
 import { NewImageDialog, type GeneratedImage } from "./components/NewImageDialog";
 import { OpenDialog } from "./components/OpenDialog";
 import { Tooltips } from "./components/Tooltips";
@@ -22,7 +21,6 @@ import type { DocumentOrigin } from "./editor/types";
 import {
   DISCONNECTED,
   apiKeyStatus,
-  fluxCredits,
   loadAiSettings,
   storeAiSettings,
   type AiSettings,
@@ -30,7 +28,7 @@ import {
   type KeyStatuses,
   type Provider
 } from "./lib/ai";
-import { fluxCreditsToUsd, formatUsd, refreshPrices } from "./lib/pricing";
+import { formatUsd, refreshPrices, spendTotals, usePrices } from "./lib/pricing";
 import { listRecovery, removeRecovery, saveDocumentFile, saveRecovery } from "./lib/recovery";
 import { checkForUpdate, getAppVersion, type UpdateInfo } from "./lib/updater";
 
@@ -61,9 +59,7 @@ type DocumentPanelProps = {
   document: ImageDocument;
   active: boolean;
   settings: AiSettings;
-  connected: boolean;
   openaiConnected: boolean;
-  onRequestConnect: () => void;
   onRequestOpenAiSettings: () => void;
   onSettingsChange: (settings: AiSettings) => void;
   onCommit: (id: string, patch: Partial<Pick<ImageDocument, "base" | "baseAdjust" | "history" | "historyIndex">>, markDirty?: boolean) => void;
@@ -73,7 +69,6 @@ type DocumentPanelProps = {
   onExport: (id: string, dataUrl: string, format: SaveFormat) => Promise<boolean>;
   onExportVideo: (id: string, video: Blob) => Promise<boolean>;
   onNotice: (notice: Notice) => void;
-  onEditFinished: () => void;
 };
 
 const DocumentPanel = memo(function DocumentPanel(props: DocumentPanelProps) {
@@ -96,22 +91,17 @@ export default function App() {
   documentsRef.current = documents;
   const [activeDocumentId, setActiveDocumentId] = useState<string | null>(null);
   const [settings, setSettingsState] = useState<AiSettings>(loadAiSettings);
-  const [keyStatuses, setKeyStatuses] = useState<KeyStatuses>({ openai: DISCONNECTED, flux: DISCONNECTED });
+  const [keyStatuses, setKeyStatuses] = useState<KeyStatuses>({ openai: DISCONNECTED });
   const openaiReady = keyStatuses.openai.connected;
-  const [credits, setCredits] = useState<number | null>(null);
-  const refreshCredits = useCallback(() => {
-    if (!isTauri()) return;
-    fluxCredits().then(setCredits).catch(() => setCredits(null));
-  }, []);
-  useEffect(() => {
-    if (keyStatuses.flux.connected) refreshCredits();
-    else setCredits(null);
-  }, [keyStatuses.flux.connected, refreshCredits]);
+  /** Re-renders when prices or the spend record change. */
+  usePrices();
+  const spend = spendTotals();
   const setKeyStatus = useCallback((provider: Provider, status: ApiKeyStatus) => {
     setKeyStatuses((current) => ({ ...current, [provider]: status }));
   }, []);
   const [notice, setNotice] = useState<Notice>(null);
   const [aboutOpen, setAboutOpen] = useState(false);
+  const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const [openDialogOpen, setOpenDialogOpen] = useState(false);
   const [newImageOpen, setNewImageOpen] = useState(false);
   const [connectSection, setConnectSection] = useState<SettingsSection | null>(null);
@@ -129,7 +119,6 @@ export default function App() {
   const showNotice = useCallback((next: Notice) => setNotice(next), []);
   /** The pointer is over the notice; it does not close by itself meanwhile. */
   const [noticeHovered, setNoticeHovered] = useState(false);
-  const [helpTopic, setHelpTopic] = useState<HelpTopic | null>(null);
   /** Success and warning messages close by themselves; errors stay until closed. */
   useEffect(() => {
     if (!notice || notice.tone === "error" || noticeHovered) return;
@@ -253,9 +242,7 @@ export default function App() {
   useEffect(() => {
     if (!isTauri()) return;
     let cancelled = false;
-    for (const provider of ["openai", "flux"] as const) {
-      apiKeyStatus(provider).then((status) => { if (!cancelled) setKeyStatus(provider, status); }).catch(() => {});
-    }
+    apiKeyStatus("openai").then((status) => { if (!cancelled) setKeyStatus("openai", status); }).catch(() => {});
     void refreshPrices();
     getAppVersion().then((version) => { if (!cancelled) setAppVersion(version); }).catch(() => {});
     checkForUpdate().then((info) => { if (!cancelled && info) setStartupUpdate(info); }).catch(() => {});
@@ -429,7 +416,7 @@ export default function App() {
       setNewImageOpen(false);
       showNotice({
         tone: "success",
-        message: `Image generated${image.cost !== null ? ` for ${formatUsd(image.cost)}` : ""}. Select a square or paint a mask to refine part of it.`
+        message: `Image generated${image.cost !== null ? ` for ${formatUsd(image.cost)}` : ""}. Describe a change to edit it, then mask the new layer to keep only the part you want.`
       });
     } catch (error) {
       showNotice({ tone: "error", message: String(error) });
@@ -600,17 +587,12 @@ export default function App() {
     return () => { delete devWindow.imagesageDevOpen; };
   }, [addDocument]);
 
-  /** Opens Settings on the page that needs attention: a missing key first, else OpenAI. */
-  const openConnect = useCallback(() => {
-    setConnectSection(keyStatuses.openai.connected && !keyStatuses.flux.connected ? "edits" : "new");
-  }, [keyStatuses]);
-  const openEditSettings = useCallback(() => setConnectSection("edits"), []);
-  const openNewImageSettings = useCallback(() => setConnectSection("new"), []);
+  const openConnect = useCallback(() => setConnectSection("new"), []);
   const dirtyCount = documents.filter(isDocumentDirty).length;
 
   return (
     <main className="app-shell">
-      <TitleBar updateAvailable={startupUpdate !== null} onAbout={() => setAboutOpen(true)} />
+      <TitleBar updateAvailable={startupUpdate !== null} onAbout={() => setAboutOpen(true)} onShortcuts={() => setShortcutsOpen(true)} />
       <div className="app-bar">
         <button className="primary-action" type="button" onClick={() => setNewImageOpen(true)} data-help="Generate a new image from a prompt">
           <MagicWand size={16} weight="bold" /> New from prompt
@@ -619,13 +601,16 @@ export default function App() {
           {opening ? <SpinnerGap className="spin" size={16} /> : <FolderOpen size={16} weight="bold" />} Open
         </button>
         <div className="app-bar-spacer" />
-        <button className="ai-status" type="button" onClick={openConnect} data-help="Settings: API keys and AI options">
+        <button
+          className="ai-status"
+          type="button"
+          onClick={openConnect}
+          data-help={`Settings: OpenAI API key. Charged through ImageSage today: ${formatUsd(spend.today)}. This month: ${formatUsd(spend.month)}. Use in other apps is not counted.`}
+        >
           <span className="ai-status-dots">
             <span className={openaiReady ? "connected" : ""}><i aria-hidden="true" /> OpenAI</span>
-            <span className={keyStatuses.flux.connected ? "connected" : ""} data-help={credits !== null ? `FLUX balance: ${credits.toFixed(1)} credits` : undefined}>
-              <i aria-hidden="true" /> FLUX{credits !== null ? ` · ${formatUsd(fluxCreditsToUsd(credits))} left` : ""}
-            </span>
           </span>
+          {spend.month > 0 && <span className="ai-status-spend">{formatUsd(spend.month)} this month</span>}
         </button>
       </div>
 
@@ -676,7 +661,7 @@ export default function App() {
             <div className="empty-glow" />
             <div className="empty-icon"><img src="/icon.ico" alt="" /></div>
             <h1>Prompt. Refine. Repeat.</h1>
-            <p className="empty-copy">Generate or open an image. Mask an area to refine without re-generating the whole image. Step through your history.</p>
+            <p className="empty-copy">Open or generate images in layers. Edit using professional-grade tools. Export images and slideshows.</p>
             <div className="empty-actions">
               <button className="button primary large" onClick={() => setNewImageOpen(true)}>
                 <MagicWand size={19} weight="bold" /> New from prompt
@@ -685,9 +670,9 @@ export default function App() {
                 <FolderOpen size={19} weight="bold" /> Open image
               </button>
             </div>
-            {(!openaiReady || !keyStatuses.flux.connected) && isTauri() && (
+            {!openaiReady && isTauri() && (
               <button className="empty-connect" onClick={openConnect}>
-                Add your {[!openaiReady && "OpenAI", !keyStatuses.flux.connected && "FLUX"].filter(Boolean).join(" and ")} API key to start
+                Add your OpenAI API key to start
               </button>
             )}
           </section>
@@ -698,10 +683,8 @@ export default function App() {
             document={document}
             active={document.id === activeDocumentId}
             settings={settings}
-            connected={keyStatuses.flux.connected}
             openaiConnected={keyStatuses.openai.connected}
-            onRequestConnect={openEditSettings}
-            onRequestOpenAiSettings={openNewImageSettings}
+            onRequestOpenAiSettings={openConnect}
             onSettingsChange={setSettings}
             onCommit={commitHistory}
             onBusyChange={setBusy}
@@ -709,7 +692,6 @@ export default function App() {
             onExport={exportImage}
             onExportVideo={exportVideo}
             onNotice={showNotice}
-            onEditFinished={refreshCredits}
           />
         ))}
       </div>
@@ -718,17 +700,6 @@ export default function App() {
         <div className={`notice ${notice.tone}`} onPointerEnter={() => setNoticeHovered(true)} onPointerLeave={() => setNoticeHovered(false)}>
           {notice.tone === "success" ? <CheckCircle size={19} weight="fill" /> : notice.tone === "warning" ? <Warning size={19} weight="fill" /> : <WarningCircle size={19} weight="fill" />}
           <span>{notice.message}</span>
-          {notice.help && (
-            <button
-              className="notice-link"
-              onClick={() => {
-                setHelpTopic(notice.help!);
-                setNotice(null);
-              }}
-            >
-              More info
-            </button>
-          )}
           {notice.action && (
             <button
               className="notice-action"
@@ -744,7 +715,6 @@ export default function App() {
         </div>
       )}
 
-      {helpTopic && <HelpDialog topic={helpTopic} onClose={() => setHelpTopic(null)} />}
 
       {(pendingCloseDocument || quitPending) && (
         <div
@@ -797,7 +767,7 @@ export default function App() {
               <p>
                 The image is {pendingImport.surface.width} × {pendingImport.surface.height}. GPT Image can edit a whole image of up to
                 3840 px per side and about 8.3 megapixels. Scale it down to {pendingImport.target.width} × {pendingImport.target.height}?
-                If you keep the full size, Square and Brush edits still work; whole-image edits are sent at a smaller size and come back softer.
+                If you keep the full size, edits are sent at a smaller size and come back softer.
               </p>
             </div>
             <div className="confirm-actions">
@@ -814,7 +784,7 @@ export default function App() {
         <NewImageDialog
           settings={settings}
           connected={openaiReady}
-          onRequestConnect={openNewImageSettings}
+          onRequestConnect={openConnect}
           onSettingsChange={setSettings}
           onCancel={() => setNewImageOpen(false)}
           onGenerated={(image) => void addGenerated(image)}
@@ -824,9 +794,8 @@ export default function App() {
         <ConnectDialog
           initialSection={connectSection}
           statuses={keyStatuses}
-          settings={settings}
+          generateModel={settings.generateModel}
           onStatusChange={setKeyStatus}
-          onSettingsChange={setSettings}
           onClose={() => setConnectSection(null)}
         />
       )}
@@ -839,6 +808,7 @@ export default function App() {
           }}
         />
       )}
+      {shortcutsOpen && <ShortcutsDialog onClose={() => setShortcutsOpen(false)} />}
       {aboutOpen && (
         <AboutDialog version={appVersion} initialUpdateInfo={startupUpdate} onClose={() => setAboutOpen(false)} />
       )}

@@ -4,10 +4,8 @@ import { useSyncExternalStore } from "react";
 /**
  * Prices come from the official pages, read live at startup and at most every
  * 12 hours: OpenAI's price page (token rates), OpenAI's image guide calculator
- * (token factors per quality, turned into tokens with OpenAI's own formula),
- * and BFL's price page (FLUX per-image prices). A built-in copy is used when
- * the pages cannot be read. For FLUX, your last real charge for a resolution
- * wins, because BFL can charge less than its list price during promotions.
+ * (token factors per quality, turned into tokens with OpenAI's own formula).
+ * A built-in copy is used when the pages cannot be read.
  */
 
 interface TokenRates {
@@ -21,22 +19,18 @@ type TokenFactors = Record<string, Record<string, number>>;
 interface PriceList {
   openai: Record<string, TokenRates>;
   openaiTokenFactors: TokenFactors;
-  flux: Record<string, number>;
   problems: string[];
 }
 
 interface PriceBook {
   openai: Record<string, TokenRates>;
   openaiTokenFactors: TokenFactors;
-  flux: Record<string, number>;
   /** When the official pages were read; null when only the built-in table is in use. */
   checkedAt: string | null;
   problems: string[];
 }
 
 interface LearnedPrices {
-  /** The last real charge per FLUX resolution, in US dollars. */
-  flux: Record<string, number>;
   /**
    * Input image tokens per megapixel from the last whole-image edit, by model.
    * OpenAI does not publish this count for GPT Image 2 and 2.5.
@@ -55,7 +49,6 @@ const BUILT_IN: PriceBook = {
     "gpt-image-2": { low: 16, medium: 48, high: 96 },
     "gpt-image-2.5": { low: 16, medium: 24, high: 48, xhigh: 64, max: 96 }
   },
-  flux: { "768sq": 0.041, "1k": 0.048, "2k": 0.1, "4k": 0.607 },
   checkedAt: null,
   problems: []
 };
@@ -63,8 +56,10 @@ const BUILT_IN: PriceBook = {
 const CACHE_KEY = "imagesage.price-book";
 const LEARNED_KEY = "imagesage.learned-prices";
 const REFRESH_AFTER_MS = 12 * 60 * 60 * 1000;
-/** One BFL credit is one US cent. */
-const USD_PER_FLUX_CREDIT = 0.01;
+/** What ImageSage was charged, per local day ("2026-10-05": dollars). */
+const SPEND_KEY = "imagesage.spend-by-day";
+/** Days kept in the spend record: enough for this month and the month before. */
+const SPEND_DAYS_KEPT = 62;
 
 const readJson = <T,>(key: string): T | null => {
   try {
@@ -86,9 +81,13 @@ const cached = readJson<PriceBook>(CACHE_KEY);
 let book: PriceBook = cached?.openaiTokenFactors ? cached : BUILT_IN;
 const storedLearned = readJson<Partial<LearnedPrices>>(LEARNED_KEY);
 let learned: LearnedPrices = {
-  flux: storedLearned?.flux ?? {},
   openaiInputTokensPerMegapixel: storedLearned?.openaiInputTokensPerMegapixel ?? {}
 };
+const storedSpend = readJson<Record<string, unknown>>(SPEND_KEY);
+let spendByDay: Record<string, number> = Object.fromEntries(
+  Object.entries(storedSpend && typeof storedSpend === "object" ? storedSpend : {})
+    .filter((entry): entry is [string, number] => typeof entry[1] === "number" && Number.isFinite(entry[1]))
+);
 let version = 0;
 const listeners = new Set<() => void>();
 
@@ -118,8 +117,7 @@ export async function refreshPrices(force = false) {
     book = {
       openai: { ...BUILT_IN.openai, ...book.openai, ...live.openai },
       openaiTokenFactors: Object.keys(live.openaiTokenFactors).length ? live.openaiTokenFactors : book.openaiTokenFactors,
-      flux: { ...BUILT_IN.flux, ...book.flux, ...live.flux },
-      checkedAt: Object.keys(live.openai).length || Object.keys(live.flux).length ? new Date().toISOString() : book.checkedAt,
+      checkedAt: Object.keys(live.openai).length ? new Date().toISOString() : book.checkedAt,
       problems: live.problems
     };
   } catch (error) {
@@ -127,15 +125,6 @@ export async function refreshPrices(force = false) {
   }
   writeJson(CACHE_KEY, book);
   changed();
-}
-
-/** A short, plain description of where the prices come from. */
-export function priceSourceNote() {
-  const date = book.checkedAt ? new Date(book.checkedAt).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" }) : null;
-  const base = date
-    ? `Prices from the official OpenAI and BFL price pages, checked ${date}.`
-    : `Built-in prices from ${BUILT_IN_PRICES_DATE}; the price pages could not be read.`;
-  return `${base} The real charge appears after each request.`;
 }
 
 export const priceProblems = () => book.problems;
@@ -197,27 +186,6 @@ export function learnWholeEditInput(usage: unknown, model: string, size: string)
   changed();
 }
 
-/** FLUX price for one edit at a resolution: your last real charge, else the price page, else an estimate. */
-export function fluxPrice(resolution: string): { usd: number; estimated: boolean } {
-  const charged = learned.flux[resolution];
-  if (charged !== undefined) return { usd: charged, estimated: false };
-  const listed = book.flux[resolution] ?? BUILT_IN.flux[resolution];
-  if (listed !== undefined) return { usd: listed, estimated: false };
-  /** A size missing from the price page sits between its neighbours. */
-  const known = Object.entries({ ...BUILT_IN.flux, ...book.flux });
-  const edge = (id: string) => ({ "768sq": 768, "1k": 1024, "1.5k": 1536, "2k": 2048, "4k": 4096 }[id] ?? 2048);
-  const target = edge(resolution);
-  const below = known.filter(([id]) => edge(id) < target).sort((a, b) => edge(b[0]) - edge(a[0]))[0];
-  const above = known.filter(([id]) => edge(id) > target).sort((a, b) => edge(a[0]) - edge(b[0]))[0];
-  if (below && above) {
-    const share = (target - edge(below[0])) / (edge(above[0]) - edge(below[0]));
-    return { usd: below[1] + (above[1] - below[1]) * share, estimated: true };
-  }
-  return { usd: (below ?? above)?.[1] ?? 0.1, estimated: true };
-}
-
-export const estimateFluxEdit = (resolution: string) => fluxPrice(resolution).usd;
-
 /** The real charge from OpenAI's `usage` block, or null when it is missing. */
 export function openAiActualCost(usage: unknown, model = "gpt-image-2"): number | null {
   if (!usage || typeof usage !== "object") return null;
@@ -231,24 +199,28 @@ export function openAiActualCost(usage: unknown, model = "gpt-image-2"): number 
   const textInput = number(details.text_tokens) || Math.max(0, number(record.input_tokens) - imageInput);
   return (textInput * rates.textInput + imageInput * rates.imageInput + output * rates.imageOutput) / 1_000_000;
 }
-/**
- * The real charge from BFL's `cost` field. BFL documents credits (one cent
- * each) but not the unit of this field, so the reading closer to the estimate
- * wins. The charge is remembered for the next estimate at this resolution.
- */
-export function fluxActualCost(cost: unknown, estimate: number, resolution?: string): number | null {
-  if (typeof cost !== "number" || !Number.isFinite(cost) || cost < 0) return null;
-  const asCredits = cost * USD_PER_FLUX_CREDIT;
-  const usd = Math.abs(asCredits - estimate) <= Math.abs(cost - estimate) ? asCredits : cost;
-  if (resolution) {
-    learned = { ...learned, flux: { ...learned.flux, [resolution]: usd } };
-    writeJson(LEARNED_KEY, learned);
-    changed();
-  }
-  return usd;
+/** A local date as "2026-10-05". */
+const dayKey = (date: Date) =>
+  `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+
+/** Adds a real charge to today's spend; days older than `SPEND_DAYS_KEPT` are dropped. */
+export function recordSpend(usd: number | null) {
+  if (usd === null || !(usd > 0)) return;
+  const today = dayKey(new Date());
+  const oldest = dayKey(new Date(Date.now() - SPEND_DAYS_KEPT * 24 * 60 * 60 * 1000));
+  const next = { ...spendByDay, [today]: (spendByDay[today] ?? 0) + usd };
+  spendByDay = Object.fromEntries(Object.entries(next).filter(([day]) => day >= oldest));
+  writeJson(SPEND_KEY, spendByDay);
+  changed();
 }
 
-export const fluxCreditsToUsd = (credits: number) => credits * USD_PER_FLUX_CREDIT;
+/** What ImageSage was charged today and this month (local time). Re-render with `usePrices`. */
+export function spendTotals() {
+  const today = dayKey(new Date());
+  const month = today.slice(0, 7);
+  const monthTotal = Object.entries(spendByDay).reduce((sum, [day, usd]) => day.startsWith(month) ? sum + usd : sum, 0);
+  return { today: spendByDay[today] ?? 0, month: monthTotal };
+}
 
 /** "$0.048", "$0.21", "$1.35"; tiny amounts keep three decimals. */
 export function formatUsd(value: number) {

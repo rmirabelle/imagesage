@@ -4,13 +4,12 @@ use std::{collections::BTreeMap, time::Duration};
 use crate::requests;
 
 /**
- * Live price lists. Neither company has a pricing API, but both publish their
- * official price pages as Markdown. ImageSage reads the tables it needs from
- * those pages; when a page cannot be read, the app falls back to its built-in
- * table and says so.
+ * Live price lists. OpenAI has no pricing API, but it publishes its official
+ * price pages as Markdown. ImageSage reads the tables it needs from those
+ * pages; when a page cannot be read, the app falls back to its built-in table
+ * and says so.
  */
 const OPENAI_PRICING_URL: &str = "https://developers.openai.com/api/docs/pricing.md";
-const BFL_PRICING_URL: &str = "https://docs.bfl.ml/quick_start/pricing.md";
 /// The image guide page; its token calculator script holds the per-quality factors.
 const OPENAI_GUIDE_URL: &str = "https://developers.openai.com/api/docs/guides/image-generation";
 const OPENAI_SITE: &str = "https://developers.openai.com";
@@ -36,8 +35,6 @@ pub struct PriceList {
      * output tokens with the calculator's own formula.
      */
     openai_token_factors: BTreeMap<String, BTreeMap<String, f64>>,
-    /// FLUX 3 Image price per image in US dollars, by resolution id such as `2k`.
-    flux: BTreeMap<String, f64>,
     /// Plain messages for each page that could not be read.
     problems: Vec<String>,
 }
@@ -114,35 +111,6 @@ fn parse_openai(markdown: &str) -> BTreeMap<String, TokenRates> {
             ))
         })
         .collect()
-}
-
-/// Reads the price table under the "FLUX 3 Image" heading.
-fn parse_flux(markdown: &str) -> BTreeMap<String, f64> {
-    let mut prices = BTreeMap::new();
-    let mut in_section = false;
-    for line in markdown.lines() {
-        let trimmed = line.trim();
-        if trimmed.starts_with('#') {
-            in_section = trimmed.trim_start_matches('#').trim() == "FLUX 3 Image";
-            continue;
-        }
-        if !in_section || !trimmed.starts_with('|') {
-            continue;
-        }
-        let row = cells(trimmed);
-        if row.len() < 3 {
-            continue;
-        }
-        let id = row[0].to_ascii_lowercase();
-        let looks_like_resolution = id
-            .chars()
-            .next()
-            .is_some_and(|first| first.is_ascii_digit());
-        if let (true, Some(price)) = (looks_like_resolution, money(&row[row.len() - 1])) {
-            prices.insert(id, price);
-        }
-    }
-    prices
 }
 
 /**
@@ -224,9 +192,8 @@ async fn fetch_text(client: &reqwest::Client, url: &str) -> Result<String, Strin
 #[tauri::command]
 pub async fn fetch_prices() -> Result<PriceList, String> {
     let client = requests::client()?;
-    let (openai_page, flux_page, token_factors) = tokio::join!(
+    let (openai_page, token_factors) = tokio::join!(
         fetch_text(&client, OPENAI_PRICING_URL),
-        fetch_text(&client, BFL_PRICING_URL),
         fetch_token_factors(&client)
     );
     let mut problems = Vec::new();
@@ -243,19 +210,6 @@ pub async fn fetch_prices() -> Result<PriceList, String> {
                 .into(),
         );
     }
-    let flux = match flux_page {
-        Ok(page) => parse_flux(&page),
-        Err(error) => {
-            problems.push(format!("FLUX price page: {error}"));
-            BTreeMap::new()
-        }
-    };
-    if flux.is_empty() && !problems.iter().any(|problem| problem.starts_with("FLUX")) {
-        problems.push(
-            "FLUX price page: no FLUX 3 Image prices found; the page layout may have changed."
-                .into(),
-        );
-    }
     let openai_token_factors = match token_factors {
         Ok(factors) => factors,
         Err(error) => {
@@ -266,7 +220,6 @@ pub async fn fetch_prices() -> Result<PriceList, String> {
     Ok(PriceList {
         openai,
         openai_token_factors,
-        flux,
         problems,
     })
 }
@@ -295,28 +248,6 @@ Batch
 | gpt-image-2 | Text | $2.50 | $0.625 | - |
 ";
 
-    const FLUX_SAMPLE: &str = "\
-### FLUX 3 Video
-
-| Mode | `hd` | `fhd` |
-| - | - | - |
-| Text to Video (`t2v`) | \\$0.17/s | \\$0.29/s |
-
-### FLUX 3 Image
-
-| `resolution` | Output size | Price per image |
-| - | - | - |
-| `768sq` | 768 × 768 | \\$0.041 |
-| `1k` | About 1 megapixel | \\$0.048 |
-| `2k` | About 4 megapixels | \\$0.100 |
-
-### FLUX Tools (Video)
-
-| Variant | Price |
-| - | - |
-| FLUX Video Upscale (Precise) | \\$0.07 per megapixel-second |
-";
-
     #[test]
     fn reads_standard_openai_rates_and_skips_batch() {
         let rates = parse_openai(OPENAI_SAMPLE);
@@ -340,13 +271,6 @@ Batch
         assert_eq!(factors["gpt-image-2.5"]["xhigh"], 64.0);
     }
 
-    #[test]
-    fn reads_only_the_flux_3_image_table() {
-        let prices = parse_flux(FLUX_SAMPLE);
-        assert_eq!(prices.len(), 3);
-        assert_eq!(prices["768sq"], 0.041);
-        assert_eq!(prices["2k"], 0.1);
-    }
 }
 
 #[cfg(test)]
@@ -357,7 +281,6 @@ mod live {
     async fn live_price_pages() {
         let prices = super::fetch_prices().await.unwrap();
         println!("openai: {:?}", prices.openai);
-        println!("flux: {:?}", prices.flux);
         println!("factors: {:?}", prices.openai_token_factors);
         println!("problems: {:?}", prices.problems);
         assert!(prices.problems.is_empty());

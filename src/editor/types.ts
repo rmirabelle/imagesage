@@ -19,20 +19,19 @@ export interface SquareSelection {
 
 /**
  * What is really sent to the model: a square around the selection with a
- * context margin, the size it is uploaded at, and the output size asked for.
+ * context margin, and the size it is uploaded at.
  */
 export interface SentRegion extends Rect {
   margin: number;
   requestWidth: number;
   requestHeight: number;
-  resolution?: string;
 }
 
 export type DocumentOrigin =
   | { kind: "generated"; prompt: string; model: string; quality: string; size: string; cost?: number }
   | { kind: "imported"; fileName: string };
 
-/** A detected subject used as a mask stroke: a PNG data URL at the image size whose alpha is the subject, and the subject's area. */
+/** A selected area used as a mask stroke: a PNG data URL at the image size whose alpha is the area, and its bounds. */
 export interface MaskImage {
   src: string;
   bounds: Rect;
@@ -135,16 +134,3 @@ export type LayerAdjust = Adjustment[];
 
 /** A part of a layer that has a mask: "mask" is the layer mask; any other value is the id of an adjustment. */
 export type LayerPart = string;
-
-/** An element FLUX must keep unchanged; `bbox` is `[top, left, bottom, right]` on a 0–1000 scale. */
-export interface SceneAnchor {
-  id: string;
-  bbox: number[];
-  desc: string;
-}
-
-/** A description of the sent region, written by a vision model for the FLUX layout prompt. */
-export interface SceneDescription {
-  caption: string;
-  anchors: SceneAnchor[];
-}

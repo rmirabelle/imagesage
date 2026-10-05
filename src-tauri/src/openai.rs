@@ -343,37 +343,22 @@ pub struct WholeEditRequest {
     quality: String,
     size: String,
     image_png: String,
-    /// "transparent" asks for a PNG with a see-through background.
-    #[serde(default)]
-    background: Option<String>,
 }
 
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MaskedEditRequest {
-    #[serde(flatten)]
-    edit: WholeEditRequest,
-    mask_png: String,
-}
-
-fn png_part(data_url: &str, label: &str, file_name: &'static str) -> Result<reqwest::multipart::Part, String> {
-    reqwest::multipart::Part::bytes(requests::decode_png(data_url, label)?)
-        .file_name(file_name)
-        .mime_str("image/png")
-        .map_err(|error| format!("Could not prepare the upload: {error}"))
-}
-
-/// Sends an Images API edit; the mask, when given, marks the area GPT Image may change.
-async fn run_edit(
+/// Edits the whole image with GPT Image through the Images API edit endpoint.
+#[tauri::command]
+pub async fn ai_edit_whole(
     app: AppHandle,
     requests: State<'_, AiRequests>,
     request: WholeEditRequest,
-    mask_png: Option<String>,
 ) -> Result<AiImage, String> {
     let key = credentials::api_key(Provider::OpenAi)?;
-    let part = png_part(&request.image_png, "image", "image.png")?;
+    let part = reqwest::multipart::Part::bytes(requests::decode_png(&request.image_png, "image")?)
+        .file_name("image.png")
+        .mime_str("image/png")
+        .map_err(|error| format!("Could not prepare the upload: {error}"))?;
     let simulated = simulated_failure(&request.prompt);
-    let mut form = reqwest::multipart::Form::new()
+    let form = reqwest::multipart::Form::new()
         .text("model", request.model)
         .text("prompt", request.prompt)
         .text("size", request.size)
@@ -383,161 +368,12 @@ async fn run_edit(
         .text("stream", "true")
         .text("partial_images", PARTIAL_IMAGES.to_string())
         .part("image", part);
-    if let Some(background) = request.background {
-        form = form.text("background", background);
-    }
-    if let Some(mask) = mask_png {
-        form = form.part("mask", png_part(&mask, "mask", "mask.png")?);
-    }
     let builder = requests::client()?
         .post(format!("{API_BASE}/images/edits"))
         .bearer_auth(key)
         .multipart(form);
     requests::run_cancellable(app, &requests, request.request_id, move |reporter| {
         send_or_simulate(reporter, builder, simulated)
-    })
-    .await
-}
-
-/// Edits an image with GPT Image through the Images API edit endpoint, without a mask:
-/// the whole image, or a region for a transparent overlay.
-#[tauri::command]
-pub async fn ai_edit_whole(
-    app: AppHandle,
-    requests: State<'_, AiRequests>,
-    request: WholeEditRequest,
-) -> Result<AiImage, String> {
-    run_edit(app, requests, request, None).await
-}
-
-/// Edits a square region with GPT Image; the mask's transparent pixels mark the area to change.
-#[tauri::command]
-pub async fn ai_edit_masked(
-    app: AppHandle,
-    requests: State<'_, AiRequests>,
-    request: MaskedEditRequest,
-) -> Result<AiImage, String> {
-    run_edit(app, requests, request.edit, Some(request.mask_png)).await
-}
-
-/// The vision model that describes a region before a FLUX edit.
-const DESCRIBE_MODEL: &str = "gpt-5-mini";
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct DescribeRequest {
-    request_id: String,
-    instruction: String,
-    /// The edit box as `[top, left, bottom, right]` on a 0–1000 scale.
-    edit_box: [u16; 4],
-    image_png: String,
-}
-
-/// A scene description for a FLUX 3 Image layout prompt.
-#[derive(serde::Serialize, Deserialize)]
-pub struct SceneDescription {
-    caption: String,
-    anchors: Vec<SceneAnchor>,
-}
-
-#[derive(serde::Serialize, Deserialize)]
-pub struct SceneAnchor {
-    id: String,
-    bbox: Vec<i64>,
-    desc: String,
-}
-
-fn describe_instructions(instruction: &str, edit_box: [u16; 4]) -> String {
-    let [top, left, bottom, right] = edit_box;
-    format!(
-        "You prepare an image edit for the FLUX 3 Image model. The image is a crop of a larger picture. \
-The edit box is [{top}, {left}, {bottom}, {right}] as [top, left, bottom, right] on a 0-1000 scale from the top-left corner. \
-The edit instruction for the box is: \"{instruction}\".\n\
-Return JSON with two fields.\n\
-caption: one paragraph of 60 to 120 words that describes the whole image as it will look after the edit: the scene, the main elements and where they are, materials, colors, lighting, time of day, camera view, and style.\n\
-anchors: 4 to 6 important elements that must stay unchanged. Choose elements outside the edit box or crossing its border, nearest to the box first. \
-Do not list anything the instruction changes. For each anchor give id (short snake_case, for example cabin_1), \
-bbox ([top, left, bottom, right] on the 0-1000 scale, tightly around the element), and desc (one or two sentences: what it is, material, color, lighting, and where it is relative to the edit box)."
-    )
-}
-
-/// The first `output_text` of a Responses API answer.
-fn response_text(value: &Value) -> Option<&str> {
-    value
-        .get("output")?
-        .as_array()?
-        .iter()
-        .filter_map(|item| item.get("content").and_then(Value::as_array))
-        .flatten()
-        .find(|part| part.get("type").and_then(Value::as_str) == Some("output_text"))
-        .and_then(|part| part.get("text").and_then(Value::as_str))
-}
-
-/// Describes the sent region and the elements around the edit box, for a FLUX layout prompt.
-#[tauri::command]
-pub async fn describe_scene(
-    app: AppHandle,
-    requests: State<'_, AiRequests>,
-    request: DescribeRequest,
-) -> Result<SceneDescription, String> {
-    let key = credentials::api_key(Provider::OpenAi)?;
-    requests::decode_png(&request.image_png, "image")?;
-    let anchor_schema = json!({
-        "type": "object",
-        "additionalProperties": false,
-        "required": ["id", "bbox", "desc"],
-        "properties": {
-            "id": { "type": "string" },
-            "bbox": { "type": "array", "items": { "type": "integer" } },
-            "desc": { "type": "string" }
-        }
-    });
-    let body = json!({
-        "model": DESCRIBE_MODEL,
-        "reasoning": { "effort": "low" },
-        "input": [{
-            "role": "user",
-            "content": [
-                { "type": "input_text", "text": describe_instructions(&request.instruction, request.edit_box) },
-                { "type": "input_image", "image_url": request.image_png }
-            ]
-        }],
-        "text": {
-            "format": {
-                "type": "json_schema",
-                "name": "scene_description",
-                "strict": true,
-                "schema": {
-                    "type": "object",
-                    "additionalProperties": false,
-                    "required": ["caption", "anchors"],
-                    "properties": {
-                        "caption": { "type": "string" },
-                        "anchors": { "type": "array", "items": anchor_schema }
-                    }
-                }
-            }
-        }
-    });
-    let builder = requests::client()?
-        .post(format!("{API_BASE}/responses"))
-        .bearer_auth(key)
-        .timeout(Duration::from_secs(120))
-        .json(&body);
-    requests::run_cancellable(app, &requests, request.request_id, move |reporter| async move {
-        reporter.stage("describing");
-        let response = builder.send().await.map_err(|error| transport_error(&error))?;
-        let status = response.status();
-        if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
-            return Err(describe_error(status.as_u16(), &body));
-        }
-        let value: Value = response
-            .json()
-            .await
-            .map_err(|error| format!("OpenAI sent an unreadable answer: {error}"))?;
-        let text = response_text(&value).ok_or_else(|| "OpenAI did not return a scene description.".to_string())?;
-        serde_json::from_str(text).map_err(|error| format!("OpenAI returned an unreadable scene description: {error}"))
     })
     .await
 }

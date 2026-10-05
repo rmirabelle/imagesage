@@ -13,7 +13,7 @@ import {
   type AiSettings,
   type AiStage
 } from "../lib/ai";
-import { estimateOpenAiImage, formatUsd, openAiActualCost, usePrices } from "../lib/pricing";
+import { estimateOpenAiImage, formatUsd, openAiActualCost, recordSpend, usePrices } from "../lib/pricing";
 
 export interface GeneratedImage {
   dataUrl: string;
@@ -109,13 +109,15 @@ export function NewImageDialog({ settings, connected, onRequestConnect, onSettin
         setStage(progress.stage);
         if (progress.partialDataUrl) setPartial(progress.partialDataUrl);
       });
+      const cost = openAiActualCost(result.usage, model);
+      recordSpend(cost);
       onGenerated({
         dataUrl: result.dataUrl,
         prompt: prompt.trim(),
         model,
         quality,
         size: effectiveSize,
-        cost: openAiActualCost(result.usage, model)
+        cost
       });
     } catch (caught) {
       const message = caught instanceof Error ? caught.message : String(caught);

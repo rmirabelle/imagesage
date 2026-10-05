@@ -5,8 +5,6 @@ import {
   ArrowArcLeft,
   ArrowCounterClockwise,
   CaretDoubleLeft,
-  CaretDown,
-  CaretRight,
   Check,
   Checkerboard,
   CircleDashed,
@@ -18,17 +16,14 @@ import {
   CornersOut,
   CursorClick,
   Drop,
-  Eraser,
   Eye,
   EyeSlash,
   Gradient,
   MagnifyingGlass,
-  PencilSimple,
   Plus,
   Prohibit,
   SlidersHorizontal,
   SpinnerGap,
-  Stack,
   StopCircle,
   Sun,
   Trash,
@@ -48,13 +43,13 @@ export type PartAction =
   | "add-blur"
   | "add-hue-saturation"
   | "add-opacity"
-  | "remove-background"
   | "mask-add"
   | "mask-toggle"
   | "mask-invert"
   | "mask-delete"
   | "toggle"
   | "toggle-all"
+  | "delete-all"
   | "reset"
   | "delete"
   | "resize"
@@ -108,9 +103,12 @@ export type PendingLayer = { id: string; status: string; prompt: string; note: s
 
 /** A layer being dragged to a new place: where it started, and where it would land. */
 type LayerDrag = { from: number; pointerId: number; startY: number; moved: boolean; to: number | null; above: boolean };
-/** An open chip menu: for one part of a layer, or (with no part) the add menu. */
-/** `section` picks an adjustment's own items, or the items of its mask. */
-type PartMenu = { node: number; part: LayerPart | null; section: "adjust" | "mask"; x: number; y: number };
+/**
+ * An open chip menu: for one part of a layer, or (with no part) the add menu.
+ * `section` picks an adjustment's own items, the items of its mask, or the
+ * items for all adjustments of the layer.
+ */
+type PartMenu = { node: number; part: LayerPart | null; section: "adjust" | "mask" | "all"; x: number; y: number };
 /** Pointer travel, in CSS pixels, before a press on a layer becomes a drag. */
 const DRAG_THRESHOLD = 5;
 
@@ -204,7 +202,6 @@ function AdjustmentRow({ id, label, min, max, unit, neutral, withSign, value, di
         onPointerUp={(event) => { setDraft(null); event.currentTarget.blur(); }}
         onKeyUp={() => setDraft(null)}
         onBlur={() => setDraft(null)}
-        data-help="Drag to change; double-click to reset"
       />
       <output htmlFor={id}>{withSign ? signed(shown) : shown}{unit}</output>
     </div>
@@ -274,8 +271,6 @@ export const StepsPanel = memo(function StepsPanel({ documentId, origin, baseAdj
   /** The top layer is listed first, like a stack; the original image is at the bottom. */
   const nodes = Array.from({ length: history.length + 1 }, (_, node) => history.length - node);
   const [width, setWidth] = useState(storedWidth);
-  /** The open submenu of the layer menu. */
-  const [submenu_, setSubmenu] = useState<"mask" | "blend" | null>(null);
   /** The layer menu; `blendOnly` (from the blend tag) shows only the blend choices. */
   const [menu, setMenu] = useState<{ node: number; x: number; y: number; blendOnly?: boolean } | null>(null);
   const [partMenu, setPartMenu] = useState<PartMenu | null>(null);
@@ -370,9 +365,9 @@ export const StepsPanel = memo(function StepsPanel({ documentId, origin, baseAdj
   }, [menu, partMenu]);
 
   /** Opens a chip menu under (or, near the bottom of the window, above) its button. */
-  const openPartMenu = (anchor: HTMLElement, node: number, part: LayerPart | null, section: "adjust" | "mask" = "adjust") => {
+  const openPartMenu = (anchor: HTMLElement, node: number, part: LayerPart | null, section: PartMenu["section"] = "adjust") => {
     const rect = anchor.getBoundingClientRect();
-    const height = part === null ? 160 : part === "mask" || section === "mask" ? 230 : 240;
+    const height = section === "all" ? 70 : part === null ? 160 : part === "mask" || section === "mask" ? 230 : 240;
     const y = rect.bottom + 4 + height > window.innerHeight ? Math.max(8, rect.top - height - 4) : rect.bottom + 4;
     setMenu(null);
     setOpenSlider(null);
@@ -515,7 +510,7 @@ export const StepsPanel = memo(function StepsPanel({ documentId, origin, baseAdj
               className="layer-chip-body"
               disabled={disabled}
               onClick={() => onPartAction(node, part, "pick")}
-              data-help={`${label}${off ? " (turned off)" : ""}. Click to paint it with the Mask tool. Right-click or use the arrow for options.`}
+              data-help={`${label}${off ? " (turned off)" : ""}. Click to paint it with the Mask tool. Right-click for options.`}
             >
               <MaskIcon inverted={hides} size={15} />
               {mask && <MaskThumb src={mask} hides={hides} off={maskOff} />}
@@ -542,7 +537,7 @@ export const StepsPanel = memo(function StepsPanel({ documentId, origin, baseAdj
                   }
                   setOpenSlider((open) => open === `${layerKey}:${part}` ? null : `${layerKey}:${part}`);
                 }}
-                data-help={`${label}${off ? " (turned off)" : ""}. Click to show or hide its slider. Right-click or use the arrow for options.`}
+                data-help={`${label}${off ? " (turned off)" : ""}. Click to edit. Right-click for options.`}
               >
                 {adjustment && <AdjustmentIcon adjustment={adjustment} size={14} />}
                 {adjustment && <span className="layer-chip-value">{adjustmentText(adjustment)}</span>}
@@ -567,21 +562,6 @@ export const StepsPanel = memo(function StepsPanel({ documentId, origin, baseAdj
               )}
             </>
           )}
-          <button
-            className="layer-chip-caret"
-            disabled={disabled}
-            aria-label={`${name} options`}
-            aria-haspopup="menu"
-            onPointerDown={(event) => event.stopPropagation()}
-            onClick={(event) => {
-              /** The options menu replaces the open sliders. */
-              setOpenSlider(null);
-              if (partMenu?.node === node && partMenu.part === part && partMenu.section === "adjust") setPartMenu(null);
-              else openPartMenu(event.currentTarget, node, part);
-            }}
-          >
-            <CaretDown size={11} weight="bold" />
-          </button>
         </div>
       );
     };
@@ -599,7 +579,11 @@ export const StepsPanel = memo(function StepsPanel({ documentId, origin, baseAdj
               aria-pressed={!allAdjustmentsOff(adjust)}
               aria-label={allAdjustmentsOff(adjust) ? "Enable all adjustments" : "Disable all adjustments"}
               onClick={() => onPartAction(node, "mask", "toggle-all")}
-              data-help={allAdjustmentsOff(adjust) ? "All adjustments are disabled. Click to enable them again." : "Disable all adjustments of this layer. Click again to enable them."}
+              onContextMenu={(event) => {
+                event.preventDefault();
+                if (!disabled) openPartMenu(event.currentTarget, node, null, "all");
+              }}
+              data-help={allAdjustmentsOff(adjust) ? "All adjustments are disabled. Click to enable them again. Right-click to delete them." : "Disable all adjustments of this layer. Click again to enable them. Right-click to delete them."}
             >
               <SlidersHorizontal size={15} />
             </button>
@@ -615,6 +599,20 @@ export const StepsPanel = memo(function StepsPanel({ documentId, origin, baseAdj
               )}
             </Fragment>
           ))}
+          {/* A layer without a mask offers the layer mask menu here, so it needs no right-click. */}
+          {step && !step.layerMask && (
+            <button
+              className="layer-strip-add"
+              disabled={disabled}
+              aria-haspopup="menu"
+              data-help="Add a layer mask to this layer"
+              onPointerDown={(event) => event.stopPropagation()}
+              onClick={(event) => partMenu?.node === node && partMenu.part === "mask" ? setPartMenu(null) : openPartMenu(event.currentTarget, node, "mask")}
+            >
+              <Plus size={12} weight="bold" />
+              <span>Layer Mask</span>
+            </button>
+          )}
           <button
             className="layer-strip-add"
             disabled={disabled}
@@ -624,7 +622,7 @@ export const StepsPanel = memo(function StepsPanel({ documentId, origin, baseAdj
             onClick={(event) => partMenu?.node === node && partMenu.part === null ? setPartMenu(null) : openPartMenu(event.currentTarget, node, null)}
           >
             <Plus size={12} weight="bold" />
-            {!parts.length && <span>Add adjustment</span>}
+            {!parts.length && <span>Adjustment</span>}
           </button>
         </div>
       </>
@@ -676,16 +674,20 @@ export const StepsPanel = memo(function StepsPanel({ documentId, origin, baseAdj
         {icon} <span className="steps-menu-label">{label}</span>{extra.note && <small>{extra.note}</small>}
       </button>
     );
+    if (open.section === "all") {
+      return [
+        <div key="head" className="steps-menu-head">All adjustments</div>,
+        item("mask", "delete-all", <Trash size={15} />, "Delete all adjustments", { danger: true })
+      ];
+    }
     if (open.part === null) {
       return [
-        <div key="head" className="steps-menu-head">Add to {node > 0 ? step?.name || defaultLayerName(node) : "Original"}</div>,
+        <div key="head" className="steps-menu-head">Adjust {node > 0 ? step?.name || defaultLayerName(node) : "Original"}</div>,
         item("mask", "add-brightness", <Sun size={15} />, "Brightness"),
         item("mask", "add-contrast", <CircleHalfTilt size={15} />, "Contrast"),
         item("mask", "add-blur", <CloudFog size={15} />, "Blur"),
         item("mask", "add-hue-saturation", <Drop size={15} />, "Hue/Saturation"),
         item("mask", "add-opacity", <Checkerboard size={15} />, "Opacity"),
-        /** The original image has no layer menu, so its background removal stays here; other layers use their layer mask menu. */
-        ...(node === 0 ? [item("mask", "remove-background", <Eraser size={15} />, "Auto-mask subject", { note: "adds Opacity" })] : [])
       ];
     }
     const part = open.part;
@@ -697,13 +699,6 @@ export const StepsPanel = memo(function StepsPanel({ documentId, origin, baseAdj
       hasMask
         ? item(part, "mask-toggle", <Prohibit size={15} />, maskOff ? "Enable mask" : "Disable mask")
         : item(part, part === "mask" ? "add-mask" : "mask-add", <MaskIcon size={15} />, "Add mask", { note: part === "mask" ? "Ctrl+M · hides all" : "hides all" }),
-      /**
-       * Any mask can be fitted to the subject. The search covers the area the
-       * mask shows; an adjustment without one uses the layer mask's area.
-       */
-      item(part, "remove-background", <Eraser size={15} />, "Auto-mask subject", {
-        note: hasMask && !maskOff ? "inside this mask" : part !== "mask" && step?.layerMask && !step.maskOff ? "inside layer mask" : "whole layer"
-      }),
       item(part, "click-select", <CursorClick size={15} />, "Click to select…", { note: "click the image" }),
       ...(hasMask ? [item(part, "mask-invert", <CircleHalf size={15} />, "Invert mask")] : []),
       ...(hasMask ? [item(part, "mask-copy", <Copy size={15} />, "Copy mask")] : []),
@@ -749,7 +744,7 @@ export const StepsPanel = memo(function StepsPanel({ documentId, origin, baseAdj
         onPointerCancel={endResize}
       />
       <div className="steps-panel-header" role="toolbar" aria-label="Layers">
-        <span className="steps-panel-title">Layers</span>
+        <span className="steps-panel-title">{history.length + 1} {history.length ? "Layers" : "Layer"}</span>
         <label className={`layers-search ${search ? "has-value" : ""}`} data-help="Filter the layers by name, prompt or model. Esc clears.">
           <MagnifyingGlass size={13} weight="bold" />
           <input
@@ -842,7 +837,7 @@ Click to show its progress on the image.`}>
                   onClick={(event) => onToggleVisible(node, event.ctrlKey)}
                   aria-label={step.hidden ? `Show layer ${node + 1}` : `Hide layer ${node + 1}`}
                   aria-pressed={!step.hidden}
-                  data-help={`${step.hidden ? "Show this layer" : "Hide this layer"}. Ctrl+click shows only this layer; Ctrl+click again brings the others back.`}
+                  data-help={`${step.hidden ? "Show this layer" : "Hide this layer"}.\nCtrl + click to toggle solo`}
                 >
                   {step.hidden ? <EyeSlash size={15} /> : <Eye size={15} />}
                 </button>
@@ -883,17 +878,16 @@ Click to show its progress on the image.`}>
                     onDoubleClick={() => step && setRenaming({ node, value: step.name ?? "" })}
                     onContextMenu={(event) => {
                       event.preventDefault();
-                      if (disabled || !step) return;
+                      if (disabled) return;
                       onSelect(node);
                       setPartMenu(null);
-                      setSubmenu(null);
                       setMenu({ node, x: Math.min(event.clientX, window.innerWidth - 230), y: Math.max(8, Math.min(event.clientY, window.innerHeight - 260)) });
                     }}
                     onPointerDown={(event) => startLayerDrag(event, node)}
                     onPointerMove={moveLayerDrag}
                     onPointerUp={endLayerDrag}
                     onPointerCancel={endLayerDrag}
-                    data-help={step ? "Click to select the layer. Double-click to rename it. Right-click for Rename, Transform, Duplicate, Retry, Delete, the layer mask and Blend. Drag to move the layer." : "The original image. Click to select it."}
+                    data-help={step ? "Double-click to rename layer. Right-click for layer options. Drag up/down to sort." : "The original image. Right-click to duplicate it."}
                   >
                     {renderThumb(node, thumbnail)}
                     <span className="steps-text">
@@ -901,12 +895,13 @@ Click to show its progress on the image.`}>
                       {!step?.name && <span className="steps-prompt">{prompt}</span>}
                       <small>
                         {step ? modelLabel(step.model) : origin.kind === "generated" ? modelLabel(origin.model) : "Original"}
-                        {step?.blend && (
+                        {step && (
                           <span
-                            className="blend-tag"
+                            className={`blend-tag ${step.blend ? "" : "normal"}`}
                             role="button"
                             tabIndex={-1}
-                            data-help="Blend mode. Click to change it."
+                            data-help="Layer blend mode. Click to change"
+                            data-help-one-line
                             onPointerDown={(event) => event.stopPropagation()}
                             onClick={(event) => {
                               event.stopPropagation();
@@ -916,7 +911,7 @@ Click to show its progress on the image.`}>
                               setMenu({ node, x: Math.min(rect.left, window.innerWidth - 170), y: Math.min(rect.bottom + 4, window.innerHeight - 140), blendOnly: true });
                             }}
                           >
-                            {BLEND_LABELS[step.blend]}
+                            {step.blend ? BLEND_LABELS[step.blend] : "Normal"}
                           </span>
                         )}
                       </small>
@@ -940,41 +935,26 @@ Click to show its progress on the image.`}>
         if (menu.blendOnly) {
           return (
             <div className="steps-menu" role="menu" style={{ left: menu.x, top: menu.y }} onPointerDown={(event) => event.stopPropagation()}>
-              <div className="steps-menu-head">Blend</div>
+              <div className="steps-menu-head">Layer blend mode</div>
               {blendItems}
             </div>
           );
         }
-        /** Submenus open to the left when there is no room on the right, as the panel sits at the right edge. */
-        const opensLeft = menu.x + 230 + 240 > window.innerWidth;
-        /** A submenu near the bottom of the window opens upward, from its item's bottom edge. */
-        const opensUp = menu.y + 170 + 360 > window.innerHeight;
-        const submenu = (key: "mask" | "blend", icon: ReactNode, label: string, note: string | null, items: ReactNode) => (
-          <div className="steps-submenu-host" onPointerEnter={() => setSubmenu(key)}>
-            <button role="menuitem" aria-haspopup="menu" aria-expanded={submenu_ === key} className={submenu_ === key ? "open" : ""} onClick={() => setSubmenu(key)}>
-              {icon} <span className="steps-menu-label">{label}</span>{note && <small>{note}</small>}<CaretRight size={12} weight="bold" />
-            </button>
-            {submenu_ === key && (
-              <div className={`steps-menu steps-submenu ${opensLeft ? "left" : ""} ${opensUp ? "up" : ""}`} role="menu">{items}</div>
-            )}
-          </div>
-        );
         const plain = (icon: ReactNode, label: ReactNode, run: () => void, danger = false) => (
-          <button role="menuitem" className={danger ? "danger" : ""} onPointerEnter={() => setSubmenu(null)} onClick={() => { run(); setMenu(null); }}>
+          <button role="menuitem" className={danger ? "danger" : ""} onClick={() => { run(); setMenu(null); }}>
             {icon} {label}
           </button>
         );
         const step = history[menu.node - 1];
         return (
           <div className="steps-menu layer-menu" role="menu" style={{ left: menu.x, top: menu.y }} onPointerDown={(event) => event.stopPropagation()}>
-            {plain(<PencilSimple size={15} />, "Rename", () => setRenaming({ node: menu.node, value: step?.name ?? "" }))}
-            {plain(<CornersOut size={15} />, "Transform", () => onPartAction(menu.node, "mask", "resize"))}
-            {plain(<Copy size={15} />, <>Duplicate <small>Ctrl+J</small></>, () => onPartAction(menu.node, "mask", "duplicate"))}
-            {plain(<ArrowArcLeft size={15} />, "Retry", () => onRetry(menu.node))}
-            {plain(<Trash size={15} />, "Delete", () => onDelete(menu.node), true)}
-            <div className="steps-menu-divider" />
-            {submenu("mask", <MaskIcon size={15} />, "Layer mask", step?.layerMask ? null : "none", renderPartMenu({ node: menu.node, part: "mask", section: "mask", x: 0, y: 0 }).slice(1))}
-            {submenu("blend", <Stack size={15} />, "Blend", currentMode === "normal" ? null : BLEND_LABELS[currentMode], blendItems)}
+            <div className="steps-menu-head">{step ? "Edit layer" : "Original image"}</div>
+            {/* The original image can only be duplicated; the copy is a normal layer. */}
+            {!step && plain(<Copy size={15} />, <>Duplicate <small>Ctrl+J</small></>, () => onPartAction(menu.node, "mask", "duplicate"))}
+            {step && plain(<CornersOut size={15} />, <>Transform <small>Ctrl+T</small></>, () => onPartAction(menu.node, "mask", "resize"))}
+            {step && plain(<Copy size={15} />, <>Duplicate <small>Ctrl+J</small></>, () => onPartAction(menu.node, "mask", "duplicate"))}
+            {step && plain(<ArrowArcLeft size={15} />, "Regenerate", () => onRetry(menu.node))}
+            {step && plain(<Trash size={15} />, <>Delete <small>Del</small></>, () => onDelete(menu.node), true)}
           </div>
         );
       })()}

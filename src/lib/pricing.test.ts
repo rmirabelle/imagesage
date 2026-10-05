@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { estimateFluxEdit, estimateOpenAiImage, fluxActualCost, fluxPrice, formatUsd, openAiActualCost, outputTokens } from "./pricing";
+import { estimateOpenAiImage, formatUsd, openAiActualCost, outputTokens, recordSpend, spendTotals } from "./pricing";
 
 describe("pricing", () => {
   it("matches the token counts and prices OpenAI publishes", () => {
@@ -21,23 +21,20 @@ describe("pricing", () => {
     expect(openAiActualCost(null)).toBeNull();
   });
 
-  it("reads the FLUX cost field as credits or dollars, whichever fits the estimate", () => {
-    expect(fluxActualCost(4.8, estimateFluxEdit("1k"))).toBeCloseTo(0.048, 4);
-    expect(fluxActualCost(0.05, estimateFluxEdit("2k"))).toBeCloseTo(0.05, 4);
-    expect(fluxActualCost("x", 0.05)).toBeNull();
-  });
-
   it("formats small and large amounts", () => {
     expect(formatUsd(0.048)).toBe("$0.048");
     expect(formatUsd(1.349)).toBe("$1.35");
   });
 });
 
-describe("FLUX prices", () => {
-  it("uses the listed price, and estimates sizes missing from the price page", () => {
-    expect(fluxPrice("2k")).toEqual({ usd: 0.1, estimated: false });
-    const between = fluxPrice("1.5k");
-    expect(between.estimated).toBe(true);
-    expect(between.usd).toBeCloseTo(0.074, 3);
+describe("spend record", () => {
+  it("adds real charges to today and this month, and ignores missing charges", () => {
+    const before = spendTotals();
+    recordSpend(0.25);
+    recordSpend(null);
+    recordSpend(0.1);
+    const after = spendTotals();
+    expect(after.today - before.today).toBeCloseTo(0.35, 6);
+    expect(after.month - before.month).toBeCloseTo(0.35, 6);
   });
 });

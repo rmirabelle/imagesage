@@ -1,15 +1,3 @@
-/** Black Forest Labs' mark, from the icon on bfl.ai, drawn in the current text color. */
-export function FluxLogo({ size = 18 }: { size?: number }) {
-  return (
-    <svg width={size} height={size} viewBox="30 30 200 200" fill="none" aria-hidden="true">
-      <path
-        d="M172.047 119.966H172.045V149.393L148.793 182.239V199.317H94.7969L94.7959 199.318H73.9072L73.9082 199.317H32L130.27 60.9777L172.047 119.966ZM228.407 199.316H195.431V182.303L172.047 149.393V119.965L228.407 199.316ZM65.1064 182.238H86.0381L130.268 119.966H151.156L106.927 182.238H127.917L172.044 119.966H151.158L130.27 90.5373L65.1064 182.238Z"
-        fill="currentColor"
-      />
-    </svg>
-  );
-}
-
 /** OpenAI's mark (the knot), from Simple Icons, drawn in the current text color. */
 export function OpenAiMark({ size = 18 }: { size?: number }) {
   return (

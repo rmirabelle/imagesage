@@ -34,17 +34,6 @@ pub struct ModelSpec {
     pub files: &'static [ModelFile],
 }
 
-/// BiRefNet general (MIT), fp16, for Auto-mask subject and Select subject.
-pub const BIREFNET: ModelSpec = ModelSpec {
-    id: "birefnet",
-    files: &[ModelFile {
-        name: "birefnet-general-v1.onnx",
-        url: "https://github.com/rmirabelle/imagesage/releases/download/model-birefnet-v1/birefnet-general-v1.onnx",
-        size: 489_666_838,
-        sha256: "323232ec73a04ac4d0ef8c325a75aa8d69ed7062235a7cf9941769fae4c9709f",
-    }],
-};
-
 /// SAM 2.1 Small (Apache 2.0), encoder and decoder, for click to select.
 pub const SAM2: ModelSpec = ModelSpec {
     id: "sam2",
@@ -64,7 +53,7 @@ pub const SAM2: ModelSpec = ModelSpec {
     ],
 };
 
-const MODELS: [&ModelSpec; 2] = [&BIREFNET, &SAM2];
+const MODELS: [&ModelSpec; 1] = [&SAM2];
 
 fn spec(id: &str) -> Result<&'static ModelSpec, String> {
     MODELS
@@ -267,15 +256,6 @@ pub fn normalize(image: &RgbImage) -> Vec<f32> {
     tensor
 }
 
-/// Logits of a square mask, through a sigmoid, as a 0–255 mask.
-pub fn to_mask(logits: &[f32], size: u32) -> Result<GrayImage, String> {
-    let values = logits
-        .iter()
-        .map(|logit| ((1.0 / (1.0 + (-logit).exp())) * 255.0).round() as u8)
-        .collect::<Vec<_>>();
-    GrayImage::from_raw(size, size, values).ok_or_else(|| "The mask has an unexpected size.".to_string())
-}
-
 pub fn bounds_of(mask: &GrayImage, threshold: u8) -> Option<Bounds> {
     let (mut left, mut top, mut right, mut bottom) = (u32::MAX, u32::MAX, 0, 0);
     for (x, y, Luma([value])) in mask.enumerate_pixels() {
@@ -320,13 +300,6 @@ mod tests {
     }
 
     #[test]
-    fn to_mask_applies_the_sigmoid() {
-        let mask = to_mask(&[-20.0, 0.0, 20.0, 0.0], 2).unwrap();
-        assert_eq!(mask.as_raw(), &vec![0, 128, 255, 128]);
-        assert!(to_mask(&[0.0; 3], 2).is_err());
-    }
-
-    #[test]
     fn bounds_cover_pixels_at_the_threshold() {
         let mut mask = GrayImage::new(5, 4);
         mask.put_pixel(1, 2, Luma([128]));
@@ -353,6 +326,6 @@ mod tests {
     fn hash_check_compares_hex() {
         let digest = Sha256::digest(b"abc");
         assert!(hash_matches(&digest, "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"));
-        assert!(!hash_matches(&digest, BIREFNET.files[0].sha256));
+        assert!(!hash_matches(&digest, SAM2.files[0].sha256));
     }
 }

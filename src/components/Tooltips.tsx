@@ -1,20 +1,38 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 
 /** Wait before a tooltip shows; a little longer than usual, so tooltips do not get in the way. Every tooltip waits the full time. */
-const SHOW_DELAY = 900;
+const SHOW_DELAY = 1400;
 const GAP = 8;
 const EDGE = 8;
 
-/** `side` "left" places the tooltip left of its element; it comes from the nearest `data-help-side`. */
-type Tip = { text: string; anchor: DOMRect; side: "left" | "below" };
+/**
+ * `side` "left" places the tooltip left of its element; it comes from the
+ * nearest `data-help-side`. `oneLine` (from `data-help-one-line`) keeps the
+ * text on one line instead of one line per sentence.
+ */
+type Tip = { text: string; anchor: DOMRect; side: "left" | "below"; oneLine: boolean };
 
 /** A line that ends in a short key name in parentheses, such as "Smaller brush ([)", shows the key as a key cap. */
 const KEY_AT_END = /^(.*?)\s*\(([^()]{1,16})\)\s*$/;
 
-function TipText({ text }: { text: string }) {
+/**
+ * The lines of a tooltip: each sentence, and each part after a semicolon,
+ * goes on its own line, so every instruction reads on its own. A semicolon
+ * becomes the end of a sentence: the part before it gets a period, and the
+ * part after it starts with a capital letter.
+ */
+const tipLines = (text: string) => text
+  .split(/\n+/)
+  .map((line) => line.replace(/;\s+(\S)/g, (_, first: string) => `. ${first.toUpperCase()}`))
+  .flatMap((line) => line.split(/(?<=\.)\s+(?=[A-Z0-9])/))
+  .map((line) => line.trim())
+  .filter(Boolean)
+  .map((line) => line[0].toUpperCase() + line.slice(1));
+
+function TipText({ text, oneLine }: { text: string; oneLine: boolean }) {
   return (
     <>
-      {text.split(/\n+/).map((line, index) => {
+      {(oneLine ? [text] : tipLines(text)).map((line, index) => {
         const match = KEY_AT_END.exec(line);
         return (
           <p key={index}>
@@ -52,7 +70,7 @@ export function Tooltips() {
       const text = target?.isConnected ? target.dataset.help : undefined;
       if (!target || !text) return;
       const side = target.closest<HTMLElement>("[data-help-side]")?.dataset.helpSide === "left" ? "left" : "below";
-      setTip({ text, anchor: target.getBoundingClientRect(), side });
+      setTip({ text, anchor: target.getBoundingClientRect(), side, oneLine: target.dataset.helpOneLine !== undefined });
     };
     const update = () => {
       frame = 0;
@@ -132,7 +150,7 @@ export function Tooltips() {
       role="tooltip"
       style={position ?? { left: 0, top: 0 }}
     >
-      <TipText text={tip.text} />
+      <TipText text={tip.text} oneLine={tip.oneLine} />
     </div>
   );
 }

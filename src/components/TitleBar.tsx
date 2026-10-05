@@ -1,15 +1,16 @@
 import { isTauri } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { DownloadSimple, Info } from "@phosphor-icons/react";
+import { DownloadSimple, Info, Keyboard } from "@phosphor-icons/react";
 import { useEffect, useRef, useState } from "react";
 import { WindowControls } from "./WindowControls";
 
 interface Props {
   updateAvailable: boolean;
   onAbout: () => void;
+  onShortcuts: () => void;
 }
 
-export function TitleBar({ updateAvailable, onAbout }: Props) {
+export function TitleBar({ updateAvailable, onAbout, onShortcuts }: Props) {
   const [openMenu, setOpenMenu] = useState<"help" | null>(null);
   const menuRef = useRef<HTMLElement>(null);
 
@@ -49,6 +50,9 @@ export function TitleBar({ updateAvailable, onAbout }: Props) {
           <button className={openMenu === "help" ? "active" : ""} onClick={() => setOpenMenu((menu) => menu === "help" ? null : "help")}>Help</button>
           {openMenu === "help" && (
             <div className="titlebar-menu-dropdown">
+              <button onClick={() => { setOpenMenu(null); onShortcuts(); }}>
+                <span><Keyboard size={15} /> Keyboard shortcuts</span>
+              </button>
               <button onClick={openAbout}>
                 <span><Info size={15} /> About ImageSage</span>
               </button>

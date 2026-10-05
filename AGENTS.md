@@ -27,15 +27,14 @@
   single-instance plugin would route the launch to it. Stop it first.
 - Stop the dev app with `.\kill-dev.ps1` (tree-kills `imagesage.exe` and frees
   Vite port 14410).
-- All AI HTTP calls live in Rust: OpenAI creates new images (`src-tauri/src/openai.rs`),
-  FLUX Fill edits selections (`src-tauri/src/flux.rs`). Both API keys
-  stay in Windows Credential Manager and never reach the webview.
-- Local AI masks run through ONNX Runtime: subject detection with BiRefNet in
-  `src-tauri/src/subject.rs`, click to select with SAM 2.1 in
-  `src-tauri/src/sam.rs`. `src-tauri/src/models.rs` downloads the models on
+- All AI HTTP calls live in Rust: OpenAI GPT Image creates and edits images
+  (`src-tauri/src/openai.rs`). The API key stays in Windows Credential Manager
+  and never reaches the webview.
+- Click to select runs locally through ONNX Runtime with SAM 2.1 in
+  `src-tauri/src/sam.rs`. `src-tauri/src/models.rs` downloads the model on
   first use from this repo's `model-*` releases, which `publish.ps1` keeps;
   see `docs/RELEASING.md`.
-- Region math and blending live in `src/editor/region.ts` and are unit-tested
+- GPT Image size rules live in `src/editor/region.ts` and are unit-tested
   (`npm test`). Keep them free of DOM code.
 - In managed Codex sessions, prefer process-local Git `safe.directory` variables
   documented in `docs/RELEASING.md`; never alter the user's global Git config.

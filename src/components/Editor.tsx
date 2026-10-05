@@ -1,21 +1,18 @@
 import { invoke } from "@tauri-apps/api/core";
 import {
+  ArrowArcLeft,
   CaretDown,
   Check,
-  CursorClick,
   DownloadSimple,
   FilmStrip,
   FloppyDisk,
   ImageSquare,
   MagicWand,
   Minus,
-  PaintBrush,
   Plus,
-  Selection,
   SpinnerGap,
   StopCircle,
   UploadSimple,
-  UserFocus,
   WarningCircle,
   X
 } from "@phosphor-icons/react";
@@ -29,12 +26,6 @@ import {
   type PointerEvent as ReactPointerEvent
 } from "react";
 import {
-  applyEditResult,
-  applyGptResult,
-  applyOverlayResult,
-  applyMaskedResult,
-  buildEditUpload,
-  buildGptMask,
   buildWholeUpload,
   canvasFromDataUrl,
   canvasToDataUrl,
@@ -45,10 +36,7 @@ import {
   drawLayer,
   drawLayers,
   drawMaskGradient,
-  drawMaskStrokes,
-  loadMaskImages,
   scaledCanvas,
-  maskImagesLoaded,
   opaqueBounds,
   loadImage,
   navigateSurface,
@@ -58,55 +46,31 @@ import {
   type LayerCanvases
 } from "../editor/canvas";
 import type { ImageDocument } from "../editor/imageDocument";
-import { ADJUSTMENT_FIELDS, ADJUSTMENT_LABELS, adjustList, newAdjustmentId, toggleAllAdjustments, adjustmentFilter, adjustmentOpacity, adjustSignature, findAdjustment, hasAdjustments, maskSignature, moveLayer, newAdjustment, replaceAdjustment, resetAdjustment, type AdjustmentField } from "../editor/layers";
+import { ADJUSTMENT_FIELDS, adjustList, newAdjustmentId, toggleAllAdjustments, adjustmentFilter, adjustmentOpacity, adjustSignature, findAdjustment, hasAdjustments, maskSignature, moveLayer, newAdjustment, replaceAdjustment, resetAdjustment, type AdjustmentField } from "../editor/layers";
 import {
-  FLUX_RESOLUTIONS,
-  MIN_SELECTION_SIZE,
-  clampSelection,
-  fluxEditPrompt,
-  gptOverlayPrompt,
-  gptRegion,
-  gptRegionPrompt,
-  isDownscaled,
-  maskBounds,
-  planRegion,
-  rectBox,
-  selectionBox,
-  squareAround,
-  wholeImageSize,
-  type FluxResolution
+  wholeImageSize
 } from "../editor/region";
-import type { Adjustment, BlendMode, EditStep, LayerAdjust, LayerPart, MaskImage, MaskStroke, Point, Rect, SceneDescription, SentRegion, SquareSelection } from "../editor/types";
+import type { Adjustment, BlendMode, EditStep, LayerAdjust, LayerPart, MaskImage, Point, Rect, SentRegion } from "../editor/types";
 import {
   CANCELLED_MESSAGE,
   canCancel,
   cancelAiRequest,
-  describeScene,
-  EDIT_MODEL_ID,
-  EDIT_MODEL_LABEL,
   IMAGE_MODELS,
-  editMaskedRegion,
-  editRegion,
   editWholeImage,
   qualitiesFor,
   stageLabel,
-  type AiProgress,
   type AiSettings,
   type AiStage
 } from "../lib/ai";
 import {
-  estimateFluxEdit,
   estimateOpenAiImage,
   estimateWholeEdit,
-  fluxActualCost,
-  fluxPrice,
   formatUsd,
   learnWholeEditInput,
   openAiActualCost,
+  recordSpend,
   usePrices
 } from "../lib/pricing";
-import type { HelpTopic } from "../lib/help";
-import { findSubject, type SubjectArea } from "../lib/subject";
 import { modelStatus, type ModelId } from "../lib/models";
 import { samEncode, samMask, type SamPoint } from "../lib/sam";
 import { ModelDownloadDialog } from "./ModelDownloadDialog";
@@ -118,8 +82,8 @@ import { SaveDialog, type SaveFormat, type SaveSettings } from "./SaveDialog";
 import { StepsPanel, stepKey, type PartAction } from "./StepsPanel";
 
 type Corner = "nw" | "ne" | "sw" | "se";
-/** "mask" paints the selected layer's mask. */
-type Tool = "whole" | "square" | "brush" | "mask";
+/** "mask" paints the selected layer's mask; "whole" is no tool. */
+type Tool = "whole" | "mask";
 /** A mask: the painted area (a PNG data URL), and whether that area is hidden; no `mask` means no mask. */
 type MaskState = { mask?: string; hides?: boolean };
 /** The owner of a mask: a step id, or `BASE_OWNER` for the original image. */
@@ -133,6 +97,8 @@ let maskClipboard: { mask: string; hides: boolean; width: number; height: number
 const MASK_CLIPBOARD_EVENT = "imagesage-mask-clipboard";
 /** The model name of a layer imported from a file; the layers list shows it under the layer name. */
 const IMPORTED_MODEL = "Imported image";
+/** The model name of a layer copied from the original image. Like an imported layer, it cannot be regenerated. */
+const ORIGINAL_COPY_MODEL = "Copy of the original";
 /** A layer counts as showing at a point when its opacity there is above this (of 255). */
 const PICK_ALPHA = 24;
 /** One mask change, for Ctrl+Z and Ctrl+Y: the layer mask or an adjustment mask of one layer. */
@@ -208,13 +174,18 @@ const rectCorner = (rect: Rect, corner: Corner): Point => ({
 const HANDLE_REACH = 8;
 /** Distance outside a corner, in screen pixels, where a drag rotates the layer. */
 const ROTATE_REACH = 36;
-/** A rotate cursor: a curved arrow with a head at each end. */
-const ROTATE_CURSOR = `url("data:image/svg+xml,${encodeURIComponent(
+/**
+ * A rotate cursor: a curved arrow with a head at each end. The arrow bends
+ * around a top-left corner; `flipX` and `flipY` mirror it for the other corners.
+ */
+const rotateCursor = (flipX: boolean, flipY: boolean) => `url("data:image/svg+xml,${encodeURIComponent(
   "<svg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24'>"
+  + `<g transform='translate(${flipX ? 24 : 0} ${flipY ? 24 : 0}) scale(${flipX ? -1 : 1} ${flipY ? -1 : 1})'>`
   + "<g fill='none' stroke-linecap='round'><path d='M6 18 A12 12 0 0 1 18 6' stroke='#000' stroke-width='4'/><path d='M6 18 A12 12 0 0 1 18 6' stroke='#fff' stroke-width='2'/></g>"
   + "<path d='M2.5 15 L9.5 15 L6 21.5 Z M15 2.5 L15 9.5 L21.5 6 Z' fill='#fff' stroke='#000' stroke-width='1.2' stroke-linejoin='round'/>"
-  + "</svg>"
+  + "</g></svg>"
 )}") 12 12, crosshair`;
+const ROTATE_CURSORS = [rotateCursor(false, false), rotateCursor(true, false), rotateCursor(false, true), rotateCursor(true, true)];
 
 /** The adjustments of a node; the original image (node 0) keeps its own on the document. */
 const adjustOf = (doc: ImageDocument, node: number): LayerAdjust | undefined => {
@@ -280,25 +251,14 @@ const drawingCopy = (source: HTMLCanvasElement) => {
   copy.getContext("2d")!.drawImage(source, 0, 0);
   return copy;
 };
-/** What an edit targets: a square, or a painted mask. */
-type EditTarget =
-  | { kind: "whole" }
-  | { kind: "square"; selection: SquareSelection }
-  | { kind: "mask"; strokes: MaskStroke[] };
-/** What a step brings back on the next click after undo or redo. */
-type PendingTarget = { selection: SquareSelection; mask?: MaskStroke[] };
-type DragState =
-  | { kind: "draw"; anchor: Point }
-  | { kind: "move"; start: Point; original: SquareSelection }
-  | { kind: "resize"; anchor: Point };
 type PanState = { pointerId: number; startX: number; startY: number; scrollLeft: number; scrollTop: number };
 type EditJob = {
   requestId: string;
-  /** Where the progress overlay sits: the square, or the painted area. */
+  /** Where the progress overlay sits: the whole image. */
   frame: Rect;
   sent: SentRegion;
-  /** "Local" is subject detection, which runs on this PC. */
-  service: "OpenAI" | "FLUX" | "Local";
+  /** "Local" is work that runs on this PC: click to select and the video slideshow. */
+  service: "OpenAI" | "Local";
   stage: AiStage | null;
   progress: number | null;
   partialDataUrl: string | null;
@@ -315,7 +275,7 @@ type EditJob = {
  * image pixels to it).
  */
 type ClickSelect = {
-  target: { kind: "selection" } | { kind: "mask"; owner: string; part: LayerPart };
+  target: { owner: string; part: LayerPart };
   key: string;
   scale: number;
   width: number;
@@ -327,21 +287,17 @@ type ClickSelect = {
 /** Click to select prepares an image at most this size. */
 const CLICK_SELECT_MAX_SIDE = 2048;
 /**
- * A message for the user; `action` adds a button to it, such as Undo, and
- * `help` adds a "More info" link to a help page. Success and warning messages
- * close by themselves; errors stay until the user closes them.
+ * A message for the user; `action` adds a button to it, such as Undo. Success
+ * and warning messages close by themselves; errors stay until the user closes them.
  */
-export type Notice = { tone: "success" | "warning" | "error"; message: string; action?: { label: string; run: () => void }; help?: HelpTopic } | null;
+export type Notice = { tone: "success" | "warning" | "error"; message: string; action?: { label: string; run: () => void } } | null;
 
 interface Props {
   document: ImageDocument;
   active: boolean;
   settings: AiSettings;
-  /** FLUX is connected (square and brush edits with FLUX). */
-  connected: boolean;
-  /** OpenAI is connected (whole-image edits, and square and brush edits with GPT Image). */
+  /** OpenAI is connected; every edit needs it. */
   openaiConnected: boolean;
-  onRequestConnect: () => void;
   onRequestOpenAiSettings: () => void;
   onSettingsChange: (settings: AiSettings) => void;
   onCommit: (id: string, patch: Partial<Pick<ImageDocument, "base" | "baseAdjust" | "history" | "historyIndex">>, markDirty?: boolean) => void;
@@ -352,8 +308,6 @@ interface Props {
   /** Asks where to save the video slideshow and writes it; false when the user cancels. */
   onExportVideo: (id: string, video: Blob) => Promise<boolean>;
   onNotice: (notice: Notice) => void;
-  /** Called after each FLUX request, so the app can refresh the credit balance. */
-  onEditFinished: () => void;
 }
 
 /** Ctrl+wheel zoom: the scale changes by exp(-deltaY × this); one wheel notch (100) is about 5%. */
@@ -367,9 +321,6 @@ const BRUSH_RADIUS_KEY = "imagesage.brush-radius";
 const MASK_COLOR = "#ff3366";
 /** Largest side of the mask preview canvas, in device pixels; it is redrawn when zoom changes. */
 const MASK_PREVIEW_MAX = 4096;
-/** Largest side of the image sent for a scene description before a FLUX edit. */
-const DESCRIBE_UPLOAD_MAX = 1024;
-const squareRect = (selection: SquareSelection): Rect => ({ x: selection.x, y: selection.y, width: selection.size, height: selection.size });
 
 const readStored = (key: string) => {
   try {
@@ -393,34 +344,12 @@ const formatElapsed = (milliseconds: number) => {
   return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
 };
 
-/** A square from a fixed corner toward the pointer, clamped to the image. */
-const squareFromAnchor = (anchor: Point, point: Point, width: number, height: number): SquareSelection => {
-  const dx = point.x - anchor.x;
-  const dy = point.y - anchor.y;
-  const towardRight = dx >= 0;
-  const towardBottom = dy >= 0;
-  const available = Math.min(towardRight ? width - anchor.x : anchor.x, towardBottom ? height - anchor.y : anchor.y);
-  const size = Math.round(Math.min(available, Math.max(Math.abs(dx), Math.abs(dy))));
-  return {
-    x: Math.round(towardRight ? anchor.x : anchor.x - size),
-    y: Math.round(towardBottom ? anchor.y : anchor.y - size),
-    size
-  };
-};
-
-const cornerPoint = (selection: SquareSelection, corner: Corner): Point => ({
-  x: corner.endsWith("e") ? selection.x + selection.size : selection.x,
-  y: corner.startsWith("s") ? selection.y + selection.size : selection.y
-});
-
 const oppositeCorner: Record<Corner, Corner> = { nw: "se", ne: "sw", sw: "ne", se: "nw" };
 
 export function Editor({
   document: imageDocument,
   active,
   settings,
-  connected,
-  onRequestConnect,
   openaiConnected,
   onRequestOpenAiSettings,
   onSettingsChange,
@@ -429,8 +358,7 @@ export function Editor({
   onSave,
   onExport,
   onExportVideo,
-  onNotice,
-  onEditFinished
+  onNotice
 }: Props) {
   usePrices();
   const { surface } = imageDocument;
@@ -440,20 +368,13 @@ export function Editor({
   documentRef.current = imageDocument;
   const workspaceRef = useRef<HTMLDivElement>(null);
   const surfaceHostRef = useRef<HTMLDivElement>(null);
-  const dragRef = useRef<DragState | null>(null);
   const panRef = useRef<PanState | null>(null);
   const applyingRef = useRef(false);
-  /** The target of the step just undone or redone. It stays hidden until the next click on the image. */
-  const pendingSelectionRef = useRef<PendingTarget | null>(null);
-  const maskCanvasRef = useRef<HTMLCanvasElement>(null);
   /** Shows the selected layer's painted mask area while the Mask tool is on. */
   const layerMaskCanvasRef = useRef<HTMLCanvasElement>(null);
-  const strokesRef = useRef<MaskStroke[]>([]);
-  const paintingRef = useRef<MaskStroke | null>(null);
   const [tool, setTool] = useState<Tool>("whole");
-  /** Square and Brush are toggles; with both off, an edit goes to the whole image. */
+  /** The Mask tool is a toggle. */
   const toggleTool = (next: Exclude<Tool, "whole">) => setTool((current) => current === next ? "whole" : next);
-  const [strokes, setStrokesState] = useState<MaskStroke[]>([]);
   const [brushRadius, setBrushRadius] = useState(() => {
     const stored = Number(readStored(BRUSH_RADIUS_KEY));
     return Number.isFinite(stored) && stored >= 2 ? stored : 40;
@@ -474,11 +395,6 @@ export function Editor({
   const stageRef = useRef<HTMLDivElement>(null);
   /** The image point under the pointer when Ctrl+wheel zooms, kept under the pointer after the zoom. */
   const zoomAnchorRef = useRef<{ clientX: number; clientY: number; imageX: number; imageY: number } | null>(null);
-  const [selection, setSelection] = useState<SquareSelection | null>(null);
-  /** The square as of the last render, for edits that finish later. */
-  const selectionRef = useRef(selection);
-  selectionRef.current = selection;
-  const [hoverCursor, setHoverCursor] = useState("crosshair");
   const [prompt, setPrompt] = useState("");
   /** AI edits that are running. Several can run at once; each shows its own progress box on the image. */
   const [jobs, setJobs] = useState<EditJob[]>([]);
@@ -490,14 +406,21 @@ export function Editor({
   const [exportDialogOpen, setExportDialogOpen] = useState(false);
   /** The layer waiting for the user to confirm Delete. */
   const [confirmDelete, setConfirmDelete] = useState<number | null>(null);
-  /** The Retry dialog: the layer to retry and its prompt, which the user can change. */
-  const [retryDraft, setRetryDraft] = useState<{ stepId: string; prompt: string } | null>(null);
+  /**
+   * Regenerate mode of the prompt bar: the layer to regenerate, and the prompt
+   * that was in the bar before, which comes back when the mode is cancelled.
+   */
+  const [regenerate, setRegenerate] = useState<{ stepId: string; before: string } | null>(null);
+  const promptRef = useRef<HTMLTextAreaElement>(null);
   /** Which mask of the selected layer the Mask tool paints: "mask" for the layer mask, or an adjustment id. */
   const [maskPart, setMaskPart] = useState<LayerPart>("mask");
   /** The mask brush shows (true) or hides (false) what it paints; holding Alt does the other one. */
   const [maskShows, setMaskShows] = useState(true);
-  /** Opacity of mask brush strokes and gradients, 10 to 100 percent. */
-  const [maskOpacity, setMaskOpacity] = useState(100);
+  /** Opacity of mask brush strokes and gradients, 1 to 100 percent. */
+  const [maskOpacity, setMaskOpacityState] = useState(100);
+  const setMaskOpacity = (next: number) => setMaskOpacityState(Math.max(1, Math.min(100, Math.round(next))));
+  /** The opacity box's text while the user types in it; null shows the current opacity. */
+  const [opacityDraft, setOpacityDraft] = useState<string | null>(null);
   /** While the Mask tool is on, red shows where the target mask hides (or does not apply). */
   const [maskOverlay, setMaskOverlay] = useState(true);
   /** A gradient waiting to be dragged on the image, or null. */
@@ -508,8 +431,6 @@ export function Editor({
   const resizeDragRef = useRef<ResizeDrag | null>(null);
   /** Changing it draws the layers again, for example after a cancelled resize. */
   const [composeTick, setComposeTick] = useState(0);
-  /** Changing it draws the brush mask again, after its subject masks are decoded. */
-  const [maskImagesTick, setMaskImagesTick] = useState(0);
   const [clickSelect, setClickSelectState] = useState<ClickSelect | null>(null);
   const clickSelectRef = useRef<ClickSelect | null>(null);
   const setClickSelect = useCallback((next: ClickSelect | null) => {
@@ -548,7 +469,7 @@ export function Editor({
   const [importLayerOpen, setImportLayerOpen] = useState(false);
   /** The layers under a click, to pick from, and where the menu opens. */
   const [layerPick, setLayerPick] = useState<{ x: number; y: number; nodes: number[] } | null>(null);
-  /** The one-time subject model download dialog; `resolve` gets true when the model is ready. */
+  /** The one-time click-to-select model download dialog; `resolve` gets true when the model is ready. */
   const [modelPrompt, setModelPrompt] = useState<{ model: ModelId; sizeBytes: number; resolve: (installed: boolean) => void } | null>(null);
 
   const fitScale = Math.min(
@@ -582,30 +503,12 @@ export function Editor({
     setJobs((list) => list.filter((item) => item.requestId !== requestId));
     onBusyChange(documentId, runningRef.current > 0);
   }, [onBusyChange]);
-  const paintedBounds = maskBounds(strokes, width, height);
-  /** The square the next edit would send, for the active tool. */
-  /** With no square or mask, an edit goes to the whole image (GPT Image). */
-  const targetKind: EditTarget["kind"] = tool === "square" && selection
-    ? "square"
-    : tool === "brush" && paintedBounds ? "mask" : "whole";
-  const targetSquare = targetKind === "square" ? selection : targetKind === "mask" ? squareAround(paintedBounds!, width, height) : null;
-  const regionGpt = settings.regionEngine !== "flux";
-  const fluxRegion = targetSquare ? planRegion(targetSquare, width, height, settings) : null;
-  const plannedRegion = fluxRegion && regionGpt ? gptRegion(fluxRegion) : fluxRegion;
   const wholeSize = wholeImageSize(width, height);
-  const wholeEstimate = wholeSize
+  /** The GPT Image estimate for the next edit of the whole image. */
+  const gptEstimate = wholeSize
     ? estimateWholeEdit(settings.wholeModel, settings.wholeQuality, `${wholeSize.width}x${wholeSize.height}`, prompt.length)
     : null;
-  /** The size GPT Image gets for a square or brush edit. */
-  const regionGptSize = plannedRegion && regionGpt ? `${plannedRegion.requestWidth}x${plannedRegion.requestHeight}` : null;
-  const regionEstimate = regionGptSize
-    ? estimateWholeEdit(settings.wholeModel, settings.wholeQuality, regionGptSize, gptRegionPrompt(prompt).length)
-    : null;
-  /** The GPT Image estimate for the next edit (whole image, or a GPT region edit); null for FLUX. */
-  const gptEstimate = targetKind === "whole" ? wholeEstimate : regionEstimate;
-  const estimate = gptEstimate
-    ? gptEstimate.usd
-    : targetKind !== "whole" && plannedRegion ? estimateFluxEdit(plannedRegion.resolution ?? settings.maxResolution) : null;
+  const estimate = gptEstimate ? gptEstimate.usd : null;
   const spent = imageDocument.history.reduce((sum, step) => sum + (step.cost ?? 0), 0)
     + (imageDocument.origin.kind === "generated" ? imageDocument.origin.cost ?? 0 : 0);
   const lastStep = imageDocument.historyIndex > 0 ? imageDocument.history[imageDocument.historyIndex - 1] : null;
@@ -630,44 +533,11 @@ export function Editor({
     };
   }, [surface]);
 
-  const setStrokes = useCallback((next: MaskStroke[]) => {
-    strokesRef.current = next;
-    setStrokesState(next);
-  }, []);
-
   const changeBrushRadius = useCallback((next: number) => {
     const radius = Math.max(2, Math.min(1000, Math.round(next)));
     setBrushRadius(radius);
     try { localStorage.setItem(BRUSH_RADIUS_KEY, String(radius)); } catch { /* A remembered size is a convenience only. */ }
   }, []);
-
-  /** Redraws the whole mask preview; strokes in progress are drawn segment by segment instead. */
-  const redrawMask = useCallback(() => {
-    const canvas = maskCanvasRef.current;
-    if (!canvas) return;
-    const scale = Math.min(cssScale * pixelRatio, MASK_PREVIEW_MAX / Math.max(width, height));
-    const canvasWidth = Math.max(1, Math.round(width * scale));
-    const canvasHeight = Math.max(1, Math.round(height * scale));
-    if (canvas.width !== canvasWidth || canvas.height !== canvasHeight) {
-      canvas.width = canvasWidth;
-      canvas.height = canvasHeight;
-    }
-    const context = canvas.getContext("2d");
-    if (!context) return;
-    context.setTransform(1, 0, 0, 1, 0, 0);
-    context.clearRect(0, 0, canvas.width, canvas.height);
-    const strokes = strokesRef.current;
-    if (!maskImagesLoaded(strokes)) {
-      void loadMaskImages(strokes).then(() => setMaskImagesTick((tick) => tick + 1), () => undefined);
-      return;
-    }
-    context.setTransform(canvas.width / width, 0, 0, canvas.height / height, 0, 0);
-    drawMaskStrokes(context, strokes, MASK_COLOR);
-  }, [cssScale, height, pixelRatio, width]);
-
-  useEffect(() => {
-    redrawMask();
-  }, [redrawMask, strokes, tool, maskImagesTick]);
 
   useEffect(() => {
     const element = workspaceRef.current;
@@ -691,10 +561,6 @@ export function Editor({
     const id = window.setInterval(() => setNow(Date.now()), 500);
     return () => window.clearInterval(id);
   }, [anyJob]);
-
-  useEffect(() => {
-    setSelection((current) => current ? clampSelection(current, width, height) : null);
-  }, [height, width]);
 
   /** Decoded layer images and masks by key; an entry is reused while its data URL is unchanged. */
   const layerCacheRef = useRef(new Map<string, { src: string; canvas: HTMLCanvasElement }>());
@@ -967,8 +833,8 @@ export function Editor({
   }, [setPartMask]);
 
   const isMaskTool = tool === "mask";
-  /** Brush-like tools show the round brush cursor and use the brush size; a waiting gradient uses a crosshair instead. */
-  const brushLike = tool === "brush" || (isMaskTool && !gradient);
+  /** The mask brush shows the round brush cursor and uses the brush size; a waiting gradient uses a crosshair instead. */
+  const brushLike = isMaskTool && !gradient;
   /** A gradient waits only while the Mask tool is on. */
   useEffect(() => {
     if (!isMaskTool) setGradient(null);
@@ -1095,7 +961,7 @@ export function Editor({
     const imageHeight = current.surface.height;
     const size = wholeImageSize(imageWidth, imageHeight);
     if (!size) {
-      onNotice({ tone: "error", message: "GPT Image cannot edit an image wider or taller than 3:1. Use Square or Brush instead." });
+      onNotice({ tone: "error", message: "GPT Image cannot edit an image wider or taller than 3:1." });
       return;
     }
     const area: Rect = { x: 0, y: 0, width: imageWidth, height: imageHeight };
@@ -1121,6 +987,7 @@ export function Editor({
       workContext.clearRect(0, 0, imageWidth, imageHeight);
       workContext.drawImage(resultImage, 0, 0, imageWidth, imageHeight);
       const cost = openAiActualCost(result.usage, model);
+      recordSpend(cost);
       learnWholeEditInput(result.usage, model, sizeText);
       const step: EditStep = {
         id: requestId,
@@ -1135,7 +1002,6 @@ export function Editor({
         ...(cost !== null ? { cost } : {})
       };
       const replaced = appendStep(step, work, replaceId);
-      pendingSelectionRef.current = null;
       const estimateText = formatUsd(estimateOpenAiImage(model, quality, sizeText, instruction.length));
       onNotice({
         tone: "success",
@@ -1150,165 +1016,6 @@ export function Editor({
     }
   }, [appendStep, endJob, onNotice, onRequestOpenAiSettings, openaiConnected, settings, startJob, undoReplace, updateJob]);
 
-  /** Edits a target of the visible layers (or of `from`); the result is a new top layer, or replaces layer `replaceId`. */
-  const runEdit = useCallback(async (target: EditTarget, instruction: string, from?: HTMLCanvasElement, replaceId?: string) => {
-    if (target.kind === "whole") {
-      await runWholeEdit(instruction, from, replaceId);
-      return;
-    }
-    const current = documentRef.current;
-    if (!instruction.trim() || applyingRef.current) return;
-    if (resizeRef.current) {
-      onNotice({ tone: "error", message: "Apply (Enter) or cancel (Esc) the transform first." });
-      return;
-    }
-    const useGpt = settings.regionEngine !== "flux";
-    /** A transparent overlay: GPT draws only the new content, and the app lays it over the square. */
-    const overlay = useGpt && target.kind === "square" && settings.transparentEdit;
-    if (useGpt ? !openaiConnected : !connected) {
-      if (useGpt) onRequestOpenAiSettings();
-      else onRequestConnect();
-      return;
-    }
-    const imageWidth = current.surface.width;
-    const imageHeight = current.surface.height;
-    const bounds = target.kind === "mask" ? maskBounds(target.strokes, imageWidth, imageHeight) : null;
-    if (target.kind === "mask" && !bounds) return;
-    const square = target.kind === "square" ? target.selection : squareAround(bounds!, imageWidth, imageHeight);
-    const planned = planRegion(square, imageWidth, imageHeight, settings);
-    const sent = useGpt ? gptRegion(planned) : planned;
-    const frame = bounds ?? squareRect(square);
-    const resolution = planned.resolution ?? settings.maxResolution;
-    const sizeText = `${sent.requestWidth}x${sent.requestHeight}`;
-    const model = useGpt ? settings.wholeModel : EDIT_MODEL_ID;
-    const quality = useGpt ? settings.wholeQuality : `resolution ${resolution}`;
-    const requestId = crypto.randomUUID();
-    setNow(Date.now());
-    startJob(current.id, { requestId, frame, sent, service: useGpt ? "OpenAI" : "FLUX", stage: null, progress: null, partialDataUrl: null, startedAt: Date.now(), prompt: instruction.trim(), replaceId });
-    onNotice(null);
-    try {
-      await composeRef.current;
-      if (target.kind === "mask") await loadMaskImages(target.strokes);
-      const work = cloneCanvas(from ?? current.surface);
-      const imagePng = await buildEditUpload(work, sent);
-      const onProgress = (progress: AiProgress) => {
-        updateJob(requestId, (existing) => ({
-          ...existing,
-          stage: progress.stage,
-          progress: progress.progress ?? existing.progress,
-          partialDataUrl: progress.partialDataUrl ?? existing.partialDataUrl
-        }));
-      };
-      let result;
-      let sceneWarning = "";
-      if (overlay) {
-        const fraction = (value: number, start: number, size: number) => (value - start) / size;
-        result = await editWholeImage(requestId, {
-          prompt: gptOverlayPrompt(instruction, {
-            left: fraction(square.x, sent.x, sent.width),
-            top: fraction(square.y, sent.y, sent.height),
-            right: fraction(square.x + square.size, sent.x, sent.width),
-            bottom: fraction(square.y + square.size, sent.y, sent.height)
-          }),
-          model,
-          quality,
-          size: sizeText,
-          imagePng,
-          background: "transparent"
-        }, onProgress);
-      } else if (useGpt) {
-        const maskPng = await buildGptMask(sent, target.kind === "square" ? { selection: square } : { strokes: target.strokes });
-        result = await editMaskedRegion(requestId, {
-          prompt: gptRegionPrompt(instruction),
-          model,
-          quality,
-          size: sizeText,
-          imagePng,
-          maskPng
-        }, onProgress);
-      } else {
-        const box = target.kind === "square" ? selectionBox(square, sent) : rectBox(bounds!, sent);
-        /** With an OpenAI key, a vision model describes the scene and the elements to keep; without one, FLUX gets plain anchors. */
-        let scene: SceneDescription | null = null;
-        if (openaiConnected) {
-          try {
-            const previewSide = Math.min(DESCRIBE_UPLOAD_MAX, sent.width);
-            const previewPng = await buildEditUpload(work, { ...sent, requestWidth: previewSide, requestHeight: previewSide });
-            scene = await describeScene(requestId, { instruction: instruction.trim(), editBox: box, imagePng: previewPng }, onProgress);
-          } catch (error) {
-            const message = error instanceof Error ? error.message : String(error);
-            if (message === CANCELLED_MESSAGE) throw error;
-            sceneWarning = ` The scene description failed, so FLUX got a simpler prompt (${message}).`;
-          }
-        }
-        result = await editRegion(requestId, { prompt: fluxEditPrompt(instruction, box, scene), imagePng, resolution }, onProgress);
-      }
-      /**
-       * A masked edit, and any GPT Image edit, can change pixels anywhere in the
-       * sent square, so their history tiles cover all of it.
-       */
-      const tileSquare = target.kind === "square" && (!useGpt || overlay) ? square : { x: sent.x, y: sent.y, size: sent.width };
-      const gptTarget = target.kind === "square" ? { selection: square } : { strokes: target.strokes };
-      let overlayWarning = "";
-      if (overlay) {
-        const { clearShare } = await applyOverlayResult(work, square, sent, result.dataUrl);
-        if (clearShare < 0.02) overlayWarning = " GPT returned no transparent pixels, so the result covers the whole square.";
-      } else if (useGpt) {
-        await applyGptResult(work, sent, gptTarget, result.dataUrl, settings);
-      } else if (target.kind === "square") {
-        await applyEditResult(work, square, sent, result.dataUrl, settings);
-      } else {
-        await applyMaskedResult(work, tileSquare, sent, target.strokes, result.dataUrl, settings);
-      }
-      const cost = useGpt
-        ? openAiActualCost(result.usage, model)
-        : fluxActualCost(result.usage, estimateFluxEdit(resolution), resolution);
-      if (useGpt) learnWholeEditInput(result.usage, model, sizeText);
-      const estimateText = formatUsd(useGpt
-        ? estimateOpenAiImage(model, quality, sizeText, (overlay ? gptOverlayPrompt(instruction, { left: 0, top: 0, right: 1, bottom: 1 }) : gptRegionPrompt(instruction)).length)
-        : estimateFluxEdit(resolution));
-      const step: EditStep = {
-        id: requestId,
-        prompt: instruction.trim(),
-        model,
-        quality,
-        createdAt: new Date().toISOString(),
-        selection: tileSquare,
-        ...(target.kind === "square" && tileSquare !== square ? { target: square } : {}),
-        sent,
-        layer: await canvasToDataUrl(work),
-        ...(target.kind === "mask" ? { mask: target.strokes.map((stroke) => ({ ...stroke, points: [...stroke.points] })) } : {}),
-        ...(cost !== null ? { cost } : {})
-      };
-      const replaced = appendStep(step, work, replaceId);
-      /**
-       * Show the clean result: hide the square or the mask, and the next click
-       * on the image brings it back. A square or mask the user changed while
-       * the edit ran (for the next edit) stays as it is.
-       */
-      const unchanged = target.kind === "square"
-        ? (() => { const now = selectionRef.current; return Boolean(now && now.x === square.x && now.y === square.y && now.size === square.size); })()
-        : strokesRef.current === target.strokes;
-      if (unchanged) {
-        setSelection(null);
-        setStrokes([]);
-        moveBrushCursor(null);
-        pendingSelectionRef.current = { selection: square, mask: step.mask };
-      }
-      onNotice({
-        tone: "success",
-        message: `${replaced ? "Layer replaced." : "Edit stitched in."} ${cost !== null ? `Charged ${formatUsd(cost)}.` : `Estimated cost ${estimateText}.`}${sceneWarning}${overlayWarning}`,
-        ...(replaced ? { action: { label: "Undo", run: () => undoReplace(replaced, step.id) } } : {})
-      });
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      if (message !== CANCELLED_MESSAGE) onNotice({ tone: "error", message });
-    } finally {
-      endJob(current.id, requestId);
-      onEditFinished();
-    }
-  }, [appendStep, connected, endJob, onEditFinished, onNotice, onRequestConnect, onRequestOpenAiSettings, openaiConnected, runWholeEdit, settings, startJob, undoReplace, updateJob]);
-
   /** True when the model is on this PC; the first time, a dialog asks to download it. */
   const ensureModel = useCallback(async (model: ModelId) => {
     const status = await modelStatus(model);
@@ -1317,69 +1024,9 @@ export function Editor({
   }, []);
 
   /**
-   * Finds the subject of `source` (only inside `area` when given), with a
-   * progress box over the image and a waiting row named `label`. Null when
-   * there is no subject, the user cancels, or the model is not downloaded.
-   */
-  const runSubjectJob = useCallback(async (source: HTMLCanvasElement, label: string, area?: SubjectArea): Promise<MaskImage | null> => {
-    const current = documentRef.current;
-    try {
-      if (!(await ensureModel("birefnet"))) return null;
-    } catch (error) {
-      onNotice({ tone: "error", message: String(error) });
-      return null;
-    }
-    const requestId = crypto.randomUUID();
-    const frame = { x: 0, y: 0, width: source.width, height: source.height };
-    const sent: SentRegion = { ...frame, margin: 0, requestWidth: frame.width, requestHeight: frame.height };
-    setNow(Date.now());
-    startJob(current.id, { requestId, frame, sent, service: "Local", stage: null, progress: null, partialDataUrl: null, startedAt: Date.now(), prompt: label });
-    onNotice(null);
-    try {
-      const subject = await findSubject(source, requestId, (progress) => {
-        updateJob(requestId, (existing) => ({ ...existing, stage: progress.stage }));
-      }, area);
-      if (!subject) onNotice({ tone: "warning", message: area ? "No subject was found inside the layer mask." : "No subject was found in this image.", help: "no-subject" });
-      return subject;
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      if (message !== CANCELLED_MESSAGE) onNotice({ tone: "error", message });
-      return null;
-    } finally {
-      endJob(current.id, requestId);
-    }
-  }, [endJob, ensureModel, onNotice, startJob, updateJob]);
-
-  /** A layer's mask, as the area to search for a subject; undefined when it has none or it is off. */
-  const layerMaskArea = useCallback(async (step: EditStep | null): Promise<SubjectArea | undefined> => {
-    if (!step?.layerMask || step.maskOff) return undefined;
-    return { mask: await decodeLayer(`${step.id}:mask`, step.layerMask), hides: step.maskHides === true };
-  }, [decodeLayer]);
-
-  /**
-   * Selects the subject of the visible image as a brush selection, which the
-   * brush can then add to or erase. When the selected layer has a mask, only
-   * the area that mask shows is searched.
-   */
-  const selectSubject = async () => {
-    if (applyingRef.current || resizeRef.current) return;
-    await composeRef.current;
-    const current = documentRef.current;
-    const area = await layerMaskArea(current.historyIndex > 0 ? current.history[current.historyIndex - 1] : null);
-    const subject = await runSubjectJob(cloneCanvas(current.surface), "Select subject", area);
-    if (!subject) return;
-    const stroke: MaskStroke = { radius: 0, erase: false, points: [], image: subject };
-    await loadMaskImages([stroke]);
-    pendingSelectionRef.current = null;
-    setSelection(null);
-    setTool("brush");
-    setStrokes([stroke]);
-  };
-
-  /**
-   * Starts click to select on `source`: the layer's own image for a mask, or
-   * the visible image for a selection. The slow step, preparing the image,
-   * runs once; each click after that updates the mask almost at once.
+   * Starts click to select on `source`, the layer's own image, for a mask.
+   * The slow step, preparing the image, runs once; each click after that
+   * updates the mask almost at once.
    */
   const startClickSelect = async (target: ClickSelect["target"], source: HTMLCanvasElement, label: string) => {
     if (applyingRef.current || resizeRef.current || clickSelectRef.current) return;
@@ -1446,7 +1093,7 @@ export function Editor({
     setClickSelect(null);
   };
 
-  /** Writes the mask into its target: a layer or adjustment mask (Ctrl+Z undoes it), or the Brush selection. */
+  /** Writes the mask into its target, a layer or adjustment mask; Ctrl+Z undoes it. */
   const applyClickSelect = async () => {
     const session = clickSelectRef.current;
     if (!session) return;
@@ -1467,15 +1114,6 @@ export function Editor({
       };
     }
     cancelClickSelect();
-    if (session.target.kind === "selection") {
-      const stroke: MaskStroke = { radius: 0, erase: false, points: [], image: { src, bounds } };
-      await loadMaskImages([stroke]);
-      pendingSelectionRef.current = null;
-      setSelection(null);
-      setTool("brush");
-      setStrokes([stroke]);
-      return;
-    }
     const { owner, part } = session.target;
     const doc = documentRef.current;
     const node = nodeOfOwner(doc, owner);
@@ -1486,14 +1124,8 @@ export function Editor({
     onNotice({ tone: "success", message: "Mask set to the selected area.", action: { label: "Undo", run: () => recordMaskChange({ owner, part, before: after, after: before }) } });
   };
 
-  const activeTarget = (): EditTarget => {
-    if (targetKind === "square") return { kind: "square", selection: selection! };
-    if (targetKind === "mask") return { kind: "mask", strokes: strokesRef.current };
-    return { kind: "whole" };
-  };
-
   const submit = () => {
-    void runEdit(activeTarget(), prompt);
+    void runWholeEdit(prompt);
   };
 
   /** Delete asks first; the message after it has an Undo button. */
@@ -1511,52 +1143,58 @@ export function Editor({
     onNotice({ tone: "success", message: "Layer restored." });
   }, [onCommit, onNotice]);
 
-  /**
-   * Removes a layer, selects the one below it, and brings back its square or
-   * mask and prompt so the edit can be tried again.
-   */
+  /** Removes a layer, selects the one below it, and brings back its prompt so the edit can be tried again. */
   const deleteLayer = (node: number) => {
     setConfirmDelete(null);
     const current = documentRef.current;
     const step = current.history[node - 1];
     if (!step) return;
     onCommit(current.id, { history: current.history.filter((_, index) => index !== node - 1), historyIndex: node - 1 });
-    pendingSelectionRef.current = null;
     setPrompt(step.prompt);
-    if (step.area) {
-      setTool("whole");
-    } else if (step.mask) {
-      setTool("brush");
-      setSelection(null);
-      setStrokes(step.mask);
-    } else {
-      setTool("square");
-      setStrokes([]);
-      setSelection(step.target ?? step.selection);
-    }
     onNotice({ tone: "success", message: `Layer ${node + 1} deleted.`, action: { label: "Undo", run: () => undoDelete(step, node) } });
   };
 
-  /** Retry first opens a dialog with the layer's prompt, so the prompt can be changed. */
+  /**
+   * Regenerate first puts the layer's prompt in the prompt bar, so the prompt
+   * can be changed while the image stays in view.
+   */
   const requestRetry = (node: number) => {
     const step = documentRef.current.history[node - 1];
     if (!step || applyingRef.current) return;
-    if (step.model === IMPORTED_MODEL) {
-      onNotice({ tone: "warning", message: "An imported layer was not made by AI, so it cannot be retried." });
+    if (step.model === IMPORTED_MODEL || step.model === ORIGINAL_COPY_MODEL) {
+      onNotice({ tone: "warning", message: `${step.model === IMPORTED_MODEL ? "An imported layer" : "A copy of the original image"} was not made by AI, so it cannot be regenerated.` });
       return;
     }
-    setRetryDraft({ stepId: step.id, prompt: step.prompt });
+    setRegenerate((open) => ({ stepId: step.id, before: open ? open.before : prompt }));
+    setPrompt(step.prompt);
+    requestAnimationFrame(() => {
+      const box = promptRef.current;
+      if (!box) return;
+      box.focus();
+      box.setSelectionRange(box.value.length, box.value.length);
+    });
   };
 
-  /** Runs `instruction` on the layers below a layer, on the same area. The result replaces that layer. */
+  /** Leaves regenerate mode and puts back the prompt that was in the bar before. */
+  const cancelRegenerate = () => {
+    if (!regenerate) return;
+    setPrompt(regenerate.before);
+    setRegenerate(null);
+  };
+
+  /**
+   * Runs `instruction` on the layers below a layer, as a whole-image edit. The
+   * result replaces that layer. Layers made from a square or a painted area in
+   * older versions are regenerated from the whole image too.
+   */
   const retryLayer = async (stepId: string, instruction: string) => {
-    setRetryDraft(null);
+    setRegenerate(null);
     const current = documentRef.current;
     const node = current.history.findIndex((item) => item.id === stepId) + 1;
     const step = current.history[node - 1];
     if (!step || !instruction.trim() || applyingRef.current) return;
     if (retryHiddenRef.current.has(step.id)) {
-      onNotice({ tone: "error", message: "This layer is already being retried. Wait for that retry to finish." });
+      onNotice({ tone: "error", message: "This layer is already being regenerated. Wait for that to finish." });
       return;
     }
     const below = await compositeOf(current, current.history.slice(0, node - 1));
@@ -1565,18 +1203,7 @@ export function Editor({
     retryHiddenRef.current.set(step.id, step.hidden === true);
     setStepHidden(step.id, true);
     try {
-      if (step.area) {
-        setTool("whole");
-        await runEdit({ kind: "whole" }, instruction, below, step.id);
-      } else if (step.mask) {
-        setTool("brush");
-        setStrokes(step.mask);
-        await runEdit({ kind: "mask", strokes: step.mask }, instruction, below, step.id);
-      } else {
-        setTool("square");
-        setSelection(step.target ?? step.selection);
-        await runEdit({ kind: "square", selection: step.target ?? step.selection }, instruction, below, step.id);
-      }
+      await runWholeEdit(instruction, below, step.id);
     } finally {
       /** A successful retry removes the entry when it replaces the layer; otherwise the old layer comes back. */
       const wasHidden = retryHiddenRef.current.get(step.id);
@@ -1601,6 +1228,10 @@ export function Editor({
    */
   const duplicateLayer = (node: number) => {
     const current = documentRef.current;
+    if (node === 0) {
+      duplicateOriginal();
+      return;
+    }
     const step = current.history[node - 1];
     if (!step || applyingRef.current || resizeRef.current) return;
     const { cost: _cost, parent: _parent, ...rest } = step;
@@ -1614,6 +1245,31 @@ export function Editor({
     const history = [...current.history.slice(0, node), copy, ...current.history.slice(node)];
     onCommit(current.id, { history, historyIndex: node + 1 });
     onNotice({ tone: "success", message: `Duplicated ${step.name || `Layer ${node}`}.` });
+  };
+
+  /**
+   * Puts a copy of the original image, with copies of its adjustments, just
+   * above it as a normal layer, and selects the copy.
+   */
+  const duplicateOriginal = () => {
+    const current = documentRef.current;
+    if (current.base === undefined || applyingRef.current || resizeRef.current) return;
+    const area: Rect = { x: 0, y: 0, width: current.surface.width, height: current.surface.height };
+    const copy: EditStep = {
+      id: crypto.randomUUID(),
+      name: "Original copy",
+      prompt: current.origin.kind === "generated" ? current.origin.prompt : "Copy of the original image",
+      model: ORIGINAL_COPY_MODEL,
+      quality: "",
+      createdAt: new Date().toISOString(),
+      selection: { x: 0, y: 0, size: Math.min(area.width, area.height) },
+      area,
+      sent: { ...area, margin: 0, requestWidth: area.width, requestHeight: area.height },
+      layer: current.base,
+      ...(current.baseAdjust ? { adjust: adjustList(current.baseAdjust).map((adjustment) => ({ ...adjustment, id: newAdjustmentId() })) } : {})
+    };
+    onCommit(current.id, { history: [copy, ...current.history], historyIndex: 1 });
+    onNotice({ tone: "success", message: "Duplicated the original image." });
   };
 
   /**
@@ -1769,61 +1425,6 @@ export function Editor({
         pick(added.id);
         return;
       }
-      case "remove-background": {
-        const source = step ? step.layer : current.base;
-        if (!source) return;
-        const image = await decodeLayer(step ? `${step.id}:image` : `base:${current.id}`, source);
-        if (adjustment) {
-          /**
-           * An adjustment's mask becomes the subject, so the adjustment changes
-           * only the subject. The search covers the area the adjustment's own
-           * mask shows, else the layer mask's area, else the whole layer.
-           */
-          const before = partMaskState(current, node, part);
-          const area: SubjectArea | undefined = adjustment.mask && !adjustment.maskOff
-            ? { mask: await decodeLayer(maskCacheKey(current, node, part), adjustment.mask), hides: adjustment.maskHides === true }
-            : await layerMaskArea(step);
-          const subject = await runSubjectJob(image, "Auto-mask subject", area);
-          if (!subject) return;
-          const after: MaskState = { mask: subject.src };
-          recordMaskChange({ owner, part, before, after });
-          const undo = () => recordMaskChange({ owner, part, before: after, after: before });
-          onNotice({ tone: "success", message: `${ADJUSTMENT_LABELS[adjustment.kind]} mask fitted to the subject.`, action: { label: "Undo", run: undo } });
-          return;
-        }
-        if (step) {
-          /**
-           * A layer gets a layer mask of its subject. When it already has a mask,
-           * only the area that mask shows is searched, and the new mask replaces it.
-           */
-          const before = partMaskState(current, node, "mask");
-          const subject = await runSubjectJob(image, "Auto-mask subject", await layerMaskArea(step));
-          if (!subject) return;
-          const after: MaskState = { mask: subject.src };
-          recordMaskChange({ owner, part: "mask", before, after });
-          const undo = () => recordMaskChange({ owner, part: "mask", before: after, after: before });
-          onNotice({ tone: "success", message: before.mask ? "Mask fitted to the subject." : "Background removed.", action: { label: "Undo", run: undo } });
-          return;
-        }
-        /**
-         * The original image has no layer mask. An Opacity adjustment at 0%
-         * applies everywhere except the subject, so the background shows through.
-         */
-        const subject = await runSubjectJob(image, "Auto-mask subject");
-        if (!subject) return;
-        const latest = documentRef.current;
-        const latestNode = nodeOfOwner(latest, owner);
-        if (latestNode < 0) return;
-        const added: Adjustment = { ...newAdjustment("opacity"), value: 0, mask: subject.src, maskHides: true };
-        commitAdjust(latest, latestNode, [...(adjustOf(latest, latestNode) ?? []), added]);
-        const undo = () => {
-          const doc = documentRef.current;
-          const at = nodeOfOwner(doc, owner);
-          if (at >= 0 && findAdjustment(adjustOf(doc, at), added.id)) commitAdjust(doc, at, replaceAdjustment(adjustOf(doc, at), added.id, undefined));
-        };
-        onNotice({ tone: "success", message: "Background removed.", action: { label: "Undo", run: undo } });
-        return;
-      }
       case "add-mask": {
         /** A new layer mask is black: the layer is hidden, and painting shows it. */
         if (!step || step.layerMask) return;
@@ -1908,7 +1509,7 @@ export function Editor({
         const source = step ? step.layer : current.base;
         if (!source) return;
         const image = await decodeLayer(step ? `${step.id}:image` : `base:${current.id}`, source);
-        void startClickSelect({ kind: "mask", owner, part }, image, "Click to select");
+        void startClickSelect({ owner, part }, image, "Click to select");
         return;
       }
       case "blend-normal":
@@ -1925,6 +1526,12 @@ export function Editor({
         layerCacheRef.current.delete(maskCacheKey(current, node, part));
         commitAdjust(current, node, replaceAdjustment(adjust, part, undefined));
         if (node === current.historyIndex && maskPart === part) setMaskPart("mask");
+        return;
+      case "delete-all":
+        if (!adjust?.length) return;
+        for (const item of adjust) layerCacheRef.current.delete(maskCacheKey(current, node, item.id));
+        commitAdjust(current, node, undefined);
+        if (node === current.historyIndex && maskPart !== "mask") setMaskPart("mask");
         return;
     }
   };
@@ -2110,13 +1717,16 @@ export function Editor({
     return null;
   };
 
-  /** The cursor for a zone. Scale cursors follow the layer's rotation. */
+  /**
+   * The cursor for a zone. Scale cursors follow the layer's rotation; the
+   * rotate cursor bends around the corner as it shows on screen.
+   */
   const zoneCursor = (session: ResizeSession, zone: TransformZone) => {
     if (!zone) return "default";
     if (zone.kind === "move") return "move";
-    if (zone.kind === "rotate") return ROTATE_CURSOR;
     const center = applyTransform(session.transform, { x: session.bounds.x + session.bounds.width / 2, y: session.bounds.y + session.bounds.height / 2 });
     const corner = applyTransform(session.transform, rectCorner(session.bounds, zone.corner));
+    if (zone.kind === "rotate") return ROTATE_CURSORS[(corner.x > center.x ? 1 : 0) + (corner.y > center.y ? 2 : 0)];
     const angle = ((Math.atan2(corner.y - center.y, corner.x - center.x) * 180) / Math.PI + 360) % 180;
     return ["ew-resize", "nwse-resize", "ns-resize", "nesw-resize"][Math.round(angle / 45) % 4];
   };
@@ -2262,11 +1872,6 @@ export function Editor({
     onCommit(current.id, { history }, false);
   };
 
-  const clearTarget = () => {
-    pendingSelectionRef.current = null;
-    if (tool === "square") setSelection(null);
-    else if (tool === "brush") setStrokes([]);
-  };
   const cancelJob = (requestId: string) => {
     void cancelAiRequest(requestId);
   };
@@ -2315,10 +1920,10 @@ export function Editor({
         void onSave(documentRef.current.id, event.shiftKey);
       }
       if (event.key === "Escape" && !typing) {
-        if (gradientRef.current) cancelGradientDrag();
+        if (regenerate) cancelRegenerate();
+        else if (gradientRef.current) cancelGradientDrag();
         else if (gradient) setGradient(null);
         else if (isMaskTool) setTool("whole");
-        else clearTarget();
       }
       if (event.ctrlKey && event.key.toLowerCase() === "z" && !typing) {
         event.preventDefault();
@@ -2330,10 +1935,6 @@ export function Editor({
         event.preventDefault();
         redoMask();
       }
-      if (event.ctrlKey && event.key.toLowerCase() === "d") {
-        event.preventDefault();
-        clearTarget();
-      }
       /** Ctrl+M adds a layer mask to the selected layer when it has none. */
       if (event.ctrlKey && event.key.toLowerCase() === "m" && !typing) {
         event.preventDefault();
@@ -2341,33 +1942,42 @@ export function Editor({
         const step = doc.historyIndex > 0 ? doc.history[doc.historyIndex - 1] : null;
         if (step && !step.layerMask) void partAction(doc.historyIndex, "mask", "add-mask");
       }
+      /** Ctrl+T transforms the selected layer, as in Photoshop; the original image cannot be transformed. */
+      if (event.ctrlKey && event.key.toLowerCase() === "t" && !typing) {
+        event.preventDefault();
+        if (documentRef.current.historyIndex > 0) void startResize(documentRef.current.historyIndex);
+      }
       /** Ctrl+J duplicates the selected layer, as in Photoshop. */
       if (event.ctrlKey && event.key.toLowerCase() === "j" && !typing) {
         event.preventDefault();
         duplicateLayer(documentRef.current.historyIndex);
       }
       if (typing || event.ctrlKey || event.altKey) return;
-      if (event.key.toLowerCase() === "s") toggleTool("square");
+      /** Delete asks to delete the selected layer; the original image cannot be deleted. */
+      if (event.key === "Delete" && documentRef.current.historyIndex > 0) {
+        event.preventDefault();
+        requestDelete(documentRef.current.historyIndex);
+      }
       if (event.key.toLowerCase() === "m" && targetPart) toggleTool("mask");
-      /** Mask brush keys: 1 to 9 set 10% to 90% opacity, 0 sets 100%; X swaps Show and Hide; R shows or hides the red view. */
+      /**
+       * Mask brush keys: 1 to 9 set 10% to 90% opacity, 0 sets 100%, and + and −
+       * on the number row change it by 10%; X swaps Show and Hide; R shows or
+       * hides the red view.
+       */
       if (isMaskTool && /^[0-9]$/.test(event.key)) {
         event.preventDefault();
         setMaskOpacity(event.key === "0" ? 100 : Number(event.key) * 10);
       }
+      if (isMaskTool && (event.code === "Equal" || event.code === "Minus")) {
+        event.preventDefault();
+        setMaskOpacity(maskOpacity + (event.code === "Equal" ? 10 : -10));
+      }
       if (isMaskTool && event.key.toLowerCase() === "x") setMaskShows((shows) => !shows);
       if (isMaskTool && event.key.toLowerCase() === "r") setMaskOverlay((shown) => !shown);
-      if (event.key.toLowerCase() === "b") toggleTool("brush");
       if (brushLike && (event.key === "[" || event.key === "]")) {
         event.preventDefault();
         const step = Math.max(2, Math.round(brushRadius * 0.15));
         changeBrushRadius(brushRadius + (event.key === "]" ? step : -step));
-      }
-      if (tool === "square" && selection && event.key.startsWith("Arrow")) {
-        event.preventDefault();
-        const step = event.shiftKey ? 10 : 1;
-        const dx = event.key === "ArrowLeft" ? -step : event.key === "ArrowRight" ? step : 0;
-        const dy = event.key === "ArrowUp" ? -step : event.key === "ArrowDown" ? step : 0;
-        setSelection(clampSelection({ ...selection, x: selection.x + dx, y: selection.y + dy }, width, height));
       }
     };
     const onKeyUp = (event: KeyboardEvent) => {
@@ -2510,7 +2120,7 @@ export function Editor({
   };
 
   /**
-   * A click on the image (with no Square, Brush or Mask tool) selects the layer
+   * A click on the image (with the Mask tool off) selects the layer
    * that shows at that point: the first visible layer from the top that is not
    * transparent there, after its mask and adjustments. When several layers show
    * there, a menu lists them to pick from; when none does, the original image
@@ -2565,19 +2175,6 @@ export function Editor({
       y: Math.max(0, Math.min(height, ((event.clientY - rect.top) / rect.height) * height))
     };
   };
-
-  const cornerAt = (point: Point): Corner | null => {
-    if (!selection) return null;
-    const tolerance = Math.max(4, 9 / cssScale);
-    return CORNERS.find((corner) => {
-      const handle = cornerPoint(selection, corner);
-      return Math.abs(point.x - handle.x) <= tolerance && Math.abs(point.y - handle.y) <= tolerance;
-    }) ?? null;
-  };
-
-  const inSelection = (point: Point) => Boolean(selection)
-    && point.x >= selection!.x && point.x <= selection!.x + selection!.size
-    && point.y >= selection!.y && point.y <= selection!.y + selection!.size;
 
   /** Draws the surface from a prepared layer while a mask stroke or gradient runs. */
   const redrawPrepared = (prep: MaskPrep) => {
@@ -2753,49 +2350,7 @@ export function Editor({
       paintMaskSegment(point, point);
       return;
     }
-    const pending = pendingSelectionRef.current;
-    pendingSelectionRef.current = null;
-    if (pending && !selection && !strokesRef.current.length) {
-      if (pending.mask) {
-        setTool("brush");
-        setStrokes(pending.mask);
-      } else {
-        setTool("square");
-        setSelection(clampSelection(pending.selection, width, height));
-      }
-      return;
-    }
-    if (tool === "whole") {
-      pickLayerAt(pointFromEvent(event), event.clientX, event.clientY).catch((error) => onNotice({ tone: "error", message: `Could not find the layer at that point: ${String(error)}` }));
-      return;
-    }
-    const point = pointFromEvent(event);
-    event.currentTarget.setPointerCapture(event.pointerId);
-    if (tool === "brush") {
-      const stroke: MaskStroke = { radius: brushRadius, erase: event.altKey, points: [[Math.round(point.x), Math.round(point.y)]] };
-      paintingRef.current = stroke;
-      strokesRef.current = [...strokesRef.current, stroke];
-      paintSegment(stroke, stroke.points[0], stroke.points[0]);
-      return;
-    }
-    const corner = cornerAt(point);
-    if (corner && selection) {
-      dragRef.current = { kind: "resize", anchor: cornerPoint(selection, oppositeCorner[corner]) };
-    } else if (selection && inSelection(point)) {
-      dragRef.current = { kind: "move", start: point, original: { ...selection } };
-    } else {
-      dragRef.current = { kind: "draw", anchor: { x: Math.round(point.x), y: Math.round(point.y) } };
-      setSelection({ x: Math.round(point.x), y: Math.round(point.y), size: 0 });
-    }
-  };
-
-  /** Draws one new piece of the stroke being painted, without redrawing the whole mask. */
-  const paintSegment = (stroke: MaskStroke, from: [number, number], to: [number, number]) => {
-    const canvas = maskCanvasRef.current;
-    const context = canvas?.getContext("2d");
-    if (!canvas || !context) return;
-    context.setTransform(canvas.width / width, 0, 0, canvas.height / height, 0, 0);
-    drawMaskStrokes(context, [{ ...stroke, points: from === to ? [from] : [from, to] }], MASK_COLOR);
+    pickLayerAt(pointFromEvent(event), event.clientX, event.clientY).catch((error) => onNotice({ tone: "error", message: `Could not find the layer at that point: ${String(error)}` }));
   };
 
   const onPointerMove = (event: ReactPointerEvent<HTMLDivElement>) => {
@@ -2815,36 +2370,7 @@ export function Editor({
       if (Math.hypot(point.x - stroke.last.x, point.y - stroke.last.y) < Math.max(1, brushRadius * 0.15)) return;
       paintMaskSegment(stroke.last, point);
       stroke.last = point;
-      return;
     }
-    if (tool === "brush") {
-      moveBrushCursor(point);
-      const stroke = paintingRef.current;
-      if (!stroke || !event.currentTarget.hasPointerCapture(event.pointerId)) return;
-      const last = stroke.points[stroke.points.length - 1];
-      const next: [number, number] = [Math.round(point.x), Math.round(point.y)];
-      if (Math.hypot(next[0] - last[0], next[1] - last[1]) < Math.max(1, stroke.radius * 0.15)) return;
-      stroke.points.push(next);
-      paintSegment(stroke, last, next);
-      return;
-    }
-    const drag = dragRef.current;
-    if (!drag || !event.currentTarget.hasPointerCapture(event.pointerId)) {
-      const corner = cornerAt(point);
-      setHoverCursor(corner === "nw" || corner === "se"
-        ? "nwse-resize"
-        : corner ? "nesw-resize" : inSelection(point) ? "move" : "crosshair");
-      return;
-    }
-    if (drag.kind === "move") {
-      setSelection(clampSelection({
-        ...drag.original,
-        x: drag.original.x + point.x - drag.start.x,
-        y: drag.original.y + point.y - drag.start.y
-      }, width, height));
-      return;
-    }
-    setSelection(squareFromAnchor(drag.anchor, point, width, height));
   };
 
   const onPointerUp = (event: ReactPointerEvent<HTMLDivElement>) => {
@@ -2861,23 +2387,7 @@ export function Editor({
       const { mask, hides } = prepTarget(maskStroke.prep);
       if (!mask) return;
       void canvasToDataUrl(mask).then((url) => recordMaskChange({ owner: maskStroke.prep.owner, part: maskStroke.prep.part, before: maskStroke.before, after: { mask: url, hides } }, mask));
-      return;
     }
-    if (paintingRef.current) {
-      if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
-      paintingRef.current = null;
-      setStrokes([...strokesRef.current]);
-      return;
-    }
-    const drag = dragRef.current;
-    if (!drag) return;
-    if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
-    dragRef.current = null;
-    setSelection((current) => {
-      if (!current) return null;
-      if (drag.kind === "draw" && current.size < MIN_SELECTION_SIZE) return null;
-      return clampSelection(current, width, height);
-    });
   };
   const exportImage = async (exportSettings: SaveSettings) => {
     const maxWidth = Math.max(0, Math.floor(Number(exportSettings.maxWidth) || 0));
@@ -2949,21 +2459,50 @@ export function Editor({
     width: rect.width * cssScale,
     height: rect.height * cssScale
   });
-  const showSquare = tool === "square" && selection && selection.size > 0;
   const brushDiameter = brushRadius * 2 * cssScale;
-  const hasTarget = targetKind !== "whole" || wholeSize !== null;
-  const editingWhole = targetKind === "whole";
-  const usesGpt = editingWhole || regionGpt;
+  /** The layer of regenerate mode; the mode ends by itself when that layer is gone. */
+  const regenNode = regenerate ? imageDocument.history.findIndex((item) => item.id === regenerate.stepId) + 1 : 0;
+  const regenStep = regenNode > 0 ? imageDocument.history[regenNode - 1] : undefined;
   /** GPT Image models offered for edits: the 2.5 models, plus the current one if it is older. */
   const editModels = IMAGE_MODELS.filter((model) => model.id.startsWith("gpt-image-2.5") || model.id === settings.wholeModel);
 
-  /** Brush size controls, shown in the Select section while the Brush is on. */
+  /** Brush size controls, shown in the toolbar while the mask brush is on. */
   const brushSizeControls = (
     <span className="brush-size-inline" role="group" aria-label="Brush size">
       <button onClick={() => changeBrushRadius(brushRadius - Math.max(2, Math.round(brushRadius * 0.15)))} aria-label="Smaller brush" data-help="Smaller brush ([)"><Minus size={15} /></button>
       <span data-help="Brush diameter in image pixels">{brushRadius * 2} px</span>
       <button onClick={() => changeBrushRadius(brushRadius + Math.max(2, Math.round(brushRadius * 0.15)))} aria-label="Larger brush" data-help="Larger brush (])"><Plus size={15} /></button>
     </span>
+  );
+
+  /** Writes the typed opacity; text that is not a number keeps the old opacity. */
+  const commitOpacityDraft = () => {
+    if (opacityDraft !== null && opacityDraft.trim() && Number.isFinite(Number(opacityDraft))) setMaskOpacity(Number(opacityDraft));
+    setOpacityDraft(null);
+  };
+  /** The brush opacity box: type a percentage, then Enter or click away. */
+  const brushOpacityControl = (
+    <label className="brush-opacity" data-help="Brush opacity, 1% to 100% (+ / −)">
+      <span>Opacity</span>
+      <input
+        type="text"
+        inputMode="numeric"
+        aria-label="Brush opacity in percent"
+        value={opacityDraft ?? String(maskOpacity)}
+        onChange={(event) => setOpacityDraft(event.target.value.replace(/[^0-9]/g, "").slice(0, 3))}
+        onFocus={(event) => event.currentTarget.select()}
+        onBlur={commitOpacityDraft}
+        onKeyDown={(event) => {
+          /** Enter and Esc leave the box, so the brush keys work again. */
+          if (event.key === "Enter") event.currentTarget.blur();
+          if (event.key === "Escape") {
+            setOpacityDraft(null);
+            event.currentTarget.blur();
+          }
+        }}
+      />
+      <b>%</b>
+    </label>
   );
 
   return (
@@ -3029,50 +2568,27 @@ export function Editor({
             </button>
           </div>
         </div>
-        {/* Select and Mask stay centered; the sides take the rest of the width. */}
+        {/* The mask brush size stays centered; the sides take the rest of the width. */}
         <div className="toolbar-center">
-          <div className="tool-section select-section" role="group" aria-label="Select">
-            <span className="tool-section-label">Select</span>
-            <div className="tool-group icon-buttons">
-            <button className={tool === "square" ? "active" : ""} aria-pressed={tool === "square"} onClick={() => toggleTool("square")} aria-label="Square" data-help="Square selection (S). Drag on the image to select a square. Click again to turn it off and edit the whole image.">
-              <Selection size={17} weight="bold" />
-            </button>
-            <button className={tool === "brush" ? "active" : ""} aria-pressed={tool === "brush"} onClick={() => toggleTool("brush")} aria-label="Brush" data-help="Brush selection (B). Paint the area to change; hold Alt to erase. Click again to turn it off and edit the whole image.">
-              <PaintBrush size={17} weight="bold" />
-            </button>
-            <button
-              className={clickSelect?.target.kind === "selection" ? "active" : ""}
-              onClick={() => {
-                if (clickSelectRef.current) return;
-                void composeRef.current.then(() => startClickSelect({ kind: "selection" }, cloneCanvas(documentRef.current.surface), "Select area"));
-              }}
-              aria-label="Select area"
-              data-help="Select area. Click on any part of the image to select it, such as the sky or the ground; Alt+click removes an area. Enter applies the selection to the Brush, so you can refine it. Runs on this PC."
-            >
-              <CursorClick size={17} weight="bold" />
-            </button>
-            <button onClick={() => void selectSubject()} aria-label="Select subject" data-help="Select subject. Finds the main subject of the image and selects it with the Brush, so you can paint to add or hold Alt to erase. Runs on this PC.">
-              <UserFocus size={17} weight="bold" />
-            </button>
+          {brushLike && (
+            <div className="tool-section" role="group" aria-label="Mask brush">
+              <span className="tool-section-label">Brush</span>
+              <div className="tool-group brush-size-group">
+                {brushSizeControls}
+                {brushOpacityControl}
+                <button className="brush-close" onClick={() => setTool("whole")} aria-label="Stop painting the mask" data-help="Stop painting the mask (Esc)">
+                  <X size={13} weight="bold" />
+                </button>
+              </div>
             </div>
-            {/* Brush size sits to the right of Select and does not move the centered buttons. */}
-            {tool === "brush" && <div className="tool-group brush-size-float">{brushSizeControls}</div>}
-          </div>
+          )}
         </div>
-        <div className={`toolbar-side right ${tool === "brush" ? "after-brush-size" : ""}`}>
+        <div className="toolbar-side right">
           {resize && (
             <span className="crop-size">Drag inside to move, a corner to scale, or just outside a corner to rotate (Shift: 15° steps). Enter applies; Esc cancels.</span>
           )}
           {isMaskTool && gradient && (
             <span className="crop-size">Drag on the image for the {gradient} gradient. Esc cancels.</span>
-          )}
-          {plannedRegion && (
-            <>
-              <span className="crop-size" data-help={`The square sent to ${regionGpt ? "GPT Image" : "FLUX"} (your target plus nearby context) and the output size`}>
-                sent {plannedRegion.width} px square at {regionGpt ? `${plannedRegion.requestWidth} px` : plannedRegion.resolution}
-                {isDownscaled(plannedRegion) && <em className="selection-warning"> · result will be softer</em>}
-              </span>
-            </>
           )}
           <div className="editor-toolbar-spacer" />
           {spent > 0 && <span className="image-cost" data-help="Charged so far for this image: its creation and every saved edit">Spent {formatUsd(spent)}</span>}
@@ -3097,7 +2613,6 @@ export function Editor({
               style={{ width: width * cssScale, height: height * cssScale }}
             >
               <div ref={surfaceHostRef} className="surface-host" />
-              <canvas ref={maskCanvasRef} className={`mask-preview ${tool === "brush" ? "" : "hidden"}`} aria-hidden="true" />
               <canvas ref={layerMaskCanvasRef} className={`mask-preview ${isMaskTool ? "" : "hidden"}`} aria-hidden="true" />
               {/* The gradient being dragged: a line from start (white dot) to end (black dot), and the radius of a radial gradient. */}
               <svg ref={gradientLineRef} className="gradient-line" width={width * cssScale} height={height * cssScale} style={{ display: "none" }} aria-hidden="true">
@@ -3148,14 +2663,6 @@ export function Editor({
                   </div>
                 );
               })()}
-              {showSquare && (
-                <div className="selection-mask" aria-hidden="true">
-                  {plannedRegion && <div className="selection-margin" style={frameStyle(plannedRegion)} />}
-                  <div className="selection-frame" style={frameStyle(squareRect(selection!))}>
-                    {CORNERS.map((corner) => <i key={corner} className={`crop-handle crop-handle-${corner}`} />)}
-                  </div>
-                </div>
-              )}
               {jobs.filter((job) => job.requestId === selectedJob).map((job) => (
                 <div key={job.requestId} className="selection-mask working">
                   {job.partialDataUrl && (
@@ -3193,14 +2700,14 @@ export function Editor({
               {brushLike && (
                 <div
                   ref={brushCursorRef}
-                  className={`brush-cursor ${(isMaskTool ? maskShows === erasing : erasing) ? "erasing" : ""}`}
+                  className={`brush-cursor ${maskShows === erasing ? "erasing" : ""}`}
                   aria-hidden="true"
                   style={{ left: 0, top: 0, width: brushDiameter, height: brushDiameter }}
                 />
               )}
               <div
                 className="interaction-layer"
-                style={{ cursor: clickSelect ? "crosshair" : brushLike ? "none" : isMaskTool ? "crosshair" : tool === "whole" ? "default" : hoverCursor }}
+                style={{ cursor: clickSelect ? "crosshair" : brushLike ? "none" : isMaskTool ? "crosshair" : "default" }}
                 onPointerDown={onPointerDown}
                 onPointerMove={onPointerMove}
                 onPointerUp={onPointerUp}
@@ -3214,7 +2721,7 @@ export function Editor({
           <div className="click-select-bar" role="group" aria-label="Click to select">
             {clickSelect.busy ? <SpinnerGap className="spin" size={15} /> : null}
             <span>
-              {clickSelect.target.kind === "selection" ? "Select an area" : "Set the mask"}: click to add · Alt+click to remove · Ctrl+Z undoes a click
+              Set the mask: click to add · Alt+click to remove · Ctrl+Z undoes a click
             </span>
             <button className="click-select-apply" disabled={!clickSelect.mask} onClick={() => void applyClickSelect()} data-help="Apply (Enter)">
               <Check size={15} weight="bold" /> Apply
@@ -3263,42 +2770,48 @@ export function Editor({
         {...panelHandlers}
       />
       </div>
-      <div className="prompt-bar">
+      <div className={`prompt-bar ${regenStep ? "regenerating" : ""}`}>
+        <div className="prompt-input">
+        {regenStep && (
+          <div className="regenerate-tag">
+            <ArrowArcLeft size={13} weight="bold" />
+            <span>Regenerating <strong>{regenStep.name || `Layer ${regenNode}`}</strong>. The result replaces this layer and keeps its name, masks and adjustments.</span>
+            <button onClick={cancelRegenerate} aria-label="Cancel regenerate" data-help="Cancel regenerate (Esc)">
+              <X size={13} weight="bold" />
+            </button>
+          </div>
+        )}
         <textarea
+          ref={promptRef}
           value={prompt}
           rows={2}
-         
-          placeholder={editingWhole
-            ? "Describe the change for the whole image… (or turn on Square or Brush to edit one part)"
-            : tool === "square"
-            ? selection ? "Describe the change for the selected square…" : "Drag on the image to select a square, then describe the change."
-            : paintedBounds ? "Describe the change for the painted area…" : "Paint over the area to change, then describe the change. Hold Alt to erase."}
+
+          placeholder={regenStep ? "Describe the new layer…" : "Describe the change…"}
           onChange={(event) => setPrompt(event.target.value)}
           onKeyDown={(event) => {
             if (event.ctrlKey && event.key === "Enter") {
               event.preventDefault();
-              submit();
+              if (regenStep) {
+                if (prompt.trim()) void retryLayer(regenStep.id, prompt);
+              } else submit();
+            } else if (event.key === "Escape" && regenStep) {
+              event.preventDefault();
+              cancelRegenerate();
             }
           }}
         />
+        </div>
         <div className="prompt-controls">
           <div className="prompt-options">
             <select
               aria-label="Edit model"
-              data-help={editingWhole ? "The GPT Image model that edits the whole image." : "The model that edits the square or painted area."}
-              value={editingWhole || regionGpt ? settings.wholeModel : EDIT_MODEL_ID}
+              data-help="The GPT Image model that edits the whole image."
+              value={settings.wholeModel}
              
-              onChange={(event) => {
-                const next = event.target.value;
-                if (next === EDIT_MODEL_ID) onSettingsChange({ ...settings, regionEngine: "flux" });
-                else if (editingWhole) onSettingsChange({ ...settings, wholeModel: next });
-                else onSettingsChange({ ...settings, wholeModel: next, regionEngine: "openai" });
-              }}
+              onChange={(event) => onSettingsChange({ ...settings, wholeModel: event.target.value })}
             >
               {editModels.map((model) => <option key={model.id} value={model.id}>{model.label}</option>)}
-              {!editingWhole && <option value={EDIT_MODEL_ID}>{EDIT_MODEL_LABEL}</option>}
             </select>
-            {usesGpt ? (
               <select
                 aria-label="GPT Image edit quality"
                 data-help="Higher quality costs more and takes longer."
@@ -3307,7 +2820,7 @@ export function Editor({
                 onChange={(event) => onSettingsChange({ ...settings, wholeQuality: event.target.value })}
               >
                 {qualitiesFor(settings.wholeModel).map((quality) => {
-                  const size = editingWhole ? wholeSize && `${wholeSize.width}x${wholeSize.height}` : regionGptSize;
+                  const size = wholeSize && `${wholeSize.width}x${wholeSize.height}`;
                   return (
                     <option key={quality} value={quality}>
                       {quality} · ~ {formatUsd(size ? estimateWholeEdit(settings.wholeModel, quality, size).usd : 0)}
@@ -3315,45 +2828,24 @@ export function Editor({
                   );
                 })}
               </select>
-            ) : (
-            <select
-              aria-label="Largest FLUX output size"
-              data-help="Largest output size FLUX may use. Larger sizes keep more detail and cost more."
-              value={settings.maxResolution}
-             
-              onChange={(event) => onSettingsChange({ ...settings, maxResolution: event.target.value as FluxResolution })}
-            >
-              {FLUX_RESOLUTIONS.map((resolution) => (
-                <option key={resolution.id} value={resolution.id}>
-                  Max {resolution.id} · {fluxPrice(resolution.id).estimated ? "~ " : ""}{formatUsd(fluxPrice(resolution.id).usd)}
-                </option>
-              ))}
-            </select>
-            )}
-            {tool === "square" && regionGpt && (
-              <label
-                className={`prompt-toggle ${settings.transparentEdit ? "on" : ""}`}
-                data-help="GPT draws only the new content on a transparent background; the app lays it over your square, so every other pixel stays the same."
-              >
-                <input
-                  type="checkbox"
-                  checked={settings.transparentEdit}
-                 
-                  onChange={(event) => onSettingsChange({ ...settings, transparentEdit: event.target.checked })}
-                />
-                Transparent
-              </label>
-            )}
           </div>
+            {regenStep ? (
             <button
               className="primary-action"
-              disabled={!hasTarget || !prompt.trim()}
-              onClick={submit}
-              data-help={editingWhole
-                ? "Send the whole image to GPT Image (Ctrl+Enter)"
-                : regionGpt ? "Send to GPT Image (Ctrl+Enter)" : "Send to FLUX (Ctrl+Enter). The price is the FLUX price for the output size."}
+              disabled={!prompt.trim()}
+              onClick={() => void retryLayer(regenStep.id, prompt)}
+              data-help="Regenerate the layer with this prompt (Ctrl+Enter). The old layer comes back if it fails or you cancel."
             >
-              <MagicWand size={17} weight="bold" /> {editingWhole ? "Edit whole image" : targetKind === "square" ? "Edit selection" : "Edit painted area"}
+              <ArrowArcLeft size={17} weight="bold" /> Regenerate layer
+            </button>
+            ) : (
+            <button
+              className="primary-action"
+              disabled={!wholeSize || !prompt.trim()}
+              onClick={submit}
+              data-help="Send the image to GPT Image. The result is a new layer (Ctrl+Enter)"
+            >
+              <MagicWand size={17} weight="bold" /> Generate layer
               {estimate !== null && (
                 <span
                   className="price-tag"
@@ -3365,6 +2857,7 @@ export function Editor({
                 </span>
               )}
             </button>
+            )}
         </div>
       </div>      {confirmDelete !== null && imageDocument.history[confirmDelete - 1] && (
         <div className="confirm-overlay" role="presentation" onPointerDown={() => setConfirmDelete(null)}>
@@ -3384,42 +2877,6 @@ export function Editor({
             <div className="confirm-actions">
               <button autoFocus className="button secondary" onClick={() => setConfirmDelete(null)}>Cancel</button>
               <button className="button danger" onClick={() => deleteLayer(confirmDelete)}>Delete layer</button>
-            </div>
-          </div>
-        </div>
-      )}
-      {retryDraft && (
-        <div className="confirm-overlay" role="presentation" onPointerDown={() => setRetryDraft(null)}>
-          <div
-            className="confirm-dialog retry-dialog"
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="retry-layer-title"
-            onPointerDown={(event) => event.stopPropagation()}
-            onKeyDown={(event) => { if (event.key === "Escape") setRetryDraft(null); }}
-          >
-            <div className="confirm-copy">
-              <h2 id="retry-layer-title">Retry layer</h2>
-              <p>Change the prompt if you like. The result replaces this layer and keeps its name, masks, and adjustments.</p>
-              <textarea
-                className="retry-prompt"
-                aria-label="Prompt"
-                autoFocus
-                rows={4}
-                value={retryDraft.prompt}
-                onChange={(event) => setRetryDraft({ ...retryDraft, prompt: event.target.value })}
-                onFocus={(event) => event.currentTarget.setSelectionRange(event.currentTarget.value.length, event.currentTarget.value.length)}
-                onKeyDown={(event) => {
-                  if (event.ctrlKey && event.key === "Enter") {
-                    event.preventDefault();
-                    void retryLayer(retryDraft.stepId, retryDraft.prompt);
-                  }
-                }}
-              />
-            </div>
-            <div className="confirm-actions">
-              <button className="button secondary" onClick={() => setRetryDraft(null)}>Cancel</button>
-              <button className="button primary" disabled={!retryDraft.prompt.trim()} onClick={() => void retryLayer(retryDraft.stepId, retryDraft.prompt)} data-help="Retry (Ctrl+Enter)">Retry</button>
             </div>
           </div>
         </div>

@@ -26,7 +26,7 @@ XSage desktop applications:
   an unsaved-work prompt). The installer template is copied unchanged from
   IconSage (`D:/Code/IconSage/src-tauri/installer.nsi`). In-app updates exit
   ImageSage before launching setup.
-- The OpenAI and FLUX API keys are entered by the user at runtime and stored in Windows
+- The OpenAI API key is entered by the user at runtime and stored in Windows
   Credential Manager. No key or token is ever embedded in the binary.
 
 `publish.ps1` validates these rules before it creates a tag and validates the
@@ -77,7 +77,7 @@ The script creates and verifies the new public release first, then deletes every
 older release and its tag, except the `model-*` releases. If verification fails before cleanup, older releases
 are intentionally preserved.
 
-## Subject model
+## Local models
 
 The app's local models are downloaded on first use from `model-*` releases in
 this repo. Each is a prerelease that is never marked latest, so the update
@@ -85,9 +85,8 @@ check never sees it, and `publish.ps1` never deletes releases tagged `model-*`.
 `src-tauri/src/models.rs` pins each file's URL, size and SHA-256; a new model
 needs a new `model-*` release and new constants there.
 
-- `model-birefnet-v1`: BiRefNet general (MIT, github.com/ZhengPeng7/BiRefNet),
-  converted to fp16 by `tools/model/convert_birefnet.py`. Used by Select
-  subject and Auto-mask subject (`subject.rs`).
+- `model-birefnet-v1`: BiRefNet general, for subject detection. The app no
+  longer uses it; the release stays so older installed versions keep working.
 - `model-sam2-small-v1`: SAM 2.1 Small (Apache 2.0,
   github.com/facebookresearch/sam2), encoder and decoder exported by
   `tools/model/export_sam2.py`. Used by click to select (`sam.rs`).

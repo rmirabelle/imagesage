@@ -2,14 +2,12 @@ mod browse;
 mod credentials;
 mod document;
 mod files;
-mod flux;
 mod openai;
 mod pricing;
 mod recovery;
 mod models;
 mod requests;
 mod sam;
-mod subject;
 mod updater;
 
 use std::{path::Path, sync::Mutex};
@@ -82,7 +80,6 @@ pub fn run() {
         )
         .manage(PendingOpenDocument(Mutex::new(initial_document)))
         .manage(requests::AiRequests::default())
-        .manage(subject::SubjectModel::default())
         .manage(sam::SamModel::default())
         .setup(|app| {
             restore_main_window(app.handle());
@@ -102,12 +99,9 @@ pub fn run() {
             credentials::set_api_key,
             credentials::clear_api_key,
             credentials::test_api_key,
+            credentials::open_api_keys_page,
             openai::ai_generate,
             openai::ai_edit_whole,
-            openai::ai_edit_masked,
-            openai::describe_scene,
-            flux::flux_edit,
-            flux::flux_credits,
             pricing::fetch_prices,
             recovery::recovery_save,
             recovery::recovery_put_tiles,
@@ -118,7 +112,6 @@ pub fn run() {
             requests::ai_cancel,
             models::model_status,
             models::model_download,
-            subject::subject_mask,
             sam::sam_encode,
             sam::sam_mask,
             take_pending_open_document,
