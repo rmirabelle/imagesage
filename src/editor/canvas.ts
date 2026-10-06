@@ -246,6 +246,43 @@ export function drawLayers(target: HTMLCanvasElement, base: LayerCanvases | null
   for (const layer of layers) drawLayer(context, layer);
 }
 
+/** Layers drawn ahead of time: runs of Normal layers merged into one image, and each blended layer on its own. */
+export type FlatLayers = { image: HTMLCanvasElement; blend?: BlendMode }[];
+
+/**
+ * Draws `layers` ahead of time for fast redraws while one layer below them
+ * changes. Normal layers merge into one image. A blended layer (Screen,
+ * Overlay) mixes with what is below it, so it is kept apart and blended
+ * when it is drawn.
+ */
+export function flattenLayers(width: number, height: number, layers: LayerCanvases[]): FlatLayers {
+  const flat: FlatLayers = [];
+  let run: HTMLCanvasElement | null = null;
+  for (const layer of layers) {
+    if (!layer.blend) {
+      run ??= createCanvas(width, height);
+      drawLayer(run.getContext("2d")!, layer);
+      continue;
+    }
+    if (run) flat.push({ image: run });
+    run = null;
+    const image = createCanvas(width, height);
+    drawLayer(image.getContext("2d")!, { ...layer, blend: undefined });
+    flat.push({ image, blend: layer.blend });
+  }
+  if (run) flat.push({ image: run });
+  return flat;
+}
+
+/** Draws layers made by `flattenLayers` onto a context, each with its blend mode. */
+export function drawFlatLayers(context: CanvasRenderingContext2D, flat: FlatLayers) {
+  for (const item of flat) {
+    context.globalCompositeOperation = item.blend ?? "source-over";
+    context.drawImage(item.image, 0, 0);
+  }
+  context.globalCompositeOperation = "source-over";
+}
+
 /** A small PNG preview of a canvas for the layers panel; transparent areas stay transparent. */
 export function thumbnailOf(source: HTMLCanvasElement, maxSide = 168) {
   const scale = Math.min(1, maxSide / Math.max(source.width, source.height));

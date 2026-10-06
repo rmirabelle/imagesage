@@ -45,7 +45,7 @@ fn image_details(bytes: &[u8]) -> Result<(&'static str, u32, u32), String> {
     let mime_type = match format {
         image::ImageFormat::Png => "image/png",
         image::ImageFormat::Jpeg => "image/jpeg",
-        _ => return Err("ImageSage can open PNG and JPEG images".into()),
+        _ => return Err("Image Sage can open PNG and JPEG images".into()),
     };
     let decoded = image::load_from_memory_with_format(bytes, format)
         .map_err(|error| format!("Could not decode the image: {error}"))?;
@@ -149,15 +149,15 @@ fn read_limited(entry: &mut zip::read::ZipFile<'_>, maximum: u64) -> Result<Vec<
 
 fn validate_manifest(manifest: &Value) -> Result<(), String> {
     if manifest.get("format").and_then(Value::as_str) != Some(DOCUMENT_FORMAT) {
-        return Err("This is not an ImageSage document".into());
+        return Err("This is not an Image Sage document".into());
     }
     let version = manifest
         .get("formatVersion")
         .and_then(Value::as_u64)
-        .ok_or_else(|| "The ImageSage document has no valid format version".to_string())?;
+        .ok_or_else(|| "The Image Sage document has no valid format version".to_string())?;
     if !(OLDEST_DOCUMENT_VERSION..=DOCUMENT_VERSION).contains(&version) {
         return Err(format!(
-            "This ImageSage document uses unsupported format version {version}"
+            "This Image Sage document uses unsupported format version {version}"
         ));
     }
     Ok(())
@@ -170,9 +170,9 @@ fn history_tile_paths(manifest: &Value) -> Result<Vec<String>, String> {
     };
     let steps = history
         .as_array()
-        .ok_or_else(|| "The ImageSage document history is invalid".to_string())?;
+        .ok_or_else(|| "The Image Sage document history is invalid".to_string())?;
     if steps.len() > MAX_HISTORY_STEPS {
-        return Err("The ImageSage document history is too long to open safely".into());
+        return Err("The Image Sage document history is too long to open safely".into());
     }
     let mut paths = Vec::with_capacity(steps.len() * 2 + 1);
     let mut add = |path: &str| -> Result<(), String> {
@@ -214,22 +214,22 @@ fn history_tile_paths(manifest: &Value) -> Result<Vec<String>, String> {
 fn open_document(path: &Path, include_history: bool) -> Result<OpenedImageFile, String> {
     let file = File::open(path).map_err(|error| format!("Could not open the document: {error}"))?;
     let mut archive = ZipArchive::new(file)
-        .map_err(|error| format!("Could not read the ImageSage document: {error}"))?;
+        .map_err(|error| format!("Could not read the Image Sage document: {error}"))?;
 
     let manifest_bytes = {
         let mut entry = archive
             .by_name("manifest.json")
-            .map_err(|_| "The ImageSage document is missing manifest.json".to_string())?;
+            .map_err(|_| "The Image Sage document is missing manifest.json".to_string())?;
         read_limited(&mut entry, MAX_MANIFEST_BYTES)?
     };
     let manifest: Value = serde_json::from_slice(&manifest_bytes)
-        .map_err(|error| format!("The ImageSage document manifest is invalid: {error}"))?;
+        .map_err(|error| format!("The Image Sage document manifest is invalid: {error}"))?;
     validate_manifest(&manifest)?;
 
     let image_bytes = {
         let mut entry = archive
             .by_name("image.png")
-            .map_err(|_| "The ImageSage document is missing its image".to_string())?;
+            .map_err(|_| "The Image Sage document is missing its image".to_string())?;
         read_limited(&mut entry, MAX_IMAGE_BYTES)?
     };
     let (mime_type, width, height) = image_details(&image_bytes)?;
@@ -240,7 +240,7 @@ fn open_document(path: &Path, include_history: bool) -> Result<OpenedImageFile, 
             let bytes = {
                 let mut entry = archive
                     .by_name(&tile_path)
-                    .map_err(|_| format!("The ImageSage document is missing {tile_path}"))?;
+                    .map_err(|_| format!("The Image Sage document is missing {tile_path}"))?;
                 read_limited(&mut entry, MAX_IMAGE_BYTES)?
             };
             history_tiles.push(HistoryTile {
@@ -336,13 +336,13 @@ pub(crate) fn write_document(
     tiles: Vec<(String, Vec<u8>)>,
 ) -> Result<(), String> {
     let mut manifest: Value = serde_json::from_str(manifest_json)
-        .map_err(|error| format!("Could not serialize the ImageSage document: {error}"))?;
+        .map_err(|error| format!("Could not serialize the Image Sage document: {error}"))?;
     validate_manifest(&manifest)?;
     let (width, height) = image_size(&image_bytes)?;
     let image = manifest
         .get_mut("image")
         .and_then(Value::as_object_mut)
-        .ok_or_else(|| "The ImageSage document has no image metadata".to_string())?;
+        .ok_or_else(|| "The Image Sage document has no image metadata".to_string())?;
     image.insert("path".into(), Value::String("image.png".into()));
     image.insert("width".into(), Value::from(width));
     image.insert("height".into(), Value::from(height));
@@ -362,13 +362,13 @@ pub(crate) fn write_document(
     }
 
     let manifest_bytes = serde_json::to_vec_pretty(&manifest)
-        .map_err(|error| format!("Could not serialize the ImageSage document: {error}"))?;
+        .map_err(|error| format!("Could not serialize the Image Sage document: {error}"))?;
 
     // Write beside the target, then swap it in, so a failed save never truncates the old file.
     let temporary = target.with_extension("imagesage.saving");
     let result = (|| -> Result<(), String> {
         let file = File::create(&temporary)
-            .map_err(|error| format!("Could not create the ImageSage document: {error}"))?;
+            .map_err(|error| format!("Could not create the Image Sage document: {error}"))?;
         let mut archive = ZipWriter::new(file);
         let deflated = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
         // PNG data is already compressed; storing it avoids slow, useless deflate passes.
@@ -388,7 +388,7 @@ pub(crate) fn write_document(
         }
         archive
             .finish()
-            .map_err(|error| format!("Could not finish the ImageSage document: {error}"))?;
+            .map_err(|error| format!("Could not finish the Image Sage document: {error}"))?;
         Ok(())
     })();
     if let Err(error) = result {

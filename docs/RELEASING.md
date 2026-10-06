@@ -78,7 +78,7 @@ generated executable and NSIS script again after the release build.
 
 Do not run `publish.ps1` until the local installer has passed the manual check.
 The script creates and verifies the new public release first, then deletes every
-older release and its tag, except the `model-*` releases. If verification fails before cleanup, older releases
+older release and its tag, except the `model-*` and `music-*` releases. If verification fails before cleanup, older releases
 are intentionally preserved.
 
 ## Local models
@@ -94,6 +94,20 @@ needs a new `model-*` release and new constants there.
 - `model-sam2-small-v1`: SAM 2.1 Small (Apache 2.0,
   github.com/facebookresearch/sam2), encoder and decoder exported by
   `tools/model/export_sam2.py`. Used by click to select (`sam.rs`).
+
+## Slideshow music
+
+The video slideshow's music tracks download on first use from `music-*`
+releases, set up like the model releases: prereleases never marked latest,
+which `publish.ps1` never deletes. `src-tauri/src/music.rs` pins each track's
+title, URL, size and SHA-256 in `TRACKS`; a new track needs its MP3 in a
+`music-*` release and an entry there. Dev builds also list every MP3 in the
+project's `music/` folder (gitignored), so tracks can be tried before they
+are published; a file there with a published track's exact size counts as
+that track.
+
+- `music-v1`: five tracks by Robert Mirabelle (Indiara Lost, Infinity Teeth,
+  Into the Light, Nemesis (Redux), Shenandoah Spirit).
 
 ONNX Runtime is linked into `imagesage.exe`. Its GPU backend, `DirectML.dll`,
 is copied by `src-tauri/build.rs` into `src-tauri/` (gitignored) and bundled as

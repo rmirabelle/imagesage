@@ -11,10 +11,10 @@ const SECTIONS: { title: string; shortcuts: Shortcut[] }[] = [
   {
     title: "General",
     shortcuts: [
-      { keys: [["Ctrl", "Enter"]], action: "Send the edit, or regenerate the layer" },
+      { keys: [["Ctrl", "Enter"]], action: "Generate a new layer" },
+      { keys: [["Ctrl", "Shift", "Enter"]], action: "Regenerate the selected layer" },
       { keys: [["Ctrl", "S"]], action: "Save" },
-      { keys: [["Ctrl", "Shift", "S"]], action: "Save As" },
-      { keys: [["Esc"]], action: "Cancel Regenerate" }
+      { keys: [["Ctrl", "Shift", "S"]], action: "Save As" }
     ]
   },
   {

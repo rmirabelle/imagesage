@@ -195,12 +195,13 @@ if ($latestRelease.tag_name -ne $tag -or $latestAssets -notcontains $assetName) 
 
 Write-Host "==> Removing superseded releases ..." -ForegroundColor Cyan
 <#
-  Releases tagged "model-*" hold the subject model that the app downloads on
-  first use. They are not app releases, so they are never deleted here.
+  Releases tagged "model-*" hold the local models, and "music-*" the slideshow
+  music, that the app downloads on first use. They are not app releases, so
+  they are never deleted here.
 #>
 $priorReleases = @(Invoke-Native -FailureMessage "Could not list existing GitHub releases" { gh release list --limit 100 --json tagName -q '.[].tagName' })
 foreach ($priorTag in $priorReleases) {
-  if ($priorTag -and $priorTag -ne $tag -and -not $priorTag.StartsWith("model-")) {
+  if ($priorTag -and $priorTag -ne $tag -and -not $priorTag.StartsWith("model-") -and -not $priorTag.StartsWith("music-")) {
     Write-Host "    - deleting $priorTag"
     Invoke-Native -FailureMessage "Could not delete superseded release $priorTag" { gh release delete $priorTag --yes --cleanup-tag }
   }

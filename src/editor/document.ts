@@ -291,20 +291,20 @@ export function parseManifest(manifestJson: string, tiles?: HistoryTile[]) {
   try {
     value = JSON.parse(manifestJson);
   } catch {
-    throw new Error("The ImageSage document manifest is not valid JSON.");
+    throw new Error("The Image Sage document manifest is not valid JSON.");
   }
   if (!isRecord(value) || value.format !== IMAGESAGE_DOCUMENT_FORMAT) {
-    throw new Error("This is not an ImageSage document.");
+    throw new Error("This is not an Image Sage document.");
   }
   if (typeof value.formatVersion !== "number" || value.formatVersion < OLDEST_DOCUMENT_VERSION || value.formatVersion > IMAGESAGE_DOCUMENT_VERSION) {
-    throw new Error(`ImageSage cannot open document format version ${String(value.formatVersion)}.`);
+    throw new Error(`Image Sage cannot open document format version ${String(value.formatVersion)}.`);
   }
   const rawHistory = Array.isArray(value.history) ? value.history : [];
   const tileData = new Map((tiles ?? []).map((tile) => [tile.path, tile.dataUrl]));
   const tile = (path: string | undefined) => {
     if (path === undefined) return undefined;
     const data = tileData.get(path);
-    if (!data) throw new Error("The ImageSage document is missing edit history tiles.");
+    if (!data) throw new Error("The Image Sage document is missing edit history tiles.");
     return data;
   };
   /** Replaces each adjustment mask's tile path with the tile data; a mask stored in the manifest itself (an earlier version) stays as it is. */

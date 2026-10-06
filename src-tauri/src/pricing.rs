@@ -5,7 +5,7 @@ use crate::requests;
 
 /**
  * Live price lists. OpenAI has no pricing API, but it publishes its official
- * price pages as Markdown. ImageSage reads the tables it needs from those
+ * price pages as Markdown. Image Sage reads the tables it needs from those
  * pages; when a page cannot be read, the app falls back to its built-in table
  * and says so.
  */

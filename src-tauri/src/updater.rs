@@ -139,7 +139,7 @@ pub async fn download_and_run_installer(
 
 fn validate_download(url: &str, asset_name: &str) -> Result<(), String> {
     if !url.starts_with(RELEASE_DOWNLOAD_PREFIX) {
-        return Err("The update URL is not an official ImageSage release.".into());
+        return Err("The update URL is not an official Image Sage release.".into());
     }
     if asset_name.contains(['/', '\\']) || !asset_name.to_ascii_lowercase().ends_with(".exe") {
         return Err("The update asset name is invalid.".into());

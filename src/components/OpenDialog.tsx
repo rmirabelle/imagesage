@@ -247,7 +247,7 @@ const formatSize = (bytes: number) => {
 
 const typeLabel = (entry: BrowseEntry) => {
   if (entry.kind === "folder") return "Folder";
-  if (entry.kind === "document") return "ImageSage document";
+  if (entry.kind === "document") return "Image Sage document";
   return /\.png$/i.test(entry.name) ? "PNG image" : "JPEG image";
 };
 
@@ -605,7 +605,7 @@ export function OpenDialog({ onCancel, onOpen, title = "Open" }: Props) {
         if (await navigate(candidate)) return;
       }
       if (active) {
-        setNotice({ tone: "error", message: "ImageSage could not find a folder to browse." });
+        setNotice({ tone: "error", message: "Image Sage could not find a folder to browse." });
         setLoadingDirectory(false);
       }
     })();
@@ -822,7 +822,7 @@ export function OpenDialog({ onCancel, onOpen, title = "Open" }: Props) {
           <div className="save-dialog-title-icon"><FolderOpen size={22} weight="fill" /></div>
           <div>
             <h2 id="open-file-title">{title}</h2>
-            <p>Choose an ImageSage document or a PNG or JPEG image.</p>
+            <p>Choose an Image Sage document or a PNG or JPEG image.</p>
           </div>
           <button className="save-dialog-close" onClick={onCancel} aria-label="Close open dialog" data-help="Close">
             <X size={18} />
@@ -886,7 +886,7 @@ export function OpenDialog({ onCancel, onOpen, title = "Open" }: Props) {
                   <span>Show</span>
                   <select value={filter} onChange={(event) => setFilter(event.target.value as Filter)} aria-label="File type filter">
                     <option value="all">All supported files</option>
-                    <option value="document">ImageSage documents</option>
+                    <option value="document">Image Sage documents</option>
                     <option value="image">PNG and JPEG images</option>
                   </select>
                 </label>

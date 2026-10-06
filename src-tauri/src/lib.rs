@@ -6,8 +6,10 @@ mod openai;
 mod pricing;
 mod recovery;
 mod models;
+mod music;
 mod requests;
 mod sam;
+mod spend;
 mod updater;
 
 use std::{path::Path, sync::Mutex};
@@ -15,7 +17,7 @@ use tauri::{Emitter, Manager, State};
 
 struct PendingOpenDocument(Mutex<Option<String>>);
 
-/// The first argument that names a file ImageSage can open (`.imagesage`, PNG or JPEG).
+/// The first argument that names a file Image Sage can open (`.imagesage`, PNG or JPEG).
 fn openable_file_from_args(args: &[String], cwd: &str) -> Option<String> {
     args.iter().skip(1).find_map(|argument| {
         let path = Path::new(argument);
@@ -88,6 +90,9 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             files::save_image,
             files::cursor_position,
+            files::reveal_file,
+            files::log_frontend_error,
+            files::play_video,
             document::open_image_file,
             document::save_imagesage_document,
             browse::list_browse_directory,
@@ -103,6 +108,7 @@ pub fn run() {
             openai::ai_generate,
             openai::ai_edit_whole,
             pricing::fetch_prices,
+            spend::spend_record,
             recovery::recovery_save,
             recovery::recovery_put_tiles,
             recovery::save_document_from_tiles,
@@ -112,6 +118,10 @@ pub fn run() {
             requests::ai_cancel,
             models::model_status,
             models::model_download,
+            music::music_tracks,
+            music::music_download,
+            music::music_read,
+            music::music_read_file,
             sam::sam_encode,
             sam::sam_mask,
             take_pending_open_document,
@@ -120,7 +130,7 @@ pub fn run() {
             updater::get_app_version
         ])
         .run(tauri::generate_context!())
-        .expect("error while running ImageSage");
+        .expect("error while running Image Sage");
 }
 
 #[cfg(test)]

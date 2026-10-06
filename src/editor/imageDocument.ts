@@ -24,6 +24,13 @@ export interface ImageDocument {
   savedRevision: number;
   saving: boolean;
   busy: boolean;
+  /** A new image from a prompt: the editor generates it as the first layer when the tab opens. Not saved. */
+  startGeneration?: { prompt: string; model: string; quality: string };
 }
 
 export const isDocumentDirty = (document: ImageDocument) => document.revision !== document.savedRevision;
+
+/** Charged so far for the image: its creation and every saved edit. */
+export const documentSpend = (document: ImageDocument) =>
+  document.history.reduce((sum, step) => sum + (step.cost ?? 0), 0)
+  + (document.origin.kind === "generated" ? document.origin.cost ?? 0 : 0);

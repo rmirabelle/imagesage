@@ -39,7 +39,7 @@ pub fn api_key(provider: Provider) -> Result<String, String> {
     match entry(provider)?.get_password() {
         Ok(key) if !key.trim().is_empty() => Ok(key),
         Ok(_) | Err(keyring::Error::NoEntry) => Err(format!(
-            "ImageSage is not connected to {}. Add your API key in Settings.",
+            "Image Sage is not connected to {}. Add your API key in Settings.",
             provider.label()
         )),
         Err(error) => Err(format!("Could not read the saved API key: {error}")),

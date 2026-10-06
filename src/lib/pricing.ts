@@ -56,7 +56,7 @@ const BUILT_IN: PriceBook = {
 const CACHE_KEY = "imagesage.price-book";
 const LEARNED_KEY = "imagesage.learned-prices";
 const REFRESH_AFTER_MS = 12 * 60 * 60 * 1000;
-/** What ImageSage was charged, per local day ("2026-10-05": dollars). */
+/** What Image Sage was charged, per local day ("2026-10-05": dollars). */
 const SPEND_KEY = "imagesage.spend-by-day";
 /** Days kept in the spend record: enough for this month and the month before. */
 const SPEND_DAYS_KEPT = 62;
@@ -131,8 +131,8 @@ export const priceProblems = () => book.problems;
 
 const familyOf = (model: string) => (model.startsWith("gpt-image-2.5") ? "gpt-image-2.5" : "gpt-image-2");
 const ratesFor = (model: string) => book.openai[model] ?? BUILT_IN.openai[model] ?? BUILT_IN.openai["gpt-image-2"];
-/** Each streamed partial image adds 100 output tokens; ImageSage asks for 2. */
-const PARTIAL_IMAGE_TOKENS = 2 * 100;
+/** Each streamed partial image adds 100 output tokens; Image Sage asks for 3. */
+const PARTIAL_IMAGE_TOKENS = 3 * 100;
 
 /**
  * Output tokens for one image, by the formula in OpenAI's image guide
@@ -203,18 +203,49 @@ export function openAiActualCost(usage: unknown, model = "gpt-image-2"): number 
 const dayKey = (date: Date) =>
   `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
 
+const oldestSpendDay = () => dayKey(new Date(Date.now() - SPEND_DAYS_KEPT * 24 * 60 * 60 * 1000));
+/** The spend record now lives in the app's data folder; until then, charges stay in this web view's storage. */
+let spendShared = false;
+
+/**
+ * Loads the spend record from the app's data folder, which the dev app and
+ * the installed app share. Charges kept in this web view's storage by older
+ * versions move into it once, so nothing is counted twice.
+ */
+export async function loadSpend() {
+  if (!isTauri() || spendShared) return;
+  try {
+    spendByDay = await invoke<Record<string, number>>("spend_record", { add: spendByDay, oldest: oldestSpendDay() });
+    spendShared = true;
+    try { localStorage.removeItem(SPEND_KEY); } catch { /* The record is already in the shared file. */ }
+    changed();
+  } catch {
+    /* The totals stay in this web view's storage and move on the next start. */
+  }
+}
+
 /** Adds a real charge to today's spend; days older than `SPEND_DAYS_KEPT` are dropped. */
 export function recordSpend(usd: number | null) {
   if (usd === null || !(usd > 0)) return;
   const today = dayKey(new Date());
-  const oldest = dayKey(new Date(Date.now() - SPEND_DAYS_KEPT * 24 * 60 * 60 * 1000));
+  const oldest = oldestSpendDay();
   const next = { ...spendByDay, [today]: (spendByDay[today] ?? 0) + usd };
   spendByDay = Object.fromEntries(Object.entries(next).filter(([day]) => day >= oldest));
-  writeJson(SPEND_KEY, spendByDay);
   changed();
+  if (!spendShared) {
+    writeJson(SPEND_KEY, spendByDay);
+    return;
+  }
+  invoke<Record<string, number>>("spend_record", { add: { [today]: usd }, oldest })
+    .then((record) => { spendByDay = record; changed(); })
+    .catch(() => {
+      /** Not saved: it waits in this web view's storage and moves into the shared file on the next start. */
+      const waiting = readJson<Record<string, number>>(SPEND_KEY) ?? {};
+      writeJson(SPEND_KEY, { ...waiting, [today]: (Number(waiting[today]) || 0) + usd });
+    });
 }
 
-/** What ImageSage was charged today and this month (local time). Re-render with `usePrices`. */
+/** What Image Sage was charged today and this month (local time). Re-render with `usePrices`. */
 export function spendTotals() {
   const today = dayKey(new Date());
   const month = today.slice(0, 7);

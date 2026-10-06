@@ -13,7 +13,7 @@ describe("pricing", () => {
   });
 
   it("adds the streamed preview tokens to the estimate", () => {
-    expect(estimateOpenAiImage("gpt-image-2", "high", "1024x1024")).toBeCloseTo((7024 + 200) * 30 / 1e6, 6);
+    expect(estimateOpenAiImage("gpt-image-2", "high", "1024x1024")).toBeCloseTo((7024 + 300) * 30 / 1e6, 6);
   });
 
   it("reads OpenAI usage into dollars", () => {

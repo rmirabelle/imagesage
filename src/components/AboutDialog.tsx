@@ -89,14 +89,14 @@ export function AboutDialog({ version, initialUpdateInfo, onClose }: Props) {
         onPointerDown={(event) => event.stopPropagation()}
       >
         {!downloading && (
-          <button className="about-dialog-close" onClick={onClose} aria-label="Close About ImageSage" data-help="Close">
+          <button className="about-dialog-close" onClick={onClose} aria-label="Close About Image Sage" data-help="Close">
             <X size={18} />
           </button>
         )}
         <div className="about-dialog-content">
-          <div className="about-app-icon"><img src="/icon.ico" alt="" /></div>
+          <div className="about-app-icon"><img src="/app-icon.png" alt="" /></div>
           <div className="about-dialog-copy">
-            <h2 id="about-title">ImageSage</h2>
+            <h2 id="about-title">Image Sage</h2>
             <div className="about-version">Version {version || "—"}</div>
             <p>Prompt. Refine. Repeat.</p>
             <span>by Robert Mirabelle</span>
@@ -135,7 +135,7 @@ function UpdateSection({
   if (state.kind === "upToDate") {
     return (
       <div className="about-update-result">
-        <div className="about-update-status success"><CheckCircle size={17} weight="fill" /> ImageSage is up to date.</div>
+        <div className="about-update-status success"><CheckCircle size={17} weight="fill" /> Image Sage is up to date.</div>
         <button className="about-update-link" onClick={onCheck}><ArrowClockwise size={13} /> Check again</button>
       </div>
     );
@@ -157,7 +157,7 @@ function UpdateSection({
       <div className="about-update-result">
         <div className="about-update-status"><CircleNotch className="spin" size={16} /> Downloading version {state.info.latestVersion}{percent === null ? "…" : ` — ${percent}%`}</div>
         <div className="about-update-progress"><i style={{ width: `${percent ?? 10}%` }} /></div>
-        <small>When the download finishes, ImageSage closes, installs the update with no setup pages, and opens again.</small>
+        <small>When the download finishes, Image Sage closes, installs the update with no setup pages, and opens again.</small>
       </div>
     );
   }

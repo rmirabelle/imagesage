@@ -19,6 +19,9 @@ icon-pack.zip
 /*.jpg
 /*.jpeg
 
+# Slideshow music tried in dev builds; published tracks live in music-* releases
+/music/
+
 # DirectML runtime, copied from the ort build by src-tauri/build.rs
 src-tauri/DirectML.dll
 

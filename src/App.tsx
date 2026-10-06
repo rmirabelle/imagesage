@@ -3,20 +3,21 @@ import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { save } from "@tauri-apps/plugin-dialog";
-import { CheckCircle, FolderOpen, MagicWand, SpinnerGap, Warning, WarningCircle, X } from "@phosphor-icons/react";
+import { ArrowClockwise, ArrowCounterClockwise, CheckCircle, DownloadSimple, FilmStrip, FloppyDisk, FolderOpen, GearSix, ImageSquare, Info, Keyboard, MagicWand, SpinnerGap, Warning, WarningCircle, X } from "@phosphor-icons/react";
 import { AboutDialog } from "./components/AboutDialog";
 import { ShortcutsDialog } from "./components/ShortcutsDialog";
 import { ConnectDialog, type SettingsSection } from "./components/ConnectDialog";
-import { Editor, type Notice } from "./components/Editor";
-import { NewImageDialog, type GeneratedImage } from "./components/NewImageDialog";
+import { Editor, type EditorCommand, type Notice } from "./components/Editor";
+import { NewImageDialog, type NewImageRequest } from "./components/NewImageDialog";
 import { OpenDialog } from "./components/OpenDialog";
 import { Tooltips } from "./components/Tooltips";
 import type { SaveFormat } from "./components/SaveDialog";
+import { MenuBar, type Menu } from "./components/MenuBar";
 import { TitleBar } from "./components/TitleBar";
-import { canvasFromDataUrl, canvasToDataUrl, scaledCanvas } from "./editor/canvas";
+import { canvasFromDataUrl, canvasToDataUrl, createCanvas, scaledCanvas } from "./editor/canvas";
 import { exceedsWholeImageLimits, fitWithinWholeImageLimits } from "./editor/region";
 import { createManifest, parseManifest, type HistoryTile } from "./editor/document";
-import { isDocumentDirty, type ImageDocument } from "./editor/imageDocument";
+import { documentSpend, isDocumentDirty, type ImageDocument } from "./editor/imageDocument";
 import type { DocumentOrigin } from "./editor/types";
 import {
   DISCONNECTED,
@@ -28,7 +29,7 @@ import {
   type KeyStatuses,
   type Provider
 } from "./lib/ai";
-import { formatUsd, refreshPrices, spendTotals, usePrices } from "./lib/pricing";
+import { formatUsd, loadSpend, refreshPrices, spendTotals, usePrices } from "./lib/pricing";
 import { listRecovery, removeRecovery, saveDocumentFile, saveRecovery } from "./lib/recovery";
 import { checkForUpdate, getAppVersion, type UpdateInfo } from "./lib/updater";
 
@@ -41,7 +42,7 @@ type OpenedImageFile = {
   historyTiles: HistoryTile[];
 };
 
-type NewDocument = Pick<ImageDocument, "name" | "path" | "suggestedPath" | "createdAt" | "origin" | "surface" | "base" | "baseAdjust" | "history" | "historyIndex"> & {
+type NewDocument = Pick<ImageDocument, "name" | "path" | "suggestedPath" | "createdAt" | "origin" | "surface" | "base" | "baseAdjust" | "history" | "historyIndex" | "startGeneration"> & {
   /** Generated images cost money, so they start unsaved; imported files start clean. */
   startsDirty: boolean;
   /** Keeps a recovered document's id, so its recovery file is reused. */
@@ -65,10 +66,11 @@ type DocumentPanelProps = {
   onCommit: (id: string, patch: Partial<Pick<ImageDocument, "base" | "baseAdjust" | "history" | "historyIndex">>, markDirty?: boolean) => void;
   onBusyChange: (id: string, busy: boolean) => void;
   /** Saves to the document's file; `saveAs` (or a document never saved) asks for a file first. */
-  onSave: (id: string, saveAs?: boolean) => Promise<void>;
+  onSave: (id: string, saveAs?: boolean) => Promise<boolean>;
   onExport: (id: string, dataUrl: string, format: SaveFormat) => Promise<boolean>;
   onExportVideo: (id: string, video: Blob) => Promise<boolean>;
   onNotice: (notice: Notice) => void;
+  command: EditorCommand | null;
 };
 
 const DocumentPanel = memo(function DocumentPanel(props: DocumentPanelProps) {
@@ -100,17 +102,24 @@ export default function App() {
     setKeyStatuses((current) => ({ ...current, [provider]: status }));
   }, []);
   const [notice, setNotice] = useState<Notice>(null);
-  /** The middle of the active image's work area, where messages show; null centers them in the window. */
-  const [noticeCenter, setNoticeCenter] = useState<{ left: number; top: number } | null>(null);
+  /**
+   * Where messages show: centered across the image, about 30px below its top
+   * (or below the top of the work area when the image is scrolled up past it).
+   * Null centers them in the window.
+   */
+  const [noticeCenter, setNoticeCenter] = useState<{ left: number; top: number; transform: string } | null>(null);
   useLayoutEffect(() => {
     if (!notice) return;
     const place = () => {
-      const area = activeDocumentId
-        ? window.document.querySelector<HTMLElement>(`#image-panel-${CSS.escape(activeDocumentId)} .editor-workspace`)
-        : null;
-      const rect = area?.getBoundingClientRect();
-      setNoticeCenter(rect && rect.width > 0 && rect.height > 0 ? { left: rect.left + rect.width / 2, top: rect.top + rect.height / 2 } : null);
-    };
+      const panel = activeDocumentId ? window.document.querySelector<HTMLElement>(`#image-panel-${CSS.escape(activeDocumentId)}`) : null;
+      const area = panel?.querySelector<HTMLElement>(".editor-workspace")?.getBoundingClientRect();
+      const image = panel?.querySelector<HTMLElement>(".canvas-stage")?.getBoundingClientRect();
+      if (!area || !image || area.width === 0 || area.height === 0) {
+        setNoticeCenter(null);
+        return;
+      }
+      const left = (Math.max(area.left, image.left) + Math.min(area.right, image.right)) / 2;
+      setNoticeCenter({ left, top: Math.max(area.top, image.top) + 30, transform: "translateX(-50%)" });    };
     place();
     window.addEventListener("resize", place);
     return () => window.removeEventListener("resize", place);
@@ -136,7 +145,7 @@ export default function App() {
   const [noticeHovered, setNoticeHovered] = useState(false);
   /** Success and warning messages close by themselves; errors stay until closed. */
   useEffect(() => {
-    if (!notice || notice.tone === "error" || noticeHovered) return;
+    if (!notice || notice.tone === "error" || notice.sticky || noticeHovered) return;
     const delay = notice.tone === "warning" ? 8000 : notice.action ? 10000 : 3200;
     const timer = window.setTimeout(() => setNotice(null), delay);
     return () => window.clearTimeout(timer);
@@ -259,6 +268,7 @@ export default function App() {
     let cancelled = false;
     apiKeyStatus("openai").then((status) => { if (!cancelled) setKeyStatus("openai", status); }).catch(() => {});
     void refreshPrices();
+    void loadSpend();
     getAppVersion().then((version) => { if (!cancelled) setAppVersion(version); }).catch(() => {});
     checkForUpdate().then((info) => { if (!cancelled && info) setStartupUpdate(info); }).catch(() => {});
     return () => { cancelled = true; };
@@ -292,7 +302,7 @@ export default function App() {
       const opened = await invoke<OpenedImageFile>("open_image_file", { path, includeHistory: true });
       const surface = await canvasFromDataUrl(opened.dataUrl);
       if (opened.kind === "document") {
-        if (!opened.manifestJson) throw new Error("The ImageSage document has no manifest.");
+        if (!opened.manifestJson) throw new Error("The Image Sage document has no manifest.");
         const restored = parseManifest(opened.manifestJson, opened.historyTiles);
         addDocument({
           name: fileName(path),
@@ -394,7 +404,7 @@ export default function App() {
     return () => window.removeEventListener("keydown", blockReload, true);
   }, []);
 
-  /** Closing the window quits ImageSage, so ask first when work is unsaved. */
+  /** Closing the window quits Image Sage, so ask first when work is unsaved. */
   useEffect(() => {
     if (!isTauri()) return;
     let stop: (() => void) | undefined;
@@ -407,58 +417,55 @@ export default function App() {
     return () => stop?.();
   }, []);
 
-  const addGenerated = useCallback(async (image: GeneratedImage) => {
-    try {
-      const surface = await canvasFromDataUrl(image.dataUrl);
-      const origin: DocumentOrigin = {
-        kind: "generated",
-        prompt: image.prompt,
-        model: image.model,
-        quality: image.quality,
-        size: image.size,
-        ...(image.cost !== null ? { cost: image.cost } : {})
-      };
-      addDocument({
-        name: "Untitled.imagesage",
-        path: null,
-        createdAt: new Date().toISOString(),
-        origin,
-        surface,
-        history: [],
-        historyIndex: 0,
-        startsDirty: true
-      });
-      setNewImageOpen(false);
-      showNotice({
-        tone: "success",
-        message: `Image generated${image.cost !== null ? ` for ${formatUsd(image.cost)}` : ""}. Describe a change to edit it, then mask the new layer to keep only the part you want.`
-      });
-    } catch (error) {
-      showNotice({ tone: "error", message: String(error) });
-    }
-  }, [addDocument, showNotice]);
+  /**
+   * Opens a new tab with an empty canvas of the chosen size. The editor then
+   * generates the image there as the first layer, with the same previews,
+   * Capture and Cancel as an edit.
+   */
+  const startGenerated = useCallback((request: NewImageRequest) => {
+    const [width, height] = request.size.split("x").map(Number);
+    const origin: DocumentOrigin = {
+      kind: "generated",
+      prompt: request.prompt,
+      model: request.model,
+      quality: request.quality,
+      size: request.size
+    };
+    addDocument({
+      name: "Untitled.imagesage",
+      path: null,
+      createdAt: new Date().toISOString(),
+      origin,
+      surface: createCanvas(width, height),
+      history: [],
+      historyIndex: 0,
+      startGeneration: { prompt: request.prompt, model: request.model, quality: request.quality },
+      startsDirty: true
+    });
+    setNewImageOpen(false);
+  }, [addDocument]);
 
   /**
    * Save writes over the document's own file. Save As, and the first save of a
    * new document, show the save dialog first: at the document's file, or for a
-   * new document beside the image it came from.
+   * new document beside the image it came from. True when the file was saved.
    */
-  const saveDocument = useCallback(async (documentId: string, saveAs = false) => {
+  const saveDocument = useCallback(async (documentId: string, saveAs = false): Promise<boolean> => {
     const document = documentsRef.current.find((candidate) => candidate.id === documentId);
     if (!document || !isTauri()) {
-      showNotice({ tone: "error", message: "Saving documents is available in the ImageSage desktop app." });
-      return;
+      showNotice({ tone: "error", message: "Saving documents is available in the Image Sage desktop app." });
+      return false;
     }
     /** Saving works while AI edits run; a result that arrives later marks the document changed again. */
-    if (document.saving) return;
+    if (document.saving) return false;
     updateDocument(documentId, { saving: true });
     try {
       const chosenPath = !saveAs && document.path ? document.path : await save({
-        title: saveAs ? "Save ImageSage document as" : "Save ImageSage document",
+        title: saveAs ? "Save Image Sage document as" : "Save Image Sage document",
         defaultPath: document.path ?? document.suggestedPath ?? document.name,
-        filters: [{ name: "ImageSage document", extensions: ["imagesage"] }]
+        filters: [{ name: "Image Sage document", extensions: ["imagesage"] }]
       });
-      if (!chosenPath) return;
+      if (!chosenPath) return false;
       const path = chosenPath.toLowerCase().endsWith(".imagesage") ? chosenPath : `${chosenPath}.imagesage`;
       const revision = document.revision;
       const { manifest, tiles } = createManifest(
@@ -482,8 +489,10 @@ export default function App() {
       }
       updateDocument(documentId, { path, name: fileName(path), savedRevision: revision });
       showNotice({ tone: "success", message: `Saved ${path}` });
+      return true;
     } catch (error) {
       showNotice({ tone: "error", message: String(error) });
+      return false;
     } finally {
       updateDocument(documentId, { saving: false });
     }
@@ -492,7 +501,7 @@ export default function App() {
   /** Saves a video slideshow as an MP4 file next to where images are exported. */
   const exportVideo = useCallback(async (documentId: string, video: Blob) => {
     if (!isTauri()) {
-      showNotice({ tone: "error", message: "Exporting is available in the ImageSage desktop app." });
+      showNotice({ tone: "error", message: "Exporting is available in the Image Sage desktop app." });
       return false;
     }
     const document = documentsRef.current.find((candidate) => candidate.id === documentId);
@@ -512,14 +521,23 @@ export default function App() {
       reader.readAsDataURL(video);
     });
     await invoke("save_image", { path, dataUrl });
-    showNotice({ tone: "success", message: `Exported ${path}` });
+    showNotice({
+      tone: "success",
+      message: "Exported",
+      file: path,
+      sticky: true,
+      actions: [
+        { label: "Play", keepOpen: true, run: () => void invoke("play_video", { path }).catch((error) => showNotice({ tone: "error", message: String(error) })) },
+        { label: "OK", run: () => {} }
+      ]
+    });
     return true;
   }, [showNotice]);
 
   const exportImage = useCallback(async (documentId: string, dataUrl: string, format: SaveFormat) => {
     const extension = format === "png" ? "png" : "jpg";
     if (!isTauri()) {
-      showNotice({ tone: "error", message: "Exporting is available in the ImageSage desktop app." });
+      showNotice({ tone: "error", message: "Exporting is available in the Image Sage desktop app." });
       return false;
     }
     const document = documentsRef.current.find((candidate) => candidate.id === documentId);
@@ -533,7 +551,7 @@ export default function App() {
     }
     const defaultPath = document.path
       ? document.path.replace(/\.imagesage$/i, `.${extension}`)
-      : `ImageSage ${sequence}.${extension}`;
+      : `Image Sage ${sequence}.${extension}`;
     const chosenPath = await save({
       title: "Export image",
       defaultPath,
@@ -569,15 +587,35 @@ export default function App() {
     if (documentId) removeDocument(documentId);
   }, [pendingCloseDocumentId, removeDocument]);
 
+  /** Save in the close dialog: the image closes only when its save finishes; Cancel in the save dialog keeps it open. */
+  const saveAndCloseDocument = useCallback(async () => {
+    const documentId = pendingCloseDocumentId;
+    setPendingCloseDocumentId(null);
+    if (documentId && await saveDocument(documentId)) removeDocument(documentId);
+  }, [pendingCloseDocumentId, removeDocument, saveDocument]);
+
   /** The user chose to discard unsaved work, so its recovery copies go too. */
   const quitWithoutSaving = useCallback(async () => {
     await Promise.all(documentsRef.current.map((document) => removeRecovery(document.id).catch(() => {})));
     await getCurrentWindow().destroy();
   }, []);
 
+  /**
+   * Save all in the quit dialog: each image with unsaved changes is shown and
+   * saved in turn. A cancelled or failed save stops the quit, so nothing is lost.
+   */
+  const saveAllAndQuit = useCallback(async () => {
+    setQuitPending(false);
+    for (const document of documentsRef.current.filter(isDocumentDirty)) {
+      setActiveDocumentId(document.id);
+      if (!await saveDocument(document.id)) return;
+    }
+    await quitWithoutSaving();
+  }, [quitWithoutSaving, saveDocument]);
+
   const openFile = useCallback(() => {
     if (!isTauri()) {
-      showNotice({ tone: "error", message: "Opening files is available in the ImageSage desktop app." });
+      showNotice({ tone: "error", message: "Opening files is available in the Image Sage desktop app." });
       return;
     }
     setOpenDialogOpen(true);
@@ -605,36 +643,76 @@ export default function App() {
   const openConnect = useCallback(() => setConnectSection("new"), []);
   const dirtyCount = documents.filter(isDocumentDirty).length;
 
+  /** A File menu command for the active editor; only that editor receives it. */
+  const [editorCommand, setEditorCommand] = useState<EditorCommand | null>(null);
+  const activeDocument = documents.find((document) => document.id === activeDocumentId) ?? null;
+  const sendCommand = (name: EditorCommand["name"]) => {
+    if (activeDocument) setEditorCommand({ name, documentId: activeDocument.id, nonce: Date.now() });
+  };
+  const menus: Menu[] = [
+    {
+      id: "file",
+      label: "File",
+      items: [
+        { label: "New from prompt…", icon: <MagicWand size={15} />, run: () => setNewImageOpen(true) },
+        { label: "Open…", icon: <FolderOpen size={15} />, disabled: opening, run: () => void openFile() },
+        "separator",
+        { label: "Save", icon: <FloppyDisk size={15} />, shortcut: "Ctrl+S", disabled: !activeDocument || activeDocument.saving, run: () => activeDocument && void saveDocument(activeDocument.id) },
+        { label: "Save As…", shortcut: "Ctrl+Shift+S", disabled: !activeDocument || activeDocument.saving, run: () => activeDocument && void saveDocument(activeDocument.id, true) },
+        "separator",
+        { label: "Import Image…", icon: <DownloadSimple size={15} />, disabled: !activeDocument, run: () => sendCommand("import-image") },
+        { label: "Export Image…", icon: <ImageSquare size={15} />, disabled: !activeDocument, run: () => sendCommand("export-image") },
+        { label: "Export Video Slideshow…", icon: <FilmStrip size={15} />, disabled: !activeDocument, run: () => sendCommand("export-video") },
+        "separator",
+        { label: "Settings…", icon: <GearSix size={15} />, run: openConnect }
+      ]
+    },
+    {
+      id: "edit",
+      label: "Edit",
+      items: [
+        { label: "Undo", icon: <ArrowCounterClockwise size={15} />, shortcut: "Ctrl+Z", disabled: !activeDocument, run: () => sendCommand("undo") },
+        { label: "Redo", icon: <ArrowClockwise size={15} />, shortcut: "Ctrl+Y", disabled: !activeDocument, run: () => sendCommand("redo") }
+      ]
+    },
+    {
+      id: "help",
+      label: "Help",
+      items: [
+        { label: "Keyboard shortcuts", icon: <Keyboard size={15} />, run: () => setShortcutsOpen(true) },
+        { label: "About Image Sage", icon: <Info size={15} />, run: () => setAboutOpen(true) }
+      ]
+    }
+  ];
+
   return (
     <main className="app-shell">
-      <TitleBar updateAvailable={startupUpdate !== null} onAbout={() => setAboutOpen(true)} onShortcuts={() => setShortcutsOpen(true)} />
-      <div className="app-bar">
-        <button className="primary-action" type="button" onClick={() => setNewImageOpen(true)} data-help="Generate a new image from a prompt">
-          <MagicWand size={16} weight="bold" /> New from prompt
-        </button>
-        <button className="button secondary app-bar-button" type="button" onClick={openFile} disabled={opening} data-help="Open an ImageSage document, PNG, or JPEG">
-          {opening ? <SpinnerGap className="spin" size={16} /> : <FolderOpen size={16} weight="bold" />} Open
-        </button>
-        <div className="app-bar-spacer" />
-        <button
-          className="ai-status"
-          type="button"
-          onClick={openConnect}
-          data-help={`Settings: OpenAI API key. Charged through ImageSage today: ${formatUsd(spend.today)}. This month: ${formatUsd(spend.month)}. Use in other apps is not counted.`}
-        >
-          <span className="ai-status-dots">
-            <span className={openaiReady ? "connected" : ""}><i aria-hidden="true" /> OpenAI</span>
-          </span>
-          {spend.month > 0 && <span className="ai-status-spend">{formatUsd(spend.month)} this month</span>}
-        </button>
-      </div>
+      <TitleBar
+        updateAvailable={startupUpdate !== null}
+        onAbout={() => setAboutOpen(true)}
+        end={(
+          <button
+            className="ai-status"
+            type="button"
+            onClick={openConnect}
+            data-help={`Settings: OpenAI API key. Charged through Image Sage today: ${formatUsd(spend.today)}. This month: ${formatUsd(spend.month)}. Use in other apps is not counted.`}
+          >
+            <span className="ai-status-dots">
+              <span className={openaiReady ? "connected" : ""}><i aria-hidden="true" /> OpenAI</span>
+            </span>
+            {spend.month > 0 && <span className="ai-status-spend">{formatUsd(spend.month)} this month</span>}
+          </button>
+        )}
+      />
+      <MenuBar menus={menus} />
 
       {documents.length > 0 && (
         <div className="doc-tabs" role="tablist" aria-label="Open images">
           {documents.map((document) => {
             const active = document.id === activeDocumentId;
             const dirty = isDocumentDirty(document);
-            const label = document.path ? document.name : document.origin.kind === "imported" ? document.origin.fileName : "New Image";
+            const label = document.path ? document.name.replace(/\.imagesage$/i, "") : document.origin.kind === "imported" ? document.origin.fileName : "New Image";
+            const spent = documentSpend(document);
             return (
               <div className={`doc-tab ${active ? "active" : ""}`} key={document.id}>
                 <button
@@ -650,8 +728,9 @@ export default function App() {
                 >
                   {document.busy && <SpinnerGap className="spin doc-tab-busy" size={13} />}
                   <span>
-                    {label}
+                    <strong className="doc-tab-name">{label}</strong>
                     {dirty && <i className="doc-tab-dirty" aria-hidden="true">*</i>}
+                    {spent > 0 && <span className="doc-tab-spend"> ({formatUsd(spent)})</span>}
                   </span>
                 </button>
                 <button
@@ -674,7 +753,7 @@ export default function App() {
         {documents.length === 0 && (
           <section className="empty-state">
             <div className="empty-glow" />
-            <div className="empty-icon"><img src="/icon.ico" alt="" /></div>
+            <div className="empty-icon"><img src="/app-icon.png" alt="" /></div>
             <h1>Prompt. Refine. Repeat.</h1>
             <p className="empty-copy">Open or generate images in layers. Edit using professional-grade tools. Export images and slideshows.</p>
             <div className="empty-actions">
@@ -707,6 +786,7 @@ export default function App() {
             onExport={exportImage}
             onExportVideo={exportVideo}
             onNotice={showNotice}
+            command={editorCommand?.documentId === document.id ? editorCommand : null}
           />
         ))}
       </div>
@@ -714,7 +794,33 @@ export default function App() {
       {notice && (
         <div className={`notice ${notice.tone}`} style={noticeCenter ?? undefined} onPointerEnter={() => setNoticeHovered(true)} onPointerLeave={() => setNoticeHovered(false)}>
           {notice.tone === "success" ? <CheckCircle size={19} weight="fill" /> : notice.tone === "warning" ? <Warning size={19} weight="fill" /> : <WarningCircle size={19} weight="fill" />}
-          <span>{notice.message}</span>
+          <span>
+            {notice.message}
+            {notice.file && (
+              <>
+                {" "}
+                <button
+                  className="notice-file"
+                  onClick={() => void invoke("reveal_file", { path: notice.file }).catch((error) => showNotice({ tone: "error", message: String(error) }))}
+                  data-help="Open the folder in File Explorer"
+                >
+                  {notice.file}
+                </button>
+              </>
+            )}
+          </span>
+          {notice.actions?.map((item) => (
+            <button
+              key={item.label}
+              className="notice-action"
+              onClick={() => {
+                item.run();
+                if (!item.keepOpen) setNotice(null);
+              }}
+            >
+              {item.label}
+            </button>
+          ))}
           {notice.action && (
             <button
               className="notice-action"
@@ -726,7 +832,7 @@ export default function App() {
               {notice.action.label}
             </button>
           )}
-          <button onClick={() => setNotice(null)} aria-label="Dismiss">×</button>
+          <button onClick={() => setNotice(null)} aria-label="Dismiss" data-help="Close">×</button>
         </div>
       )}
 
@@ -748,7 +854,7 @@ export default function App() {
             <div className="confirm-copy">
               {quitPending ? (
                 <>
-                  <h2 id="close-image-title">Quit ImageSage?</h2>
+                  <h2 id="close-image-title">Quit Image Sage?</h2>
                   <p>{dirtyCount === 1 ? "One image has" : `${dirtyCount} images have`} unsaved changes or a running AI edit. Quitting discards them.</p>
                 </>
               ) : (
@@ -768,6 +874,15 @@ export default function App() {
               >
                 {quitPending ? "Quit without saving" : "Close without saving"}
               </button>
+              {(quitPending ? dirtyCount > 0 : pendingCloseDocument !== null && isDocumentDirty(pendingCloseDocument)) && (
+                <button
+                  className="button primary"
+                  onClick={() => quitPending ? void saveAllAndQuit() : void saveAndCloseDocument()}
+                  data-help={quitPending ? "Save each image with unsaved changes, then quit" : "Save the image, then close it"}
+                >
+                  {quitPending ? (dirtyCount === 1 ? "Save and quit" : "Save all and quit") : "Save and close"}
+                </button>
+              )}
             </div>
           </div>
         </div>
@@ -802,7 +917,7 @@ export default function App() {
           onRequestConnect={openConnect}
           onSettingsChange={setSettings}
           onCancel={() => setNewImageOpen(false)}
-          onGenerated={(image) => void addGenerated(image)}
+          onStart={startGenerated}
         />
       )}
       {connectSection && (

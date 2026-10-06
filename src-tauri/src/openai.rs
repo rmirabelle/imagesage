@@ -9,7 +9,7 @@ use crate::requests::{self, AiImage, AiRequests, ProgressReporter};
 
 const SERVICE: &str = "OpenAI";
 const API_BASE: &str = "https://api.openai.com/v1";
-const PARTIAL_IMAGES: u8 = 2;
+const PARTIAL_IMAGES: u8 = 3;
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -230,7 +230,10 @@ async fn stream_image(
         pending_utf8.drain(..valid);
         for payload in buffer.drain() {
             match parse_event(&payload) {
-                StreamEvent::Partial { index, b64 } => reporter.partial(index, png_data_url(&b64)),
+                StreamEvent::Partial { index, b64 } => {
+                    eprintln!("[imagesage] OpenAI partial image {index} ({} KB)", b64.len() / 1024);
+                    reporter.partial(index, png_data_url(&b64));
+                }
                 StreamEvent::Completed { b64, usage } => {
                     reporter.stage("finishing");
                     return Ok(AiImage {
@@ -252,56 +255,89 @@ async fn stream_image(
     Err("The connection closed before OpenAI finished the image.".into())
 }
 
-/// A refusal that a dev build acts out instead of calling OpenAI.
+/// An OpenAI answer that a dev build acts out instead of calling OpenAI.
 #[derive(Clone, Copy, Debug, PartialEq)]
-enum SimulatedFailure {
+enum Simulated {
     /// OpenAI refuses the prompt before it starts (HTTP 400 from the safety system).
     Blocked,
     /// OpenAI starts, then sends an error event in the stream.
     StreamError,
+    /// OpenAI streams its partial images a few seconds apart, then the final image.
+    Partials,
 }
 
 /**
- * In dev builds only, a prompt that starts with `[test:blocked]` or
- * `[test:stream-error]` acts out an OpenAI refusal, so the app's handling of
- * blocked requests can be tested without sending a violating prompt.
+ * In dev builds only, a prompt that starts with `[test:blocked]`,
+ * `[test:stream-error]` or `[test:partials]` acts out an OpenAI answer, so
+ * the app can be tested without cost and without a violating prompt.
  */
-fn simulated_failure(prompt: &str) -> Option<SimulatedFailure> {
+fn simulated_answer(prompt: &str) -> Option<Simulated> {
     if !cfg!(debug_assertions) {
         return None;
     }
     let prompt = prompt.trim_start();
     if prompt.starts_with("[test:blocked]") {
-        Some(SimulatedFailure::Blocked)
+        Some(Simulated::Blocked)
     } else if prompt.starts_with("[test:stream-error]") {
-        Some(SimulatedFailure::StreamError)
+        Some(Simulated::StreamError)
+    } else if prompt.starts_with("[test:partials]") {
+        Some(Simulated::Partials)
     } else {
         None
     }
 }
 
+/// A solid-color PNG data URL of the requested size ("1024x1536"; 1024 square when it cannot be read).
+fn solid_png(size: &str, color: [u8; 3]) -> Result<String, String> {
+    let (width, height) = size
+        .split_once('x')
+        .and_then(|(w, h)| Some((w.parse::<u32>().ok()?, h.parse::<u32>().ok()?)))
+        .unwrap_or((1024, 1024));
+    let image = image::RgbaImage::from_pixel(width, height, image::Rgba([color[0], color[1], color[2], 255]));
+    let mut bytes = std::io::Cursor::new(Vec::new());
+    image
+        .write_to(&mut bytes, image::ImageFormat::Png)
+        .map_err(|error| format!("Could not draw the simulated image: {error}"))?;
+    use base64::Engine;
+    Ok(png_data_url(&base64::engine::general_purpose::STANDARD.encode(bytes.into_inner())))
+}
+
 async fn send_or_simulate(
     reporter: ProgressReporter,
     builder: reqwest::RequestBuilder,
-    simulated: Option<SimulatedFailure>,
+    simulated: Option<Simulated>,
+    size: String,
 ) -> Result<AiImage, String> {
-    let Some(failure) = simulated else {
+    let Some(answer) = simulated else {
         return stream_image(reporter, builder).await;
     };
     reporter.stage("sending");
     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-    match failure {
-        SimulatedFailure::Blocked => Err(describe_error(
+    match answer {
+        Simulated::Blocked => Err(describe_error(
             400,
             "{\"error\":{\"message\":\"Your request was rejected by the safety system (simulated).\",\"code\":\"moderation_blocked\"}}",
         )),
-        SimulatedFailure::StreamError => {
+        Simulated::StreamError => {
             reporter.stage("generating");
             tokio::time::sleep(std::time::Duration::from_secs(4)).await;
             match parse_event("{\"type\":\"error\",\"error\":{\"message\":\"Your request was rejected by the safety system (simulated, in the stream).\"}}") {
                 StreamEvent::Failed(message) => Err(message),
                 _ => Err("The simulated stream error was not recognized.".into()),
             }
+        }
+        Simulated::Partials => {
+            reporter.stage("generating");
+            for (index, color) in [[150, 40, 40], [40, 130, 60], [40, 70, 160]].into_iter().enumerate() {
+                tokio::time::sleep(std::time::Duration::from_secs(4)).await;
+                reporter.partial(index as u64, solid_png(&size, color)?);
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(4)).await;
+            reporter.stage("finishing");
+            Ok(AiImage {
+                data_url: solid_png(&size, [120, 120, 120])?,
+                usage: None,
+            })
         }
     }
 }
@@ -313,7 +349,8 @@ pub async fn ai_generate(
     request: GenerateRequest,
 ) -> Result<AiImage, String> {
     let key = credentials::api_key(Provider::OpenAi)?;
-    let simulated = simulated_failure(&request.prompt);
+    let simulated = simulated_answer(&request.prompt);
+    let size = request.size.clone();
     let body = json!({
         "model": request.model,
         "prompt": request.prompt,
@@ -329,7 +366,7 @@ pub async fn ai_generate(
         .bearer_auth(key)
         .json(&body);
     requests::run_cancellable(app, &requests, request.request_id, move |reporter| {
-        send_or_simulate(reporter, builder, simulated)
+        send_or_simulate(reporter, builder, simulated, size)
     })
     .await
 }
@@ -357,7 +394,8 @@ pub async fn ai_edit_whole(
         .file_name("image.png")
         .mime_str("image/png")
         .map_err(|error| format!("Could not prepare the upload: {error}"))?;
-    let simulated = simulated_failure(&request.prompt);
+    let simulated = simulated_answer(&request.prompt);
+    let size = request.size.clone();
     let form = reqwest::multipart::Form::new()
         .text("model", request.model)
         .text("prompt", request.prompt)
@@ -373,7 +411,7 @@ pub async fn ai_edit_whole(
         .bearer_auth(key)
         .multipart(form);
     requests::run_cancellable(app, &requests, request.request_id, move |reporter| {
-        send_or_simulate(reporter, builder, simulated)
+        send_or_simulate(reporter, builder, simulated, size)
     })
     .await
 }
@@ -438,10 +476,11 @@ mod tests {
     }
 
     #[test]
-    fn test_prompts_act_out_refusals_in_dev_builds() {
-        assert_eq!(simulated_failure("[test:blocked] a cat"), Some(SimulatedFailure::Blocked));
-        assert_eq!(simulated_failure("  [test:stream-error]"), Some(SimulatedFailure::StreamError));
-        assert_eq!(simulated_failure("a cat [test:blocked]"), None);
+    fn test_prompts_act_out_answers_in_dev_builds() {
+        assert_eq!(simulated_answer("[test:blocked] a cat"), Some(Simulated::Blocked));
+        assert_eq!(simulated_answer("  [test:stream-error]"), Some(Simulated::StreamError));
+        assert_eq!(simulated_answer("[test:partials] a cat"), Some(Simulated::Partials));
+        assert_eq!(simulated_answer("a cat [test:blocked]"), None);
     }
 
     #[test]

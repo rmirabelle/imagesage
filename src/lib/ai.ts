@@ -121,7 +121,7 @@ export interface WholeEditPayload extends GeneratePayload {
 export const CANCELLED_MESSAGE = "The request was cancelled.";
 
 export async function runWithProgress<T = AiImage>(
-  command: "ai_generate" | "ai_edit_whole" | "model_download" | "sam_encode",
+  command: "ai_generate" | "ai_edit_whole" | "model_download" | "music_download" | "sam_encode",
   requestId: string,
   payload: GeneratePayload | WholeEditPayload | Record<string, unknown>,
   onProgress: (progress: AiProgress) => void
@@ -145,7 +145,7 @@ export const editWholeImage = (requestId: string, payload: WholeEditPayload, onP
 
 /**
  * A request can be cancelled only before the service accepts it. From
- * "generating" on, the service finishes and charges whether or not ImageSage waits.
+ * "generating" on, the service finishes and charges whether or not Image Sage waits.
  * Local work, such as preparing click to select, can always be cancelled.
  */
 const CANCELLABLE: (AiStage | null)[] = [null, "sending", "downloading", "loading", "preparing"];

@@ -14,7 +14,7 @@ const step = (index: number): EditStep => ({
   after: `data:image/png;base64,after${index}`
 });
 
-describe("ImageSage manifest", () => {
+describe("Image Sage manifest", () => {
   it("round-trips history, tiles, origin and the undo position", () => {
     const origin = { kind: "generated" as const, prompt: "a lighthouse", model: "gpt-image-2.5-flare", quality: "high", size: "1536x1024" };
     const { manifest, tiles } = createManifest(1536, 1024, origin, [step(1), step(2)], 1, "2026-10-01T00:00:00.000Z");
@@ -93,7 +93,7 @@ describe("ImageSage manifest", () => {
   });
 
   it("rejects other formats", () => {
-    expect(() => parseManifest(JSON.stringify({ format: "capsage-document", formatVersion: 2 }))).toThrow(/not an ImageSage/);
+    expect(() => parseManifest(JSON.stringify({ format: "capsage-document", formatVersion: 2 }))).toThrow(/not an Image Sage/);
   });
 });
 

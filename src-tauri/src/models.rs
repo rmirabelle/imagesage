@@ -129,7 +129,7 @@ fn validate_model_url(url: &str) -> Result<(), String> {
     if url.starts_with(MODEL_DOWNLOAD_PREFIX) && url.ends_with(".onnx") {
         Ok(())
     } else {
-        Err("The model URL is not an official ImageSage model.".into())
+        Err("The model URL is not an official Image Sage model.".into())
     }
 }
 
@@ -172,53 +172,81 @@ pub async fn model_download(
         let client = requests::client()?;
         let mut done = 0_u64;
         for (file, target) in missing {
-            let partial = target.with_extension("onnx.part");
-            let response = client
-                .get(file.url)
-                .send()
-                .await
-                .map_err(|error| requests::describe_transport_error("GitHub", &error))?;
-            if !response.status().is_success() {
-                return Err(format!("The model download failed: the server returned {}.", response.status()));
-            }
-            let mut output = tokio::fs::File::create(&partial)
-                .await
-                .map_err(|error| format!("Could not create the model file: {error}"))?;
-            let mut hasher = Sha256::new();
-            let mut stream = response.bytes_stream();
-            let mut downloaded = 0_u64;
-            let mut reported = 0_u64;
-            while let Some(chunk) = stream.next().await {
-                let chunk = chunk.map_err(|error| requests::describe_transport_error("GitHub", &error))?;
-                hasher.update(&chunk);
-                output
-                    .write_all(&chunk)
-                    .await
-                    .map_err(|error| format!("Could not write the model file: {error}"))?;
-                downloaded += chunk.len() as u64;
-                if downloaded - reported >= 1 << 20 {
-                    reported = downloaded;
-                    reporter.progress("downloading", (done + downloaded) as f64 / total as f64);
-                }
-            }
-            output
-                .flush()
-                .await
-                .map_err(|error| format!("Could not write the model file: {error}"))?;
-            drop(output);
-            if downloaded != file.size || !hash_matches(&hasher.finalize(), file.sha256) {
-                let _ = tokio::fs::remove_file(&partial).await;
-                return Err("The downloaded model is damaged. Try again.".into());
-            }
-            tokio::fs::rename(&partial, &target)
-                .await
-                .map_err(|error| format!("Could not save the model file: {error}"))?;
+            let download = VerifiedDownload { url: file.url, size: file.size, sha256: file.sha256, what: "model" };
+            download_verified(&client, &reporter, &download, &target, done, total).await?;
             done += file.size;
         }
         reporter.progress("downloading", 1.0);
         Ok(())
     })
     .await
+}
+
+/// One file to download whose size and SHA-256 are known ahead; `what` names it in messages ("model").
+pub struct VerifiedDownload<'a> {
+    pub url: &'a str,
+    pub size: u64,
+    pub sha256: &'a str,
+    pub what: &'a str,
+}
+
+/**
+ * Downloads one file to `target`, through a `.part` file that becomes the
+ * target only when its size and hash match. Progress is reported as part of
+ * `total` bytes, of which `done` were finished before this file.
+ */
+pub async fn download_verified(
+    client: &reqwest::Client,
+    reporter: &requests::ProgressReporter,
+    download: &VerifiedDownload<'_>,
+    target: &Path,
+    done: u64,
+    total: u64,
+) -> Result<(), String> {
+    let what = download.what;
+    let mut partial = target.as_os_str().to_owned();
+    partial.push(".part");
+    let partial = PathBuf::from(partial);
+    let response = client
+        .get(download.url)
+        .send()
+        .await
+        .map_err(|error| requests::describe_transport_error("GitHub", &error))?;
+    if !response.status().is_success() {
+        return Err(format!("The {what} download failed: the server returned {}.", response.status()));
+    }
+    let mut output = tokio::fs::File::create(&partial)
+        .await
+        .map_err(|error| format!("Could not create the {what} file: {error}"))?;
+    let mut hasher = Sha256::new();
+    let mut stream = response.bytes_stream();
+    let mut downloaded = 0_u64;
+    let mut reported = 0_u64;
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|error| requests::describe_transport_error("GitHub", &error))?;
+        hasher.update(&chunk);
+        output
+            .write_all(&chunk)
+            .await
+            .map_err(|error| format!("Could not write the {what} file: {error}"))?;
+        downloaded += chunk.len() as u64;
+        if downloaded - reported >= 1 << 20 {
+            reported = downloaded;
+            reporter.progress("downloading", (done + downloaded) as f64 / total.max(1) as f64);
+        }
+    }
+    output
+        .flush()
+        .await
+        .map_err(|error| format!("Could not write the {what} file: {error}"))?;
+    drop(output);
+    if downloaded != download.size || !hash_matches(&hasher.finalize(), download.sha256) {
+        let _ = tokio::fs::remove_file(&partial).await;
+        return Err(format!("The downloaded {what} is damaged. Try again."));
+    }
+    tokio::fs::rename(&partial, target)
+        .await
+        .map_err(|error| format!("Could not save the {what} file: {error}"))
 }
 
 fn fail_load(error: impl std::fmt::Display) -> String {

@@ -1,18 +1,13 @@
 import { invoke } from "@tauri-apps/api/core";
 import {
   ArrowArcLeft,
-  CaretDown,
+  Camera,
   Check,
-  DownloadSimple,
-  FilmStrip,
-  FloppyDisk,
-  ImageSquare,
   MagicWand,
   Minus,
   Plus,
   SpinnerGap,
   StopCircle,
-  UploadSimple,
   WarningCircle,
   X
 } from "@phosphor-icons/react";
@@ -33,9 +28,11 @@ import {
   cloneCanvas,
   context2d,
   createCanvas,
+  drawFlatLayers,
   drawLayer,
   drawLayers,
   drawMaskGradient,
+  flattenLayers,
   scaledCanvas,
   opaqueBounds,
   loadImage,
@@ -43,10 +40,11 @@ import {
   layerThumbnail,
   thumbnailOf,
   type AdjustCanvases,
+  type FlatLayers,
   type LayerCanvases
 } from "../editor/canvas";
 import type { ImageDocument } from "../editor/imageDocument";
-import { ADJUSTMENT_FIELDS, adjustList, newAdjustmentId, toggleAllAdjustments, adjustmentFilter, adjustmentOpacity, adjustSignature, findAdjustment, hasAdjustments, maskSignature, moveLayer, newAdjustment, replaceAdjustment, resetAdjustment, type AdjustmentField } from "../editor/layers";
+import { ADJUSTMENT_FIELDS, ADJUSTMENT_LABELS, adjustList, newAdjustmentId, toggleAllAdjustments, adjustmentFilter, adjustmentOpacity, adjustSignature, findAdjustment, hasAdjustments, maskSignature, moveLayer, newAdjustment, replaceAdjustment, resetAdjustment, type AdjustmentField } from "../editor/layers";
 import {
   wholeImageSize
 } from "../editor/region";
@@ -57,8 +55,10 @@ import {
   cancelAiRequest,
   IMAGE_MODELS,
   editWholeImage,
+  generateImage,
   qualitiesFor,
   stageLabel,
+  type AiProgress,
   type AiSettings,
   type AiStage
 } from "../lib/ai";
@@ -75,8 +75,8 @@ import { modelStatus, type ModelId } from "../lib/models";
 import { samEncode, samMask, type SamPoint } from "../lib/sam";
 import { ModelDownloadDialog } from "./ModelDownloadDialog";
 import { OpenDialog } from "./OpenDialog";
-import { videoSize } from "../editor/slideshow";
-import { encodeSlideshow, type SlideshowIntro } from "../lib/slideshowVideo";
+import { slideshowDuration, slideshowSegments, videoSize } from "../editor/slideshow";
+import { encodeSlideshow, type SlideshowOptions } from "../lib/slideshowVideo";
 import { SlideshowDialog } from "./SlideshowDialog";
 import { SaveDialog, type SaveFormat, type SaveSettings } from "./SaveDialog";
 import { StepsPanel, stepKey, type PartAction } from "./StepsPanel";
@@ -99,6 +99,11 @@ const MASK_CLIPBOARD_EVENT = "imagesage-mask-clipboard";
 const IMPORTED_MODEL = "Imported image";
 /** The model name of a layer copied from the original image. Like an imported layer, it cannot be regenerated. */
 const ORIGINAL_COPY_MODEL = "Copy of the original";
+/** Set when the user checks "Don't show again" in the Regenerate confirmation. */
+const SKIP_REGEN_CONFIRM_KEY = "imagesage.skip-regenerate-confirm";
+const skipRegenConfirm = () => {
+  try { return localStorage.getItem(SKIP_REGEN_CONFIRM_KEY) === "1"; } catch { return false; }
+};
 /** A layer counts as showing at a point when its opacity there is above this (of 255). */
 const PICK_ALPHA = 24;
 /** One mask change, for Ctrl+Z and Ctrl+Y: the layer mask or an adjustment mask of one layer. */
@@ -119,7 +124,7 @@ type MaskPrep = {
   blend?: BlendMode;
   adjustments: PrepAdjustment[];
   below: HTMLCanvasElement;
-  above: HTMLCanvasElement;
+  above: FlatLayers;
 };
 /** A mask brush stroke in progress. The stroke is drawn at full strength on `stroke`, then laid on `base` (the mask before the stroke) at `opacity`. */
 type MaskBrushStroke = { prep: MaskPrep; last: Point; add: boolean; before: MaskState; base: HTMLCanvasElement; stroke: HTMLCanvasElement; opacity: number; frame: number | null };
@@ -138,7 +143,7 @@ const IDENTITY: LayerTransform = { a: 1, b: 0, x: 0, y: 0 };
  * combined layers below and above it, the bounds before the transform, and
  * the transform so far.
  */
-type ResizeSession = { owner: string; bounds: Rect; rendered: HTMLCanvasElement; below: HTMLCanvasElement; above: HTMLCanvasElement; transform: LayerTransform; frame: number | null; blend?: BlendMode };
+type ResizeSession = { owner: string; bounds: Rect; rendered: HTMLCanvasElement; below: HTMLCanvasElement; above: FlatLayers; transform: LayerTransform; frame: number | null; blend?: BlendMode };
 /**
  * One drag during Transform, with the transform when the drag started:
  * a corner handle scales around the fixed opposite corner, the inside moves,
@@ -304,6 +309,11 @@ type EditJob = {
   prompt: string;
   /** The layer a retry replaces, if any. */
   replaceId?: string;
+  /** The GPT Image model and quality, for a snapshot layer of a partial preview. */
+  model?: string;
+  quality?: string;
+  /** The partial preview already saved as a snapshot layer. */
+  snapped?: string;
 };
 /**
  * Click to select in progress: what it fills, the prepared image (`key`),
@@ -327,7 +337,19 @@ const CLICK_SELECT_MAX_SIDE = 2048;
  * A message for the user; `action` adds a button to it, such as Undo. Success
  * and warning messages close by themselves; errors stay until the user closes them.
  */
-export type Notice = { tone: "success" | "warning" | "error"; message: string; action?: { label: string; run: () => void } } | null;
+/**
+ * A message at the bottom of the window. `file` follows the message as a link
+ * that opens its folder; a `sticky` message stays until a button closes it,
+ * and `actions` add buttons that run and then close it, unless `keepOpen`.
+ */
+export type Notice = {
+  tone: "success" | "warning" | "error";
+  message: string;
+  action?: { label: string; run: () => void };
+  file?: string;
+  sticky?: boolean;
+  actions?: { label: string; run: () => void; keepOpen?: boolean }[];
+} | null;
 
 interface Props {
   document: ImageDocument;
@@ -340,12 +362,21 @@ interface Props {
   onCommit: (id: string, patch: Partial<Pick<ImageDocument, "base" | "baseAdjust" | "history" | "historyIndex">>, markDirty?: boolean) => void;
   onBusyChange: (id: string, busy: boolean) => void;
   /** Saves to the document's file; `saveAs` asks for a file first. */
-  onSave: (id: string, saveAs?: boolean) => Promise<void>;
+  onSave: (id: string, saveAs?: boolean) => Promise<boolean>;
   onExport: (id: string, dataUrl: string, format: SaveFormat) => Promise<boolean>;
   /** Asks where to save the video slideshow and writes it; false when the user cancels. */
   onExportVideo: (id: string, video: Blob) => Promise<boolean>;
   onNotice: (notice: Notice) => void;
+  /** A File menu command for this editor, or null; only the active editor gets one. */
+  command?: EditorCommand | null;
 }
+
+/**
+ * File menu commands that open one of the editor's dialogs, for the document
+ * `documentId`. `nonce` changes each time, so the same command can run again,
+ * and an editor runs each nonce only once.
+ */
+export type EditorCommand = { name: "export-image" | "export-video" | "import-image" | "undo" | "redo"; documentId: string; nonce: number };
 
 /** Ctrl+wheel zoom: the scale changes by exp(-deltaY × this); one wheel notch (100) is about 5%. */
 const WHEEL_ZOOM_RATE = 0.0005;
@@ -395,7 +426,8 @@ export function Editor({
   onSave,
   onExport,
   onExportVideo,
-  onNotice
+  onNotice,
+  command
 }: Props) {
   usePrices();
   const { surface } = imageDocument;
@@ -443,12 +475,10 @@ export function Editor({
   const [exportDialogOpen, setExportDialogOpen] = useState(false);
   /** The layer waiting for the user to confirm Delete. */
   const [confirmDelete, setConfirmDelete] = useState<number | null>(null);
-  /**
-   * Regenerate mode of the prompt bar: the layer to regenerate, and the prompt
-   * that was in the bar before, which comes back when the mode is cancelled.
-   */
-  const [regenerate, setRegenerate] = useState<{ stepId: string; before: string } | null>(null);
   const promptRef = useRef<HTMLTextAreaElement>(null);
+  /** Regenerate waiting for the user to confirm: the layer, and the prompt to run. */
+  const [confirmRegen, setConfirmRegen] = useState<{ stepId: string; instruction: string } | null>(null);
+  const [regenDontAsk, setRegenDontAsk] = useState(false);
   /** Which mask of the selected layer the Mask tool paints: "mask" for the layer mask, or an adjustment id. */
   const [maskPart, setMaskPart] = useState<LayerPart>("mask");
   /** The mask brush shows (true) or hides (false) what it paints; holding Alt does the other one. */
@@ -485,23 +515,6 @@ export function Editor({
   }, []);
   /** The video slideshow settings dialog is open. */
   const [slideshowDialogOpen, setSlideshowDialogOpen] = useState(false);
-  /** The Export button's menu (as image, as video slideshow) is open. */
-  const [exportMenuOpen, setExportMenuOpen] = useState(false);
-  useEffect(() => {
-    if (!exportMenuOpen) return;
-    const openedAt = performance.now();
-    const close = (event: Event) => {
-      if (event.type === "pointerdown" && event.timeStamp <= openedAt) return;
-      if (event instanceof KeyboardEvent && event.key !== "Escape") return;
-      setExportMenuOpen(false);
-    };
-    window.addEventListener("pointerdown", close);
-    window.addEventListener("keydown", close);
-    return () => {
-      window.removeEventListener("pointerdown", close);
-      window.removeEventListener("keydown", close);
-    };
-  }, [exportMenuOpen]);
   /** The file dialog for importing an image as a new layer is open. */
   const [importLayerOpen, setImportLayerOpen] = useState(false);
   /** The layers under a click, to pick from, and where the menu opens. */
@@ -511,7 +524,7 @@ export function Editor({
 
   const fitScale = Math.min(
     Math.max(0.05, ((workspaceSize.width - 48) * pixelRatio) / width),
-    Math.max(0.05, ((workspaceSize.height - 48) * pixelRatio) / height),
+    Math.max(0.05, ((workspaceSize.height - 78) * pixelRatio) / height),
     1
   );
   const displayScale = zoom ?? fitScale;
@@ -541,13 +554,6 @@ export function Editor({
     onBusyChange(documentId, runningRef.current > 0);
   }, [onBusyChange]);
   const wholeSize = wholeImageSize(width, height);
-  /** The GPT Image estimate for the next edit of the whole image. */
-  const gptEstimate = wholeSize
-    ? estimateWholeEdit(settings.wholeModel, settings.wholeQuality, `${wholeSize.width}x${wholeSize.height}`, prompt.length)
-    : null;
-  const estimate = gptEstimate ? gptEstimate.usd : null;
-  const spent = imageDocument.history.reduce((sum, step) => sum + (step.cost ?? 0), 0)
-    + (imageDocument.origin.kind === "generated" ? imageDocument.origin.cost ?? 0 : 0);
   const lastStep = imageDocument.historyIndex > 0 ? imageDocument.history[imageDocument.historyIndex - 1] : null;
   /** The selected layer's adjustments; the original image keeps its own on the document. */
   const selectedAdjust = lastStep ? lastStep.adjust : imageDocument.baseAdjust;
@@ -937,7 +943,7 @@ export function Editor({
     const adjust = adjustOf(doc, node) ?? [];
     const key = [doc.id, maskSignature(doc.base), node, node > 0 ? adjustSignature(doc.baseAdjust) : "", ...doc.history.map((item, index) => index === node - 1
       ? item.id
-      : [item.id, item.layer?.length, item.hidden, item.maskOff, item.maskHides, maskSignature(item.layerMask), adjustSignature(item.adjust)].join(":"))].join("|");
+      : [item.id, item.layer?.length, item.hidden, item.blend, item.maskOff, item.maskHides, maskSignature(item.layerMask), adjustSignature(item.adjust)].join(":"))].join("|");
     /** The target mask is used even while it is turned off; painting turns it on again. */
     const selectedParts = async () => ({
       owner: step ? step.id : BASE_OWNER,
@@ -970,14 +976,13 @@ export function Editor({
     maskPrepRef.current = null;
     maskPrepKeyRef.current = key;
     void (async () => {
-      const above = createCanvas(doc.surface.width, doc.surface.height);
       const [parts, below, layersAbove] = await Promise.all([
         selectedParts(),
         node > 0 ? compositeOf(doc, doc.history.slice(0, node - 1)) : Promise.resolve(createCanvas(doc.surface.width, doc.surface.height)),
         layerCanvases(doc.history.slice(node))
       ]);
-      drawLayers(above, null, layersAbove);
       if (cancelled) return;
+      const above = flattenLayers(doc.surface.width, doc.surface.height, layersAbove);
       maskPrepRef.current = { ...parts, below, above };
       redrawLayerMaskRef.current();
       const forced = forcedMaskMode(maskPrepRef.current);
@@ -986,8 +991,13 @@ export function Editor({
     return () => { cancelled = true; };
   }, [compositeOf, decodeLayer, imageDocument.base, imageDocument.baseAdjust, imageDocument.history, imageDocument.historyIndex, imageDocument.id, imageDocument.surface, isMaskTool, layerCanvases, targetPart]);
 
-  /** Edits the whole image with GPT Image (the visible layers, or `from`); the result is a new top layer, or replaces layer `replaceId`. */
-  const runWholeEdit = useCallback(async (instruction: string, from?: HTMLCanvasElement, replaceId?: string) => {
+  /**
+   * Edits the whole image with GPT Image (the visible layers, or `from`); the
+   * result is a new top layer, or replaces layer `replaceId`. On an empty
+   * canvas, GPT Image generates the image from the prompt alone. `choice`
+   * overrides the model and quality of the prompt bar.
+   */
+  const runWholeEdit = useCallback(async (instruction: string, from?: HTMLCanvasElement, replaceId?: string, choice?: { model: string; quality: string }) => {
     const current = documentRef.current;
     if (!instruction.trim() || applyingRef.current) return;
     if (resizeRef.current) {
@@ -1008,19 +1018,22 @@ export function Editor({
     const area: Rect = { x: 0, y: 0, width: imageWidth, height: imageHeight };
     const sent: SentRegion = { ...area, margin: 0, requestWidth: size.width, requestHeight: size.height };
     const sizeText = `${size.width}x${size.height}`;
-    const model = settings.wholeModel;
-    const quality = settings.wholeQuality;
+    const model = choice?.model ?? settings.wholeModel;
+    const quality = choice?.quality ?? settings.wholeQuality;
     const requestId = crypto.randomUUID();
     setNow(Date.now());
-    startJob(current.id, { requestId, frame: area, sent, service: "OpenAI", stage: null, progress: null, partialDataUrl: null, startedAt: Date.now(), prompt: instruction.trim(), replaceId });
+    startJob(current.id, { requestId, frame: area, sent, service: "OpenAI", stage: null, progress: null, partialDataUrl: null, startedAt: Date.now(), prompt: instruction.trim(), replaceId, model, quality });
     onNotice(null);
     try {
       await composeRef.current;
       const work = cloneCanvas(from ?? current.surface);
-      const imagePng = await buildWholeUpload(work, size.width, size.height);
-      const result = await editWholeImage(requestId, { prompt: instruction.trim(), model, quality, size: sizeText, imagePng }, (progress) => {
+      const empty = opaqueBounds(work) === null;
+      const onProgress = (progress: AiProgress) => {
         updateJob(requestId, (existing) => ({ ...existing, stage: progress.stage, partialDataUrl: progress.partialDataUrl ?? existing.partialDataUrl }));
-      });
+      };
+      const result = empty
+        ? await generateImage(requestId, { prompt: instruction.trim(), model, quality, size: sizeText }, onProgress)
+        : await editWholeImage(requestId, { prompt: instruction.trim(), model, quality, size: sizeText, imagePng: await buildWholeUpload(work, size.width, size.height) }, onProgress);
       const resultImage = await loadImage(result.dataUrl);
       const workContext = context2d(work);
       workContext.imageSmoothingEnabled = true;
@@ -1029,7 +1042,7 @@ export function Editor({
       workContext.drawImage(resultImage, 0, 0, imageWidth, imageHeight);
       const cost = openAiActualCost(result.usage, model);
       recordSpend(cost);
-      learnWholeEditInput(result.usage, model, sizeText);
+      if (!empty) learnWholeEditInput(result.usage, model, sizeText);
       const step: EditStep = {
         id: requestId,
         prompt: instruction.trim(),
@@ -1046,7 +1059,7 @@ export function Editor({
       const estimateText = formatUsd(estimateOpenAiImage(model, quality, sizeText, instruction.length));
       onNotice({
         tone: "success",
-        message: `${replaced ? "Layer replaced." : "Whole image edited."} ${cost !== null ? `Charged ${formatUsd(cost)}.` : `Estimated cost ${estimateText}.`}`,
+        message: `${replaced ? "Layer replaced." : empty ? "Image generated." : "Whole image edited."} ${cost !== null ? `Charged ${formatUsd(cost)}.` : `Estimated cost ${estimateText}.`}`,
         ...(replaced ? { action: { label: "Undo", run: () => undoReplace(replaced, step.id) } } : {})
       });
     } catch (error) {
@@ -1056,6 +1069,58 @@ export function Editor({
       endJob(current.id, requestId);
     }
   }, [appendStep, endJob, onNotice, onRequestOpenAiSettings, openaiConnected, settings, startJob, undoReplace, updateJob]);
+
+  /** A new image from a prompt: generate it once, as the first layer, when the tab opens. */
+  const startedGenerationRef = useRef(false);
+  useEffect(() => {
+    const start = imageDocument.startGeneration;
+    if (!start || startedGenerationRef.current) return;
+    startedGenerationRef.current = true;
+    setPrompt(start.prompt);
+    void runWholeEdit(start.prompt, undefined, undefined, { model: start.model, quality: start.quality });
+  }, [imageDocument.startGeneration, runWholeEdit]);
+
+  /**
+   * Saves the partial preview that GPT Image streams before its final image
+   * as a new top layer. The finished edit lands above it later.
+   */
+  const snapshotPartial = useCallback(async (job: EditJob) => {
+    const partial = job.partialDataUrl;
+    if (!partial || job.snapped === partial) return;
+    if (resizeRef.current) {
+      onNotice({ tone: "error", message: "Apply (Enter) or cancel (Esc) the transform first." });
+      return;
+    }
+    try {
+      const current = documentRef.current;
+      const image = await loadImage(partial);
+      const layer = createCanvas(current.surface.width, current.surface.height);
+      const layerContext = context2d(layer);
+      layerContext.imageSmoothingEnabled = true;
+      layerContext.imageSmoothingQuality = "high";
+      layerContext.beginPath();
+      layerContext.rect(job.frame.x, job.frame.y, job.frame.width, job.frame.height);
+      layerContext.clip();
+      layerContext.drawImage(image, job.sent.x, job.sent.y, job.sent.width, job.sent.height);
+      const step: EditStep = {
+        id: crypto.randomUUID(),
+        prompt: job.prompt,
+        name: "Preview snapshot",
+        model: job.model ?? "",
+        quality: job.quality ?? "",
+        createdAt: new Date().toISOString(),
+        selection: { x: job.frame.x, y: job.frame.y, size: Math.min(job.frame.width, job.frame.height) },
+        area: job.frame,
+        sent: job.sent,
+        layer: await canvasToDataUrl(layer)
+      };
+      appendStep(step, layer);
+      updateJob(job.requestId, (existing) => ({ ...existing, snapped: partial }));
+      onNotice({ tone: "success", message: "Preview saved as a new layer." });
+    } catch (error) {
+      onNotice({ tone: "error", message: error instanceof Error ? error.message : String(error) });
+    }
+  }, [appendStep, onNotice, updateJob]);
 
   /** True when the model is on this PC; the first time, a dialog asks to download it. */
   const ensureModel = useCallback(async (model: ModelId) => {
@@ -1196,40 +1261,11 @@ export function Editor({
   };
 
   /**
-   * Regenerate first puts the layer's prompt in the prompt bar, so the prompt
-   * can be changed while the image stays in view.
-   */
-  const requestRetry = (node: number) => {
-    const step = documentRef.current.history[node - 1];
-    if (!step || applyingRef.current) return;
-    if (step.model === IMPORTED_MODEL || step.model === ORIGINAL_COPY_MODEL) {
-      onNotice({ tone: "warning", message: `${step.model === IMPORTED_MODEL ? "An imported layer" : "A copy of the original image"} was not made by AI, so it cannot be regenerated.` });
-      return;
-    }
-    setRegenerate((open) => ({ stepId: step.id, before: open ? open.before : prompt }));
-    setPrompt(step.prompt);
-    requestAnimationFrame(() => {
-      const box = promptRef.current;
-      if (!box) return;
-      box.focus();
-      box.setSelectionRange(box.value.length, box.value.length);
-    });
-  };
-
-  /** Leaves regenerate mode and puts back the prompt that was in the bar before. */
-  const cancelRegenerate = () => {
-    if (!regenerate) return;
-    setPrompt(regenerate.before);
-    setRegenerate(null);
-  };
-
-  /**
    * Runs `instruction` on the layers below a layer, as a whole-image edit. The
    * result replaces that layer. Layers made from a square or a painted area in
    * older versions are regenerated from the whole image too.
    */
   const retryLayer = async (stepId: string, instruction: string) => {
-    setRegenerate(null);
     const current = documentRef.current;
     const node = current.history.findIndex((item) => item.id === stepId) + 1;
     const step = current.history[node - 1];
@@ -1315,11 +1351,11 @@ export function Editor({
 
   /**
    * Exports a video slideshow: the original image, then each visible layer
-   * fading in with its name, then a hold on the finished image and a fade to
-   * black (timing in `editor/slideshow.ts`). The pictures are drawn at video
-   * size first, so the encoder only mixes them.
+   * fading in with its name, then a long hold on the final image and a fade
+   * to black (timing in `editor/slideshow.ts`). The pictures are drawn at
+   * video size first, so the encoder only mixes them.
    */
-  const exportSlideshow = async (intro: SlideshowIntro | null) => {
+  const exportSlideshow = async (options: SlideshowOptions) => {
     setSlideshowDialogOpen(false);
     const doc = documentRef.current;
     if (exporting || applyingRef.current || resizeRef.current || clickSelectRef.current) return;
@@ -1341,8 +1377,8 @@ export function Editor({
         drawLayer(context, layer);
         stages.push(scaledCanvas(full, size.width, size.height));
       }
-      const names = [null, ...visible.map(({ step, node }) => step.name || `Layer ${node}`)];
-      const video = await encodeSlideshow(stages, names, intro, (progress) => updateJob(requestId, (existing) => ({ ...existing, progress })));
+      const names = ["Original image", ...visible.map(({ step, node }) => step.name || `Layer ${node}`)];
+      const video = await encodeSlideshow(stages, names, options, (progress) => updateJob(requestId, (existing) => ({ ...existing, progress })));
       await onExportVideo(doc.id, video);
     } catch (error) {
       onNotice({ tone: "error", message: `Could not make the video: ${error instanceof Error ? error.message : String(error)}` });
@@ -1355,7 +1391,7 @@ export function Editor({
   /**
    * Adds an image file as a new top layer. An image larger than the document
    * is scaled down to fit; it is centered, and Transform starts so it can be
-   * moved and scaled at once. An ImageSage document comes in as its flattened image.
+   * moved and scaled at once. An Image Sage document comes in as its flattened image.
    */
   const importLayer = async (path: string) => {
     setImportLayerOpen(false);
@@ -1592,12 +1628,11 @@ export function Editor({
     const rendered = createCanvas(width, height);
     drawLayer(context2d(rendered), layer);
     const bounds = opaqueBounds(rendered) ?? { x: 0, y: 0, width, height };
-    const above = createCanvas(width, height);
     const [below, layersAbove] = await Promise.all([
       compositeOf(current, current.history.slice(0, node - 1)),
       layerCanvases(current.history.slice(node))
     ]);
-    drawLayers(above, null, layersAbove);
+    const above = flattenLayers(width, height, layersAbove);
     const transform = IDENTITY;
     resizeRef.current = { owner: step.id, bounds, rendered, below, above, transform, frame: null, ...(step.blend ? { blend: step.blend } : {}) };
     setResize({ bounds, transform });
@@ -1621,7 +1656,7 @@ export function Editor({
       context.drawImage(session.rendered, 0, 0);
       context.globalCompositeOperation = "source-over";
       context.setTransform(1, 0, 0, 1, 0, 0);
-      context.drawImage(session.above, 0, 0);
+      drawFlatLayers(context, session.above);
       context.restore();
     });
   };
@@ -1663,10 +1698,8 @@ export function Editor({
         layerCanvases(doc.history.slice(node))
       ]);
       if (cancelled || resizeRef.current !== session) return;
-      const above = createCanvas(width, height);
-      drawLayers(above, null, layersAbove);
       session.below = below;
-      session.above = above;
+      session.above = flattenLayers(width, height, layersAbove);
       drawResizePreview(session);
     })().catch(() => { /* The old preview stays until the next change. */ });
     return () => { cancelled = true; };
@@ -1961,8 +1994,7 @@ export function Editor({
         void onSave(documentRef.current.id, event.shiftKey);
       }
       if (event.key === "Escape" && !typing) {
-        if (regenerate) cancelRegenerate();
-        else if (gradientRef.current) cancelGradientDrag();
+        if (gradientRef.current) cancelGradientDrag();
         else if (gradient) setGradient(null);
         else if (isMaskTool) setTool("whole");
       }
@@ -2228,7 +2260,7 @@ export function Editor({
     surfaceContext.clearRect(0, 0, width, height);
     surfaceContext.drawImage(prep.below, 0, 0);
     drawLayer(surfaceContext, prepLayer(prep));
-    surfaceContext.drawImage(prep.above, 0, 0);
+    drawFlatLayers(surfaceContext, prep.above);
     redrawLayerMaskRef.current();
   };
 
@@ -2493,19 +2525,41 @@ export function Editor({
     moveBrushCursor(brushPointRef.current);
   });
 
+  /** A File or Edit menu command; import waits while Transform or click to select runs. */
+  const handledCommandRef = useRef(0);
+  useEffect(() => {
+    if (!command || command.documentId !== imageDocument.id || command.nonce === handledCommandRef.current) return;
+    handledCommandRef.current = command.nonce;
+    /** Undo and Redo do what Ctrl+Z and Ctrl+Y do: while click to select runs, Undo removes the last click. */
+    if (command.name === "undo") {
+      if (clickSelectRef.current) undoClickPoint();
+      else undoMask();
+    } else if (command.name === "redo") {
+      if (!clickSelectRef.current) redoMask();
+    } else if (command.name === "export-image") {
+      if (!exporting) setExportDialogOpen(true);
+    } else if (command.name === "export-video") {
+      if (!exporting) setSlideshowDialogOpen(true);
+    } else if (resizeRef.current || clickSelectRef.current) {
+      onNotice({ tone: "error", message: "Apply or cancel the current tool (Enter or Esc) before you import an image." });
+    } else {
+      setImportLayerOpen(true);
+    }
+  }, [command]);
+
   /** Stable handlers for the memoized layers panel; each calls the latest version of its function. */
-  const panelActionsRef = useRef({ selectLayer, toggleLayerVisible, setAllLayersVisible, retryLayer: requestRetry, requestDelete, renameLayer, moveLayerTo, partAction, setAdjustmentValue });
-  panelActionsRef.current = { selectLayer, toggleLayerVisible, setAllLayersVisible, retryLayer: requestRetry, requestDelete, renameLayer, moveLayerTo, partAction, setAdjustmentValue };
+  const panelActionsRef = useRef({ selectLayer, toggleLayerVisible, setAllLayersVisible, requestDelete, renameLayer, moveLayerTo, partAction, setAdjustmentValue });
+  panelActionsRef.current = { selectLayer, toggleLayerVisible, setAllLayersVisible, requestDelete, renameLayer, moveLayerTo, partAction, setAdjustmentValue };
   const panelHandlers = useMemo(() => ({
     onSelect: (node: number) => panelActionsRef.current.selectLayer(node),
     onToggleVisible: (node: number, solo: boolean) => panelActionsRef.current.toggleLayerVisible(node, solo),
     onShowAll: (visible: boolean) => panelActionsRef.current.setAllLayersVisible(visible),
-    onRetry: (node: number) => panelActionsRef.current.retryLayer(node),
     onDelete: (node: number) => panelActionsRef.current.requestDelete(node),
     onRename: (node: number, name: string) => panelActionsRef.current.renameLayer(node, name),
     onMove: (from: number, to: number, above: boolean) => panelActionsRef.current.moveLayerTo(from, to, above),
     onPartAction: (node: number, part: LayerPart, action: PartAction) => void panelActionsRef.current.partAction(node, part, action),
-    onAdjustValue: (node: number, id: string, field: AdjustmentField, value: number) => panelActionsRef.current.setAdjustmentValue(node, id, field, value)
+    onAdjustValue: (node: number, id: string, field: AdjustmentField, value: number) => panelActionsRef.current.setAdjustmentValue(node, id, field, value),
+    onMaskDeselect: () => setTool("whole")
   }), []);
 
   const frameStyle = (rect: Rect) => ({
@@ -2515,9 +2569,35 @@ export function Editor({
     height: rect.height * cssScale
   });
   const brushDiameter = brushRadius * 2 * cssScale;
-  /** The layer of regenerate mode; the mode ends by itself when that layer is gone. */
-  const regenNode = regenerate ? imageDocument.history.findIndex((item) => item.id === regenerate.stepId) + 1 : 0;
-  const regenStep = regenNode > 0 ? imageDocument.history[regenNode - 1] : undefined;
+  /**
+   * The canvas names the selected layer; while the Mask tool is on, also the
+   * mask it paints, for example "Layer 7 - Brightness Mask".
+   */
+  const maskTargetAdjustment = targetPart && targetPart !== "mask" ? findAdjustment(selectedAdjust, targetPart) : undefined;
+  const selectedLayerName = lastStep ? lastStep.name || `Layer ${imageDocument.historyIndex}` : "Original image";
+  const canvasLabel = isMaskTool && targetPart
+    ? `${selectedLayerName} - ${maskTargetAdjustment ? `${ADJUSTMENT_LABELS[maskTargetAdjustment.kind]} Mask` : "Layer Mask"}`
+    : selectedLayerName;
+  /** Regenerate replaces the selected layer; the original image and layers not made by AI cannot be regenerated. */
+  const regenStep = lastStep && lastStep.model !== IMPORTED_MODEL && lastStep.model !== ORIGINAL_COPY_MODEL ? lastStep : undefined;
+  const regenName = lastStep ? lastStep.name || `Layer ${imageDocument.historyIndex}` : "the original image";
+  const regenerate = () => {
+    if (!regenStep || !prompt.trim()) return;
+    if (skipRegenConfirm()) void retryLayer(regenStep.id, prompt);
+    else {
+      setRegenDontAsk(false);
+      setConfirmRegen({ stepId: regenStep.id, instruction: prompt });
+    }
+  };
+  const confirmRegenerate = () => {
+    if (!confirmRegen) return;
+    if (regenDontAsk) {
+      try { localStorage.setItem(SKIP_REGEN_CONFIRM_KEY, "1"); } catch { /* The question comes back next time. */ }
+    }
+    setConfirmRegen(null);
+    void retryLayer(confirmRegen.stepId, confirmRegen.instruction);
+  };
+  const confirmRegenStep = confirmRegen ? imageDocument.history.find((item) => item.id === confirmRegen.stepId) : undefined;
   /** GPT Image models offered for edits: the 2.5 models, plus the current one if it is older. */
   const editModels = IMAGE_MODELS.filter((model) => model.id.startsWith("gpt-image-2.5") || model.id === settings.wholeModel);
 
@@ -2563,66 +2643,7 @@ export function Editor({
   return (
     <section className="editor-shell">
       <div className="editor-toolbar">
-        <div className="toolbar-side">
-          <div className="tool-group document-actions">
-            <button
-              className="document-save-button"
-              disabled={imageDocument.saving}
-              onClick={() => void onSave(imageDocument.id)}
-              data-help={imageDocument.path
-                ? "Save over the editable ImageSage document (Ctrl+S)."
-                : "Save the editable ImageSage document (Ctrl+S). It has no file yet, so the save dialog opens."}
-            >
-              <FloppyDisk size={17} weight="bold" /> {imageDocument.saving ? "Saving…" : "Save"}
-            </button>
-            <button
-              className="document-save-button"
-              disabled={imageDocument.saving}
-              onClick={() => void onSave(imageDocument.id, true)}
-              data-help="Save the editable ImageSage document under another name or in another folder (Ctrl+Shift+S)."
-            >
-              Save As…
-            </button>
-            <div className="export-split">
-              <button
-                className="save-button export-main"
-                disabled={exporting}
-                onClick={() => setExportDialogOpen(true)}
-                data-help="Export as a PNG or JPEG image. Use the arrow for a video slideshow."
-              >
-                <UploadSimple size={17} weight="bold" /> {exporting ? "Exporting…" : "Export"}
-              </button>
-              <button
-                className="save-button export-caret"
-                disabled={exporting}
-                aria-label="Export options"
-                aria-haspopup="menu"
-                aria-expanded={exportMenuOpen}
-                onClick={() => setExportMenuOpen((open) => !open)}
-              >
-                <CaretDown size={13} weight="bold" />
-              </button>
-              {exportMenuOpen && (
-                <div className="steps-menu export-menu" role="menu" onPointerDown={(event) => event.stopPropagation()}>
-                  <button role="menuitem" onClick={() => { setExportMenuOpen(false); setExportDialogOpen(true); }}>
-                    <ImageSquare size={15} /> as Image <small>PNG or JPEG</small>
-                  </button>
-                  <button role="menuitem" onClick={() => { setExportMenuOpen(false); setSlideshowDialogOpen(true); }}>
-                    <FilmStrip size={15} /> as video slideshow <small>MP4, 1080p</small>
-                  </button>
-                </div>
-              )}
-            </div>
-            <button
-              className="save-button"
-              disabled={resize !== null || clickSelect !== null}
-              onClick={() => setImportLayerOpen(true)}
-              data-help="Import an image file as a new layer"
-            >
-              <DownloadSimple size={17} weight="bold" /> Import
-            </button>
-          </div>
-        </div>
+        <div className="toolbar-side" />
         {/* The mask brush size stays centered; the sides take the rest of the width. */}
         <div className="toolbar-center">
           {brushLike && (
@@ -2646,8 +2667,6 @@ export function Editor({
             <span className="crop-size">Drag on the image for the {gradient} gradient. Esc cancels.</span>
           )}
           <div className="editor-toolbar-spacer" />
-          {spent > 0 && <span className="image-cost" data-help="Charged so far for this image: its creation and every saved edit">Spent {formatUsd(spent)}</span>}
-          <span className="image-size">{width} × {height}</span>
         </div>
       </div>
       <div className="editor-body">
@@ -2664,10 +2683,15 @@ export function Editor({
           <div className="canvas-scroll-area">
             <div
               ref={stageRef}
-              className={`canvas-stage ${displayScale >= 2 ? "pixelated" : ""}`}
+              className={`canvas-stage ${displayScale >= 2 ? "pixelated" : ""} ${isMaskTool && targetPart ? "mask-editing" : ""}`}
               style={{ width: width * cssScale, height: height * cssScale }}
             >
               <div ref={surfaceHostRef} className="surface-host" />
+              <span className="canvas-layer-label" role="status">
+                {canvasLabel}
+                {isMaskTool && targetPart && <small className="canvas-layer-hint">(ESC to exit)</small>}
+              </span>
+              <span className="image-size">{width} × {height}</span>
               <canvas ref={layerMaskCanvasRef} className={`mask-preview ${isMaskTool ? "" : "hidden"}`} aria-hidden="true" />
               {/* The gradient being dragged: a line from start (white dot) to end (black dot), and the radius of a radial gradient. */}
               <svg ref={gradientLineRef} className="gradient-line" width={width * cssScale} height={height * cssScale} style={{ display: "none" }} aria-hidden="true">
@@ -2732,6 +2756,15 @@ export function Editor({
                           height: job.sent.height * cssScale
                         }}
                       />
+                      <button
+                        className="partial-capture"
+                        disabled={job.snapped === job.partialDataUrl}
+                        onPointerDown={(event) => event.stopPropagation()}
+                        onClick={() => void snapshotPartial(job)}
+                        data-help="Save this preview as a new layer before GPT Image replaces it"
+                      >
+                        <Camera size={15} weight="bold" /> {job.snapped === job.partialDataUrl ? "Captured" : "Capture"}
+                      </button>
                     </div>
                   )}
                   <div className="selection-margin" style={frameStyle(job.sent)} />
@@ -2826,33 +2859,20 @@ export function Editor({
         {...panelHandlers}
       />
       </div>
-      <div className={`prompt-bar ${regenStep ? "regenerating" : ""}`}>
+      <div className="prompt-bar">
         <div className="prompt-input">
-        {regenStep && (
-          <div className="regenerate-tag">
-            <ArrowArcLeft size={13} weight="bold" />
-            <span>Regenerating <strong>{regenStep.name || `Layer ${regenNode}`}</strong>. The result replaces this layer and keeps its name, masks and adjustments.</span>
-            <button onClick={cancelRegenerate} aria-label="Cancel regenerate" data-help="Cancel regenerate (Esc)">
-              <X size={13} weight="bold" />
-            </button>
-          </div>
-        )}
         <textarea
           ref={promptRef}
           value={prompt}
           rows={2}
 
-          placeholder={regenStep ? "Describe the new layer…" : "Describe the change…"}
+          placeholder="Describe the change…"
           onChange={(event) => setPrompt(event.target.value)}
           onKeyDown={(event) => {
             if (event.ctrlKey && event.key === "Enter") {
               event.preventDefault();
-              if (regenStep) {
-                if (prompt.trim()) void retryLayer(regenStep.id, prompt);
-              } else submit();
-            } else if (event.key === "Escape" && regenStep) {
-              event.preventDefault();
-              cancelRegenerate();
+              if (event.shiftKey) regenerate();
+              else submit();
             }
           }}
         />
@@ -2885,35 +2905,26 @@ export function Editor({
                 })}
               </select>
           </div>
-            {regenStep ? (
-            <button
-              className="primary-action"
-              disabled={!prompt.trim()}
-              onClick={() => void retryLayer(regenStep.id, prompt)}
-              data-help="Regenerate the layer with this prompt (Ctrl+Enter). The old layer comes back if it fails or you cancel."
-            >
-              <ArrowArcLeft size={17} weight="bold" /> Regenerate layer
-            </button>
-            ) : (
+          <div className="primary-split" role="group" aria-label="Send the prompt">
             <button
               className="primary-action"
               disabled={!wholeSize || !prompt.trim()}
               onClick={submit}
               data-help="Send the image to GPT Image. The result is a new layer (Ctrl+Enter)"
             >
-              <MagicWand size={17} weight="bold" /> Generate layer
-              {estimate !== null && (
-                <span
-                  className="price-tag"
-                  data-help={gptEstimate && !gptEstimate.includesInput
-                    ? "Output only. OpenAI does not publish the input-image token count; after your first GPT Image edit, the estimate includes it."
-                    : undefined}
-                >
-                  {formatUsd(estimate)}{gptEstimate && !gptEstimate.includesInput ? "+" : ""}
-                </span>
-              )}
+              <MagicWand size={17} weight="bold" /> Generate
             </button>
-            )}
+            <button
+              className="primary-action regenerate-action"
+              disabled={!wholeSize || !regenStep || !prompt.trim()}
+              onClick={regenerate}
+              data-help={regenStep
+                ? `Regenerate ${regenName} with this prompt (Ctrl+Shift+Enter). The result replaces the layer and keeps its name, masks and adjustments. The old layer comes back if it fails or you cancel.`
+                : `Select a layer made by AI to regenerate it. ${lastStep ? `${regenName} was not made by AI.` : "The original image cannot be regenerated."}`}
+            >
+              <ArrowArcLeft size={17} weight="bold" /> Regenerate
+            </button>
+          </div>
         </div>
       </div>      {confirmDelete !== null && imageDocument.history[confirmDelete - 1] && (
         <div className="confirm-overlay" role="presentation" onPointerDown={() => setConfirmDelete(null)}>
@@ -2933,6 +2944,32 @@ export function Editor({
             <div className="confirm-actions">
               <button autoFocus className="button secondary" onClick={() => setConfirmDelete(null)}>Cancel</button>
               <button className="button danger" onClick={() => deleteLayer(confirmDelete)}>Delete layer</button>
+            </div>
+          </div>
+        </div>
+      )}
+      {confirmRegen && confirmRegenStep && (
+        <div className="confirm-overlay" role="presentation" onPointerDown={() => setConfirmRegen(null)}>
+          <div
+            className="confirm-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="regenerate-confirm-title"
+            onPointerDown={(event) => event.stopPropagation()}
+            onKeyDown={(event) => { if (event.key === "Escape") setConfirmRegen(null); }}
+          >
+            <div className="confirm-icon"><WarningCircle size={22} weight="fill" /></div>
+            <div className="confirm-copy">
+              <h2 id="regenerate-confirm-title">Overwrite this layer by regenerating it from scratch?</h2>
+              <p>“{confirmRegenStep.name || confirmRegenStep.prompt}” is replaced by a new GPT Image result. The old layer comes back if it fails or you cancel.</p>
+              <label className="confirm-check">
+                <input type="checkbox" checked={regenDontAsk} onChange={(event) => setRegenDontAsk(event.target.checked)} />
+                Don't show again
+              </label>
+            </div>
+            <div className="confirm-actions">
+              <button autoFocus className="button secondary" onClick={() => setConfirmRegen(null)}>Cancel</button>
+              <button className="button danger" onClick={confirmRegenerate}>Regenerate</button>
             </div>
           </div>
         </div>
@@ -2968,8 +3005,9 @@ export function Editor({
       {slideshowDialogOpen && (
         <SlideshowDialog
           defaultTitle={imageDocument.name.replace(/\.[^.]+$/, "")}
+          videoSeconds={slideshowDuration(slideshowSegments(imageDocument.history.filter((step) => !step.hidden).length + 1, true))}
           onCancel={() => setSlideshowDialogOpen(false)}
-          onExport={(intro) => void exportSlideshow(intro)}
+          onExport={(options) => void exportSlideshow(options)}
         />
       )}
       {importLayerOpen && <OpenDialog title="Import image as layer" onCancel={() => setImportLayerOpen(false)} onOpen={(path) => void importLayer(path)} />}

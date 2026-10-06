@@ -171,7 +171,7 @@ pub async fn save_document_from_tiles(
 ) -> Result<(), String> {
     let target = PathBuf::from(&path);
     if !document::is_document_path(&target) {
-        return Err("An ImageSage document must have the .imagesage extension".into());
+        return Err("An Image Sage document must have the .imagesage extension".into());
     }
     let dir = tile_dir(&app, &id)?;
     on_worker(move || {

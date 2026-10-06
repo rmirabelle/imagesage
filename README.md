@@ -40,7 +40,7 @@ Image Sage.
 - **Send multiple edit generations at once** — send a new edit while others still run. Each one shows a waiting row in the layers list, with its progress and a Cancel button, and becomes a layer when it arrives.
 - **Regenerate with a new prompt** — regenerate a layer, change the prompt in the prompt bar first, and the result replaces that layer in place. It keeps the layer's name, masks, and adjustments. If it fails, the old layer comes back.
 - **Cost estimates** — every edit button shows the estimated price, and the toolbar shows what the image has cost so far.
-- **Monthly spend** — the OpenAI button at the top right shows what ImageSage was charged this month; its tooltip also shows today. Use in other apps is not counted.
+- **Monthly spend** — the OpenAI button at the top right shows what Image Sage was charged this month; its tooltip also shows today. Use in other apps is not counted.
 
 ### Layers
 
@@ -60,7 +60,7 @@ Image Sage.
 ### Documents
 
 - **`.imagesage` documents** keep the original image, every layer, mask, and adjustment, and the prompts. Double-click a document to open it.
-- **Automatic recovery** — two seconds after a change, unsaved work is copied to the app's data folder. After a crash or restart, ImageSage offers to restore it.
+- **Automatic recovery** — two seconds after a change, unsaved work is copied to the app's data folder. After a crash or restart, Image Sage offers to restore it.
 - **Export** the combined image as PNG or JPEG, with an optional largest width and height.
 - **Video slideshow** — export an MP4 (1080p) that shows the original image, then each visible layer fading in with its name.
 - **Tabs** — open several images at once.
@@ -70,7 +70,7 @@ Image Sage.
 - **Zoom and pan** like Photoshop: `Space` + drag pans, `Ctrl` + wheel zooms, and with `Space` held, `Ctrl`+click zooms in and `Ctrl`+`Alt`+click zooms out.
 - **Tooltips** on every control.
 - **API keys stay safe** — the OpenAI key is stored in Windows Credential Manager. All AI calls run in the Rust side of the app; the keys never reach the user interface.
-- **In-app updates** — ImageSage checks GitHub releases and can download and run the new installer.
+- **In-app updates** — Image Sage checks GitHub releases and can download and run the new installer.
 
 ---
 
