@@ -3,6 +3,7 @@ import {
   FADE_OUT,
   FINAL_FADE,
   FINAL_HOLD,
+  FINAL_LABEL,
   FINAL_REST,
   INTRO_FADE,
   MUSIC_FADE_IN,
@@ -54,7 +55,9 @@ describe("slideshow", () => {
     const comingIn = slideshowFrame(segments, top + FINAL_FADE * 0.75);
     expect(comingIn).toMatchObject({ to: 3, mix: 1, label: "final" });
     expect(comingIn.black).toBeCloseTo(0.5);
-    expect(slideshowFrame(segments, top + FINAL_HOLD - 1)).toMatchObject({ to: 3, mix: 1, label: "final", labelAlpha: 1, overlay: 0, black: 0 });
+    expect(slideshowFrame(segments, top + FINAL_FADE + FINAL_LABEL - 0.1)).toMatchObject({ to: 3, mix: 1, label: "final", labelAlpha: 1, black: 0 });
+    expect(slideshowFrame(segments, top + FINAL_FADE + FINAL_LABEL + 0.25).labelAlpha).toBeCloseTo(0.5);
+    expect(slideshowFrame(segments, top + FINAL_HOLD - 1)).toMatchObject({ to: 3, mix: 1, labelAlpha: 0, overlay: 0, black: 0 });
     expect(slideshowFrame(segments, slideshowDuration(segments) - FADE_OUT / 2).black).toBeCloseTo(0.5);
     expect(slideshowFrame(segments, slideshowDuration(segments)).black).toBe(1);
   });

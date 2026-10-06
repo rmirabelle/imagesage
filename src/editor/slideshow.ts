@@ -13,7 +13,8 @@
  * image named "Original image", then every STEP seconds the next layer fading
  * in over FADE_IN seconds with its name at the top center, the top layer
  * too. Then the top layer fades to black and the final image (the same
- * picture) fades in from black, named "Final image", over FINAL_FADE seconds.
+ * picture) fades in from black, named "Final image", over FINAL_FADE seconds;
+ * the name fades out FINAL_LABEL seconds later.
  * It rests for FINAL_REST seconds; with an intro, the overlay then shows
  * again for FINAL_TITLE seconds.
  */
@@ -23,6 +24,8 @@ export const FADE_IN = 0.5;
 /** Half of it fades the top layer to black, half fades the final image in. */
 export const FINAL_FADE = 3;
 export const FINAL_REST = 10;
+/** Seconds the "Final image" name stays after the final image is in, before it fades out. */
+export const FINAL_LABEL = 1;
 export const FINAL_TITLE = 6;
 export const OVERLAY_FADE = 0.5;
 export const FINAL_HOLD = FINAL_FADE + FINAL_REST + OVERLAY_FADE + FINAL_TITLE;
@@ -86,7 +89,8 @@ export function slideshowSegments(stages: number, intro: boolean): Segment[] {
     fade,
     throughBlack: true,
     label,
-    labelFor: FINAL_HOLD,
+    /** The name stays FINAL_LABEL seconds after the image is in, then fades, so the image can be seen alone. */
+    labelFor: fade + FINAL_LABEL,
     /** The overlay stays until the end; the fade to black covers it with the image. */
     overlay: intro ? { from: fade + FINAL_REST, to: FINAL_HOLD + FADE_OUT + OVERLAY_FADE } : null
   });
