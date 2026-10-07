@@ -70,6 +70,7 @@ type DocumentPanelProps = {
   onExport: (id: string, dataUrl: string, format: SaveFormat) => Promise<boolean>;
   onExportVideo: (id: string, video: Blob) => Promise<boolean>;
   onNotice: (notice: Notice) => void;
+  onFileTask: <T>(label: string, work: () => Promise<T>) => Promise<T>;
   command: EditorCommand | null;
 };
 
@@ -110,19 +111,40 @@ export default function App() {
   const [noticeCenter, setNoticeCenter] = useState<{ left: number; top: number; transform: string } | null>(null);
   useLayoutEffect(() => {
     if (!notice) return;
-    const place = () => {
+    const observer = new ResizeObserver(() => place());
+    let observed: HTMLElement[] = [];
+    let frame = 0;
+    let tries = 0;
+    function place() {
       const panel = activeDocumentId ? window.document.querySelector<HTMLElement>(`#image-panel-${CSS.escape(activeDocumentId)}`) : null;
-      const area = panel?.querySelector<HTMLElement>(".editor-workspace")?.getBoundingClientRect();
-      const image = panel?.querySelector<HTMLElement>(".canvas-stage")?.getBoundingClientRect();
-      if (!area || !image || area.width === 0 || area.height === 0) {
+      const areaElement = panel?.querySelector<HTMLElement>(".editor-workspace");
+      const imageElement = panel?.querySelector<HTMLElement>(".canvas-stage");
+      const area = areaElement?.getBoundingClientRect();
+      const image = imageElement?.getBoundingClientRect();
+      if (!areaElement || !imageElement || !area || !image || area.width === 0 || area.height === 0 || image.width === 0) {
         setNoticeCenter(null);
+        /**
+         * A newly opened image is not laid out yet when its notice appears.
+         * Try again on the next frames until its panel has a size.
+         */
+        if (activeDocumentId && tries++ < 60) frame = requestAnimationFrame(place);
         return;
       }
+      if (observed[0] !== areaElement || observed[1] !== imageElement) {
+        observer.disconnect();
+        observed = [areaElement, imageElement];
+        observed.forEach((element) => observer.observe(element));
+      }
       const left = (Math.max(area.left, image.left) + Math.min(area.right, image.right)) / 2;
-      setNoticeCenter({ left, top: Math.max(area.top, image.top) + 30, transform: "translateX(-50%)" });    };
+      setNoticeCenter({ left, top: Math.max(area.top, image.top) + 30, transform: "translateX(-50%)" });
+    }
     place();
     window.addEventListener("resize", place);
-    return () => window.removeEventListener("resize", place);
+    return () => {
+      cancelAnimationFrame(frame);
+      observer.disconnect();
+      window.removeEventListener("resize", place);
+    };
   }, [notice, activeDocumentId]);
   const [aboutOpen, setAboutOpen] = useState(false);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
@@ -141,6 +163,18 @@ export default function App() {
   const pendingCloseDocument = documents.find((document) => document.id === pendingCloseDocumentId) ?? null;
 
   const showNotice = useCallback((next: Notice) => setNotice(next), []);
+  /** Labels of the file reads and writes now running; the loader shows the newest. */
+  const [fileTasks, setFileTasks] = useState<{ id: number; label: string }[]>([]);
+  const fileTaskIdRef = useRef(0);
+  const runFileTask = useCallback(async <T,>(label: string, work: () => Promise<T>): Promise<T> => {
+    const id = ++fileTaskIdRef.current;
+    setFileTasks((current) => [...current, { id, label }]);
+    try {
+      return await work();
+    } finally {
+      setFileTasks((current) => current.filter((task) => task.id !== id));
+    }
+  }, []);
   /** The pointer is over the notice; it does not close by itself meanwhile. */
   const [noticeHovered, setNoticeHovered] = useState(false);
   /** Success and warning messages close by themselves; errors stay until closed. */
@@ -286,8 +320,7 @@ export default function App() {
       historyIndex: 0,
       startsDirty: false
     });
-    showNotice({ tone: "success", message: `Imported ${fileName(path)} at ${surface.width} × ${surface.height}` });
-  }, [addDocument, showNotice]);
+  }, [addDocument]);
 
   const finishImport = useCallback((scale: boolean) => {
     if (!pendingImport) return;
@@ -299,8 +332,10 @@ export default function App() {
   const openPath = useCallback(async (path: string) => {
     setOpening(true);
     try {
-      const opened = await invoke<OpenedImageFile>("open_image_file", { path, includeHistory: true });
-      const surface = await canvasFromDataUrl(opened.dataUrl);
+      const { opened, surface } = await runFileTask(`Opening ${fileName(path)}…`, async () => {
+        const opened = await invoke<OpenedImageFile>("open_image_file", { path, includeHistory: true });
+        return { opened, surface: await canvasFromDataUrl(opened.dataUrl) };
+      });
       if (opened.kind === "document") {
         if (!opened.manifestJson) throw new Error("The Image Sage document has no manifest.");
         const restored = parseManifest(opened.manifestJson, opened.historyTiles);
@@ -316,7 +351,6 @@ export default function App() {
           historyIndex: restored.historyIndex,
           startsDirty: false
         });
-        showNotice({ tone: "success", message: `Opened ${fileName(path)}` });
       } else if (exceedsWholeImageLimits(surface.width, surface.height)) {
         setPendingImport({ path, surface, target: fitWithinWholeImageLimits(surface.width, surface.height) });
       } else {
@@ -328,7 +362,7 @@ export default function App() {
       setOpening(false);
       await restoreMainWindow();
     }
-  }, [addDocument, addImportedImage, restoreMainWindow, showNotice]);
+  }, [addDocument, addImportedImage, restoreMainWindow, runFileTask, showNotice]);
 
   /** Reopens unsaved images left in the recovery folder by a crash or restart. */
   useEffect(() => {
@@ -468,27 +502,28 @@ export default function App() {
       if (!chosenPath) return false;
       const path = chosenPath.toLowerCase().endsWith(".imagesage") ? chosenPath : `${chosenPath}.imagesage`;
       const revision = document.revision;
-      const { manifest, tiles } = createManifest(
-        document.surface.width,
-        document.surface.height,
-        document.origin,
-        document.history,
-        document.historyIndex,
-        document.createdAt,
-        { base: document.base, baseAdjust: document.baseAdjust }
-      );
-      const imageDataUrl = await canvasToDataUrl(document.surface);
-      /** Layers go to the app one at a time; older documents that are not all layers yet go in one message. */
-      if (!await saveDocumentFile(document, path, imageDataUrl)) {
-        await invoke("save_imagesage_document", {
-          path,
-          manifestJson: JSON.stringify(manifest),
-          dataUrl: imageDataUrl,
-          historyTiles: tiles
-        });
-      }
+      await runFileTask(`Saving ${fileName(path)}…`, async () => {
+        const { manifest, tiles } = createManifest(
+          document.surface.width,
+          document.surface.height,
+          document.origin,
+          document.history,
+          document.historyIndex,
+          document.createdAt,
+          { base: document.base, baseAdjust: document.baseAdjust }
+        );
+        const imageDataUrl = await canvasToDataUrl(document.surface);
+        /** Layers go to the app one at a time; older documents that are not all layers yet go in one message. */
+        if (!await saveDocumentFile(document, path, imageDataUrl)) {
+          await invoke("save_imagesage_document", {
+            path,
+            manifestJson: JSON.stringify(manifest),
+            dataUrl: imageDataUrl,
+            historyTiles: tiles
+          });
+        }
+      });
       updateDocument(documentId, { path, name: fileName(path), savedRevision: revision });
-      showNotice({ tone: "success", message: `Saved ${path}` });
       return true;
     } catch (error) {
       showNotice({ tone: "error", message: String(error) });
@@ -496,7 +531,7 @@ export default function App() {
     } finally {
       updateDocument(documentId, { saving: false });
     }
-  }, [showNotice, updateDocument]);
+  }, [runFileTask, showNotice, updateDocument]);
 
   /** Saves a video slideshow as an MP4 file next to where images are exported. */
   const exportVideo = useCallback(async (documentId: string, video: Blob) => {
@@ -513,14 +548,16 @@ export default function App() {
     });
     if (!chosenPath) return false;
     const path = chosenPath.toLowerCase().endsWith(".mp4") ? chosenPath : `${chosenPath}.mp4`;
-    /** The video goes to Rust as a data URL; the file reader makes it without a slow loop over the bytes. */
-    const dataUrl = await new Promise<string>((resolve, reject) => {
-      const reader = new FileReader();
-      reader.onload = () => resolve(String(reader.result));
-      reader.onerror = () => reject(reader.error ?? new Error("Could not read the video."));
-      reader.readAsDataURL(video);
+    await runFileTask(`Exporting ${fileName(path)}…`, async () => {
+      /** The video goes to Rust as a data URL; the file reader makes it without a slow loop over the bytes. */
+      const dataUrl = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result));
+        reader.onerror = () => reject(reader.error ?? new Error("Could not read the video."));
+        reader.readAsDataURL(video);
+      });
+      await invoke("save_image", { path, dataUrl });
     });
-    await invoke("save_image", { path, dataUrl });
     showNotice({
       tone: "success",
       message: "Exported",
@@ -532,7 +569,7 @@ export default function App() {
       ]
     });
     return true;
-  }, [showNotice]);
+  }, [runFileTask, showNotice]);
 
   const exportImage = useCallback(async (documentId: string, dataUrl: string, format: SaveFormat) => {
     const extension = format === "png" ? "png" : "jpg";
@@ -561,11 +598,11 @@ export default function App() {
     });
     if (!chosenPath) return false;
     const path = /\.[a-z0-9]+$/i.test(chosenPath) ? chosenPath : `${chosenPath}.${extension}`;
-    await invoke("save_image", { path, dataUrl });
+    await runFileTask(`Exporting ${fileName(path)}…`, () => invoke("save_image", { path, dataUrl }));
     try { localStorage.setItem(SAVE_SEQUENCE_KEY, String(sequence + 1)); } catch { /* See above. */ }
     showNotice({ tone: "success", message: `Exported ${path}` });
     return true;
-  }, [showNotice]);
+  }, [runFileTask, showNotice]);
 
   const requestCloseDocument = useCallback((documentId: string) => {
     const document = documentsRef.current.find((candidate) => candidate.id === documentId);
@@ -786,6 +823,7 @@ export default function App() {
             onExport={exportImage}
             onExportVideo={exportVideo}
             onNotice={showNotice}
+            onFileTask={runFileTask}
             command={editorCommand?.documentId === document.id ? editorCommand : null}
           />
         ))}
@@ -833,6 +871,15 @@ export default function App() {
             </button>
           )}
           <button onClick={() => setNotice(null)} aria-label="Dismiss" data-help="Close">×</button>
+        </div>
+      )}
+
+      {fileTasks.length > 0 && (
+        <div className="file-task-overlay" role="status" aria-live="polite">
+          <div className="file-task-card">
+            <SpinnerGap className="spin" size={22} />
+            <span>{fileTasks[fileTasks.length - 1].label}</span>
+          </div>
         </div>
       )}
 

@@ -13,12 +13,17 @@ export interface ImageDocument {
   createdAt: string;
   origin: DocumentOrigin;
   surface: HTMLCanvasElement;
-  /** The original image, the bottom layer (a PNG data URL); the editor sets it when it first opens the document. */
+  /**
+   * A separate original image below the layers (a PNG data URL), from older
+   * documents. The editor moves it into the history as the bottom layer and
+   * then sets this to "", which means every layer is in the history.
+   * Undefined until the editor has prepared the document.
+   */
   base?: string;
-  /** Adjustments of the original image (the bottom layer). */
+  /** Adjustments of the separate original image, from older documents. */
   baseAdjust?: LayerAdjust;
   history: EditStep[];
-  /** The selected layer: 0 is the original image, n is history[n - 1]. */
+  /** The selected layer: n is history[n - 1]; 0 is the separate original image, or no layer when there is none. */
   historyIndex: number;
   revision: number;
   savedRevision: number;

@@ -83,10 +83,11 @@ async function storeTiles(document: ImageDocument, recovery: boolean) {
 
 async function writeRecovery(document: ImageDocument) {
   const { base, history } = document;
-  if (!base || history.some((step) => !step.layer)) return;
+  if (base === undefined || history.some((step) => !step.layer)) return;
+  /** The preview image is the top visible layer, or the original image; with neither, there is no image yet. */
+  const top = [...history].reverse().find((step) => !step.hidden) ?? (base ? undefined : history[history.length - 1]);
+  if (!top && !base) return;
   const { manifest, keyed } = await storeTiles(document, true);
-  /** The preview image is the top visible layer, or the original image. */
-  const top = [...history].reverse().find((step) => !step.hidden);
   await invoke("recovery_save", {
     id: document.id,
     manifestJson: JSON.stringify(manifest),
@@ -106,7 +107,7 @@ async function writeRecovery(document: ImageDocument) {
  * the document is not all layers yet; the caller then saves it the older way.
  */
 export function saveDocumentFile(document: ImageDocument, path: string, imageDataUrl: string) {
-  if (!document.base || document.history.some((step) => !step.layer)) return Promise.resolve(false);
+  if (document.base === undefined || document.history.some((step) => !step.layer)) return Promise.resolve(false);
   const run = (queues.get(document.id) ?? Promise.resolve()).catch(() => {}).then(async () => {
     const { manifest, keyed } = await storeTiles(document, false);
     await invoke("save_document_from_tiles", {

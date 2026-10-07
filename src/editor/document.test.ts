@@ -41,6 +41,18 @@ describe("Image Sage manifest", () => {
     expect(restored.history[0]).toEqual(layered);
   });
 
+  it("writes version 3 when the original image is a normal layer", () => {
+    const { before: _before, after: _after, ...plain } = step(1);
+    const layered: EditStep = { ...plain, layer: "data:image/png;base64,layer1" };
+    const { manifest, tiles } = createManifest(10, 10, { kind: "imported", fileName: "a.png" }, [layered], 1, "2026-10-01T00:00:00.000Z", { base: "" });
+    expect(manifest.formatVersion).toBe(3);
+    expect(manifest.base).toBeUndefined();
+    expect(tiles.map((tile) => tile.path)).toEqual(["history/0001-layer.png"]);
+    const restored = parseManifest(JSON.stringify(manifest), tiles);
+    expect(restored.base).toBe("");
+    expect(restored.history).toEqual([layered]);
+  });
+
   it("stores adjustment masks as tiles", () => {
     const { before: _before, after: _after, ...plain } = step(1);
     const layered: EditStep = {

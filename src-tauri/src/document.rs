@@ -12,7 +12,8 @@ use zip::{write::SimpleFileOptions, CompressionMethod, ZipArchive, ZipWriter};
 
 const DOCUMENT_FORMAT: &str = "imagesage-document";
 /// Version 2 stores each step as a full layer (with an optional mask) and the original image as `history/base.png`.
-const DOCUMENT_VERSION: u64 = 2;
+/// Version 3 has no separate original image: the original is the bottom layer.
+const DOCUMENT_VERSION: u64 = 3;
 /// The oldest format this app still opens: version 1 stored each step as before/after tiles.
 const OLDEST_DOCUMENT_VERSION: u64 = 1;
 const DOCUMENT_EXTENSION: &str = "imagesage";

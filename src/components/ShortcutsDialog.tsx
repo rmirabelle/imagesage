@@ -23,20 +23,21 @@ const SECTIONS: { title: string; shortcuts: Shortcut[] }[] = [
       { keys: [["Ctrl", "T"]], action: "Transform the selected layer" },
       { keys: [["Ctrl", "J"]], action: "Duplicate the selected layer" },
       { keys: [["Del"]], action: "Delete the selected layer (asks first)" },
-      { keys: [["Ctrl", "M"]], action: "Add a layer mask to the selected layer" },
       { keys: [["Ctrl", "Click"]], action: "On a layer's eye: show only that layer, or show all again" }
     ]
   },
   {
     title: "Mask tool",
     shortcuts: [
-      { keys: [["M"]], action: "Turn the Mask tool on or off" },
+      { keys: [["M"]], action: "Turn the Mask tool on or off; a layer without a mask gets one when you paint" },
       { keys: [["["], ["]"]], action: "Smaller / larger brush" },
       { keys: [["1–9"], ["0"]], action: "Brush opacity 10% to 90% / 100%" },
       { keys: [["+"], ["−"]], action: "Brush opacity up / down by 10% (number row)" },
       { keys: [["X"]], action: "Swap the brush between Show and Hide" },
       { keys: [["Alt"]], action: "Hold to paint the other of Show and Hide" },
       { keys: [["R"]], action: "Show or hide the red mask view" },
+      { keys: [["P"]], action: "Switch the mask brush between soft and precise" },
+      { keys: [["L"]], action: "Turn the polygon lasso on or off; Enter fills the shape, Backspace removes a corner" },
       { keys: [["Ctrl", "I"]], action: "Invert the mask" },
       { keys: [["Ctrl", "Z"]], action: "Undo a mask change" },
       { keys: [["Ctrl", "Y"], ["Ctrl", "R"]], action: "Redo a mask change" },

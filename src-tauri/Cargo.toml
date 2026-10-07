@@ -1,6 +1,6 @@
 [package]
 name = "imagesage"
-version = "0.4.2"
+version = "0.5.0"
 description = "Generate images with OpenAI and refine them one region at a time"
 authors = ["Rob Mirabelle"]
 edition = "2021"

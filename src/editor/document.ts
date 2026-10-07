@@ -1,8 +1,14 @@
 import type { Adjustment, DocumentOrigin, EditStep, LayerAdjust, MaskImage, MaskStroke, SentRegion, SquareSelection } from "./types";
 
 export const IMAGESAGE_DOCUMENT_FORMAT = "imagesage-document";
-/** Version 2 stores steps as layers; version 1 (before/after tiles) still opens. */
-export const IMAGESAGE_DOCUMENT_VERSION = 2;
+/**
+ * Version 3 has no separate original image: the original is the bottom layer.
+ * Version 2 stores steps as layers above a separate original image; version 1
+ * (before/after tiles) still opens.
+ */
+export const IMAGESAGE_DOCUMENT_VERSION = 3;
+/** The version written for a document that still has a separate original image. */
+const BASE_DOCUMENT_VERSION = 2;
 const OLDEST_DOCUMENT_VERSION = 1;
 
 type ManifestStep = EditStep;
@@ -268,7 +274,7 @@ export function createManifest(
   });
   const manifest: ImageSageManifest = {
     format: IMAGESAGE_DOCUMENT_FORMAT,
-    formatVersion: IMAGESAGE_DOCUMENT_VERSION,
+    formatVersion: base === "" ? IMAGESAGE_DOCUMENT_VERSION : BASE_DOCUMENT_VERSION,
     createdAt,
     modifiedAt: new Date().toISOString(),
     image: { path: "image.png", width, height },
@@ -326,7 +332,8 @@ export function parseManifest(manifestJson: string, tiles?: HistoryTile[]) {
   return {
     createdAt: requiredString(value, "createdAt"),
     origin: parseOrigin(value.origin),
-    base: tiles && basePath ? tile(basePath) : undefined,
+    /** An empty base means every layer is in the history (version 3). */
+    base: value.formatVersion >= IMAGESAGE_DOCUMENT_VERSION ? "" : tiles && basePath ? tile(basePath) : undefined,
     baseAdjust: resolveAdjust(parseAdjust(value.baseAdjust)),
     history,
     historyIndex: Math.max(0, Math.min(history.length, Math.round(historyIndex))),

@@ -7,6 +7,7 @@ import {
   Check,
   Checkerboard,
   CircleDashed,
+  Lasso,
   CircleHalf,
   CircleHalfTilt,
   ClipboardText,
@@ -36,6 +37,7 @@ export type PartAction =
   | "pick"
   | "linear"
   | "radial"
+  | "lasso"
   | "add-mask"
   | "add-brightness"
   | "add-contrast"
@@ -62,6 +64,8 @@ export type PartAction =
 
 interface Props {
   documentId: string;
+  /** The document has a separate original image (node 0); otherwise every layer is in `history`. */
+  hasBase: boolean;
   origin: DocumentOrigin;
   /** Adjustments of the original image. */
   baseAdjust?: LayerAdjust;
@@ -268,9 +272,10 @@ function AdjustmentSliders({ node, adjustment, disabled, onChange }: { node: num
  * adjustment; clicking a chip makes it the Mask tool's target, and its arrow
  * opens its options.
  */
-export const StepsPanel = memo(function StepsPanel({ documentId, origin, baseAdjust, history, current, maskTarget, maskRedShown, canPasteMask, pending, thumbnails, disabled, onSelect, onToggleVisible, onShowAll, onDelete, onMaskDeselect, onRename, onMove, onPartAction, onAdjustValue }: Props) {
+export const StepsPanel = memo(function StepsPanel({ documentId, hasBase, origin, baseAdjust, history, current, maskTarget, maskRedShown, canPasteMask, pending, thumbnails, disabled, onSelect, onToggleVisible, onShowAll, onDelete, onMaskDeselect, onRename, onMove, onPartAction, onAdjustValue }: Props) {
   /** The top layer is listed first, like a stack; the original image is at the bottom. */
-  const nodes = Array.from({ length: history.length + 1 }, (_, node) => history.length - node);
+  const nodes = Array.from({ length: history.length + (hasBase ? 1 : 0) }, (_, node) => history.length - node);
+  const layerCount = nodes.length;
   const [width, setWidth] = useState(storedWidth);
   /** The layer menu; `blendOnly` (from the blend tag) shows only the blend choices. */
   const [menu, setMenu] = useState<{ node: number; x: number; y: number; blendOnly?: boolean } | null>(null);
@@ -519,8 +524,8 @@ export const StepsPanel = memo(function StepsPanel({ documentId, origin, baseAdj
             <button
               className="layer-chip-body"
               disabled={disabled}
-              onClick={() => onPartAction(node, part, "pick")}
-              data-help={`${label}${off ? " (turned off)" : ""}. Click to paint it with the Mask tool. Right-click for options.`}
+              onClick={(event) => onPartAction(node, part, event.ctrlKey && mask ? "mask-toggle" : "pick")}
+              data-help={`${label}${off ? " (turned off)" : ""}. Click to paint it with the Mask tool.${mask ? ` Ctrl+click to turn it ${off ? "on" : "off"}.` : ""} Right-click for options.`}
             >
               <MaskIcon inverted={hides} size={15} />
               {mask && <MaskThumb src={mask} hides={hides} off={maskOff} />}
@@ -678,8 +683,8 @@ export const StepsPanel = memo(function StepsPanel({ documentId, origin, baseAdj
         {image}
         <span
           className={`thumb-mask ${targeted ? "target" : ""} ${targeted && maskRedShown ? "red" : ""}`}
-          data-help={`Layer mask${step.maskOff ? " (turned off)" : ""}. Click to paint it with the Mask tool; click again to stop. Right-click for the mask options.`}
-          onClick={(event) => { if (handled(event)) onPartAction(node, "mask", "pick"); }}
+          data-help={`Layer mask${step.maskOff ? " (turned off)" : ""}. Click to paint it with the Mask tool; click again to stop. Ctrl+click to turn it ${step.maskOff ? "on" : "off"}. Right-click for the mask options.`}
+          onClick={(event) => { if (handled(event)) onPartAction(node, "mask", event.ctrlKey ? "mask-toggle" : "pick"); }}
           onContextMenu={(event) => {
             event.preventDefault();
             if (handled(event)) openPartMenu(event.currentTarget, node, "mask");
@@ -724,13 +729,14 @@ export const StepsPanel = memo(function StepsPanel({ documentId, origin, baseAdj
       /** Enable or Disable comes first in every mask menu; Add mask comes first while there is no mask. */
       hasMask
         ? item(part, "mask-toggle", <Prohibit size={15} />, maskOff ? "Enable mask" : "Disable mask")
-        : item(part, part === "mask" ? "add-mask" : "mask-add", <MaskIcon size={15} />, "Add mask", { note: part === "mask" ? "Ctrl+M · hides all" : "hides all" }),
+        : item(part, part === "mask" ? "add-mask" : "mask-add", <MaskIcon size={15} />, "Add mask", { note: "hides all" }),
       item(part, "click-select", <CursorClick size={15} />, "Click to select…", { note: "click the image" }),
       ...(hasMask ? [item(part, "mask-invert", <CircleHalf size={15} />, "Invert mask", { note: "Ctrl+I" })] : []),
       ...(hasMask ? [item(part, "mask-copy", <Copy size={15} />, "Copy mask")] : []),
       ...(canPasteMask ? [item(part, "mask-paste", <ClipboardText size={15} />, "Paste mask", { note: hasMask ? "replaces this one" : undefined })] : []),
       item(part, "linear", <Gradient size={15} />, "Linear gradient", { note: "drag on image" }),
       item(part, "radial", <CircleDashed size={15} />, "Radial gradient", { note: "drag on image" }),
+      item(part, "lasso", <Lasso size={15} />, "Polygon lasso", { note: "L · click points" }),
       ...(hasMask ? [item(part, "mask-delete", <Trash size={15} />, "Delete mask", { danger: true })] : [])
     ];
     if (part === "mask" || !adjustment) return [<div key="head" className="steps-menu-head">Layer mask</div>, ...maskItems];
@@ -778,7 +784,7 @@ Click to show its progress on the image.`}>
       <aside className="steps-panel collapsed" aria-label="Layers (collapsed)" data-help-side="left">
         <button className="steps-expand" onClick={() => changeCollapsed(false)} aria-label="Expand the layers panel" data-help="Expand the layers panel">
           <CaretDoubleLeft size={14} weight="bold" />
-          <span className="steps-collapsed-label">Layers · {history.length + 1}</span>
+          <span className="steps-collapsed-label">Layers · {layerCount}</span>
           {pending.length > 0 && <SpinnerGap className="spin" size={15} />}
         </button>
       </aside>
@@ -807,7 +813,7 @@ Click to show its progress on the image.`}>
         onPointerCancel={endResize}
       />
       <div className="steps-panel-header" role="toolbar" aria-label="Layers">
-        <span className="steps-panel-title">{history.length + 1} {history.length ? "Layers" : "Layer"}</span>
+        <span className="steps-panel-title">{layerCount} {layerCount === 1 ? "Layer" : "Layers"}</span>
         <label className={`layers-search ${search ? "has-value" : ""}`} data-help="Filter the layers by name, prompt or model. Esc clears.">
           <MagnifyingGlass size={13} weight="bold" />
           <input
@@ -843,7 +849,7 @@ Click to show its progress on the image.`}>
             <button
               disabled={disabled || !history.length || history.every((step) => step.hidden)}
               onClick={() => onShowAll(false)}
-              data-help="Hide every layer; the original image still shows"
+              data-help={hasBase ? "Hide every layer; the original image still shows" : "Hide every layer"}
             >
               None
             </button>

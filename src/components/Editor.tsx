@@ -3,6 +3,7 @@ import {
   ArrowArcLeft,
   Camera,
   Check,
+  Lasso,
   MagicWand,
   Minus,
   Plus,
@@ -99,6 +100,30 @@ const MASK_CLIPBOARD_EVENT = "imagesage-mask-clipboard";
 const IMPORTED_MODEL = "Imported image";
 /** The model name of a layer copied from the original image. Like an imported layer, it cannot be regenerated. */
 const ORIGINAL_COPY_MODEL = "Copy of the original";
+/** The name the bottom layer gets: an opened image, or the first image generated in a new document. */
+const ORIGINAL_LAYER_NAME = "Original image";
+/**
+ * The original image of a document as a normal bottom layer. A generated
+ * original keeps its prompt and model, so it can be regenerated; its cost
+ * stays on the document's origin, so it is not counted twice.
+ */
+const originalLayer = (doc: ImageDocument, layer: string): EditStep => {
+  const area: Rect = { x: 0, y: 0, width: doc.surface.width, height: doc.surface.height };
+  const { origin } = doc;
+  return {
+    id: crypto.randomUUID(),
+    name: ORIGINAL_LAYER_NAME,
+    prompt: origin.kind === "generated" ? origin.prompt : origin.fileName || "Opened image",
+    model: origin.kind === "generated" ? origin.model : IMPORTED_MODEL,
+    quality: origin.kind === "generated" ? origin.quality : "",
+    createdAt: doc.createdAt,
+    selection: { x: 0, y: 0, size: Math.min(area.width, area.height) },
+    area,
+    sent: { ...area, margin: 0, requestWidth: area.width, requestHeight: area.height },
+    layer,
+    ...(doc.baseAdjust ? { adjust: doc.baseAdjust } : {})
+  };
+};
 /** Set when the user checks "Don't show again" in the Regenerate confirmation. */
 const SKIP_REGEN_CONFIRM_KEY = "imagesage.skip-regenerate-confirm";
 const skipRegenConfirm = () => {
@@ -282,6 +307,8 @@ const prepLayer = (prep: MaskPrep): LayerCanvases => ({
   ...(prep.blend ? { blend: prep.blend } : {}),
   adjustments: prep.adjustments.flatMap(({ filter, opacity, mask, hides }) => filter ? [{ filter, mask, hides, ...(opacity !== null ? { opacity } : {}) }] : [])
 });
+/** The layer has a layer mask or adjustments, which a regenerate removes. */
+const hasMaskOrAdjust = (step: EditStep) => Boolean(step.layerMask) || adjustList(step.adjust).length > 0;
 /** A step with its `hidden` flag set or removed. */
 const withHidden = (step: EditStep, hidden: boolean): EditStep => {
   const { hidden: _hidden, ...rest } = step;
@@ -367,6 +394,8 @@ interface Props {
   /** Asks where to save the video slideshow and writes it; false when the user cancels. */
   onExportVideo: (id: string, video: Blob) => Promise<boolean>;
   onNotice: (notice: Notice) => void;
+  /** Shows the file loader with `label` while `work` runs. */
+  onFileTask: <T>(label: string, work: () => Promise<T>) => Promise<T>;
   /** A File menu command for this editor, or null; only the active editor gets one. */
   command?: EditorCommand | null;
 }
@@ -386,7 +415,18 @@ const SAVE_MAX_WIDTH_KEY = "imagesage.save-max-width";
 const SAVE_MAX_HEIGHT_KEY = "imagesage.save-max-height";
 const CORNERS: Corner[] = ["nw", "ne", "sw", "se"];
 const BRUSH_RADIUS_KEY = "imagesage.brush-radius";
+const BRUSH_PRECISE_KEY = "imagesage.brush-precise";
+/** The soft edge of a precise brush, in image pixels, at every brush size; a soft brush blurs by 30% of its radius. */
+const PRECISE_BRUSH_BLUR = 1.5;
 const MASK_COLOR = "#ff3366";
+/** Space above the image, for the layer name and the image size (matches `.canvas-scroll-area`). */
+const CANVAS_TOP_SPACE = 46;
+/** Space below the image for the mask shortcut tips and a margin under them. */
+const MASK_TIPS_SPACE = 230;
+/** Screen pixels around the first lasso corner where a click closes the shape. */
+const LASSO_CLOSE_REACH = 8;
+/** Panning stops when this much of the image (in screen pixels) is still in view at the window's edge. */
+const PAN_KEEP_VISIBLE = 80;
 /** Largest side of the mask preview canvas, in device pixels; it is redrawn when zoom changes. */
 const MASK_PREVIEW_MAX = 4096;
 
@@ -427,6 +467,7 @@ export function Editor({
   onExport,
   onExportVideo,
   onNotice,
+  onFileTask,
   command
 }: Props) {
   usePrices();
@@ -448,6 +489,14 @@ export function Editor({
     const stored = Number(readStored(BRUSH_RADIUS_KEY));
     return Number.isFinite(stored) && stored >= 2 ? stored : 40;
   });
+  /** A precise brush has a thin soft edge at every size; otherwise the edge is soft. */
+  const [brushPrecise, setBrushPrecise] = useState(() => readStored(BRUSH_PRECISE_KEY) === "1");
+  const toggleBrushPrecise = useCallback(() => {
+    setBrushPrecise((precise) => {
+      writeStored(BRUSH_PRECISE_KEY, precise ? "" : "1");
+      return !precise;
+    });
+  }, []);
   /** The brush cursor follows the pointer by direct style changes, so painting does not render the editor on every move. */
   const brushCursorRef = useRef<HTMLDivElement>(null);
   const brushPointRef = useRef<Point | null>(null);
@@ -492,6 +541,20 @@ export function Editor({
   const [maskOverlay, setMaskOverlay] = useState(true);
   /** A gradient waiting to be dragged on the image, or null. */
   const [gradient, setGradient] = useState<"linear" | "radial" | null>(null);
+  /** The polygon lasso is on: clicks add corners of a shape, and closing the shape fills it in the mask. */
+  const [lasso, setLasso] = useState(false);
+  /** The corners placed so far, in image pixels. */
+  const [lassoPoints, setLassoPointsState] = useState<Point[]>([]);
+  const lassoPointsRef = useRef<Point[]>([]);
+  const setLassoPoints = useCallback((points: Point[]) => {
+    lassoPointsRef.current = points;
+    setLassoPointsState(points);
+  }, []);
+  /** The time and place of the last lasso click, to find a double-click. */
+  const lassoClickRef = useRef<{ time: number; point: Point } | null>(null);
+  /** The pointer's place, for the line from the last corner to the pointer. */
+  const lassoHoverRef = useRef<Point | null>(null);
+  const lassoRubberRef = useRef<SVGLineElement>(null);
   /** The layer being resized: its bounds before resizing and the resize so far, for the handles. */
   const [resize, setResize] = useState<{ bounds: Rect; transform: LayerTransform } | null>(null);
   const resizeRef = useRef<ResizeSession | null>(null);
@@ -522,11 +585,19 @@ export function Editor({
   /** The one-time click-to-select model download dialog; `resolve` gets true when the model is ready. */
   const [modelPrompt, setModelPrompt] = useState<{ model: ModelId; sizeBytes: number; resolve: (installed: boolean) => void } | null>(null);
 
+  /** When the image fits the window, it leaves room for the layer name above it and the mask shortcut tips below it. */
   const fitScale = Math.min(
     Math.max(0.05, ((workspaceSize.width - 48) * pixelRatio) / width),
-    Math.max(0.05, ((workspaceSize.height - 78) * pixelRatio) / height),
+    Math.max(0.05, ((workspaceSize.height - CANVAS_TOP_SPACE - MASK_TIPS_SPACE) * pixelRatio) / height),
     1
   );
+  /**
+   * The image can be panned at every zoom: the space around it is almost a
+   * window wide and tall, so it can move until only an edge of it shows.
+   */
+  const panSpaceX = Math.max(24, Math.round(workspaceSize.width - PAN_KEEP_VISIBLE));
+  const panSpaceTop = Math.max(CANVAS_TOP_SPACE, Math.round(workspaceSize.height - PAN_KEEP_VISIBLE));
+  const panSpaceBottom = Math.max(MASK_TIPS_SPACE, Math.round(workspaceSize.height - PAN_KEEP_VISIBLE));
   const displayScale = zoom ?? fitScale;
   const displayScaleRef = useRef(displayScale);
   displayScaleRef.current = displayScale;
@@ -599,6 +670,8 @@ export function Editor({
   }, []);
 
   const anyJob = jobs.length > 0;
+  /** GPT Image is making the layer selected in the layers list (its waiting row); the image gets a moving border. */
+  const generating = jobs.some((job) => job.service === "OpenAI" && job.requestId === selectedJob);
   useEffect(() => {
     if (!anyJob) return;
     const id = window.setInterval(() => setNow(Date.now()), 500);
@@ -634,7 +707,7 @@ export function Editor({
     ...(step.blend ? { blend: step.blend } : {})
   }))), [adjustCanvases, decodeLayer]);
   /** The original image with its adjustments, decoded, or null before the document has a base image. */
-  const baseCanvases = useCallback(async (doc: Pick<ImageDocument, "id" | "base" | "baseAdjust">): Promise<LayerCanvases | null> => doc.base === undefined ? null : {
+  const baseCanvases = useCallback(async (doc: Pick<ImageDocument, "id" | "base" | "baseAdjust">): Promise<LayerCanvases | null> => !doc.base ? null : {
     image: await decodeLayer(`base:${doc.id}`, doc.base),
     mask: null,
     maskHides: false,
@@ -668,26 +741,39 @@ export function Editor({
   }, [baseCanvases, composeTick, imageDocument.base, imageDocument.baseAdjust, imageDocument.history, imageDocument.id, imageDocument.surface, layerCanvases, onNotice]);
 
   /**
-   * A document without a base image is new, or was saved before layers. Its
-   * original image becomes the base, and each older before/after step becomes
-   * a full layer, rendered by walking the old step tree on a copy of the surface.
+   * Every layer lives in the history, the original image included, so it gets
+   * the same tools as any other layer. A new document, or one saved before
+   * layers, has no base yet: each older before/after step becomes a full
+   * layer, rendered by walking the old step tree on a copy of the surface.
+   * A separate original image (from version 2 documents) becomes the bottom
+   * layer. An empty original, such as the blank canvas of an image generated
+   * from a prompt, is left out.
    */
   useEffect(() => {
     const doc = imageDocument;
-    if (doc.base !== undefined) return;
+    if (doc.base === "") return;
     let cancelled = false;
     void (async () => {
-      const copy = cloneCanvas(doc.surface);
-      let at = doc.historyIndex;
-      const images: string[] = [];
-      for (let node = 0; node <= doc.history.length; node++) {
-        await navigateSurface(copy, doc.history, at, node);
-        at = node;
-        images.push(await canvasToDataUrl(copy));
-        if (cancelled) return;
+      let original = doc.base;
+      let history = doc.history;
+      if (original === undefined) {
+        const copy = cloneCanvas(doc.surface);
+        let at = doc.historyIndex;
+        const images: string[] = [];
+        for (let node = 0; node <= doc.history.length; node++) {
+          await navigateSurface(copy, doc.history, at, node);
+          at = node;
+          images.push(await canvasToDataUrl(copy));
+          if (cancelled) return;
+        }
+        original = images[0];
+        history = doc.history.map(({ before: _before, after: _after, parent: _parent, ...step }, index) => ({ ...step, layer: images[index + 1] }));
       }
-      const history = doc.history.map(({ before: _before, after: _after, parent: _parent, ...step }, index) => ({ ...step, layer: images[index + 1] }));
-      onCommit(doc.id, { base: images[0], history }, false);
+      const empty = opaqueBounds(await canvasFromDataUrl(original)) === null;
+      if (cancelled) return;
+      if (!empty) history = [originalLayer(doc, original), ...history];
+      const historyIndex = empty ? Math.max(doc.historyIndex, Math.min(1, history.length)) : doc.historyIndex + 1;
+      onCommit(doc.id, { base: "", baseAdjust: undefined, history, historyIndex }, false);
     })().catch((error) => onNotice({ tone: "error", message: `Could not prepare the layers: ${error instanceof Error ? error.message : String(error)}` }));
     return () => { cancelled = true; };
   }, [imageDocument, onCommit, onNotice]);
@@ -717,7 +803,8 @@ export function Editor({
       return url ? [[stepKey(id, history, node), url]] : [];
     })));
     publish();
-    const missing = signatures.flatMap((key, node) => previewCacheRef.current.has(key) ? [] : [node]);
+    /** Without a separate original image, node 0 has no preview. */
+    const missing = signatures.flatMap((key, node) => previewCacheRef.current.has(key) || (node === 0 && !base) ? [] : [node]);
     if (!missing.length) return;
     let cancelled = false;
     void (async () => {
@@ -770,8 +857,9 @@ export function Editor({
   /**
    * Adds a finished edit as the top layer and selects it. `image` is the layer,
    * already drawn. With `replaceId` (a retry), the edit takes that layer's place
-   * instead, and keeps its name, masks, adjustments, and visibility; the
-   * replaced layer is returned, so the change can be undone.
+   * instead, keeps its name, and is shown, even if the old layer was hidden.
+   * Its masks and adjustments are dropped, because they were made for the old
+   * image. The replaced layer is returned, so the change can be undone.
    */
   const appendStep = useCallback((step: EditStep, image: HTMLCanvasElement, replaceId?: string): EditStep | null => {
     const latest = documentRef.current;
@@ -784,20 +872,11 @@ export function Editor({
       onCommit(latest.id, { history, historyIndex: history.length });
       return null;
     }
-    /** A retry hid the old layer while it ran; the new layer gets the visibility from before the retry. */
+    /** A retry hid the old layer while it ran; Undo brings it back with the visibility from before the retry. */
     const wasHidden = retryHiddenRef.current.get(latest.history[index].id);
     retryHiddenRef.current.delete(latest.history[index].id);
     const old: EditStep = wasHidden === undefined ? latest.history[index] : withHidden(latest.history[index], wasHidden);
-    const { name, layerMask, maskHides, maskOff, adjust, hidden } = old;
-    const replaced: EditStep = { ...step, name, layerMask, maskHides, maskOff, adjust, hidden };
-    for (const key of ["name", "layerMask", "maskHides", "maskOff", "adjust", "hidden"] as const) {
-      if (replaced[key] === undefined) delete replaced[key];
-    }
-    /** The masks are kept under the new layer id. */
-    for (const [from, to] of [[`${old.id}:mask`, `${step.id}:mask`], ...adjustList(old.adjust).map((item) => [adjustMaskKey(old.id, item.id), adjustMaskKey(step.id, item.id)])]) {
-      const cached = layerCacheRef.current.get(from);
-      if (cached) layerCacheRef.current.set(to, cached);
-    }
+    const replaced: EditStep = old.name === undefined ? step : { ...step, name: old.name };
     onCommit(latest.id, { history: latest.history.map((item, at) => at === index ? replaced : item), historyIndex: index + 1 });
     return old;
   }, [onCommit]);
@@ -876,12 +955,21 @@ export function Editor({
   }, [setPartMask]);
 
   const isMaskTool = tool === "mask";
-  /** The mask brush shows the round brush cursor and uses the brush size; a waiting gradient uses a crosshair instead. */
-  const brushLike = isMaskTool && !gradient;
-  /** A gradient waits only while the Mask tool is on. */
+  /** The mask brush hides now: its mode, reversed while Alt is held. */
+  const brushHides = maskShows === erasing;
+  /** The mask brush shows the round brush cursor and uses the brush size; a waiting gradient and the lasso use a crosshair instead. */
+  const brushLike = isMaskTool && !gradient && !lasso;
+  /** A gradient and the lasso work only while the Mask tool is on. */
   useEffect(() => {
-    if (!isMaskTool) setGradient(null);
+    if (isMaskTool) return;
+    setGradient(null);
+    setLasso(false);
   }, [isMaskTool]);
+  /** A shape in progress belongs to one mask; it is dropped when the lasso turns off or another mask is picked. */
+  useEffect(() => {
+    setLassoPoints([]);
+    lassoClickRef.current = null;
+  }, [lasso, targetPart, imageDocument.historyIndex, setLassoPoints]);
 
   /** While a mask tool is on, the selected layer and the combined layers below and above it are ready for fast painting. */
   const maskPrepRef = useRef<MaskPrep | null>(null);
@@ -933,7 +1021,7 @@ export function Editor({
     const doc = imageDocument;
     const node = doc.historyIndex;
     const part = targetPart;
-    if (!isMaskTool || !part || doc.base === undefined) {
+    if (!isMaskTool || !part || doc.base === undefined || (node === 0 && !doc.base)) {
       maskPrepRef.current = null;
       maskPrepKeyRef.current = "";
       return;
@@ -1053,13 +1141,15 @@ export function Editor({
         area,
         sent,
         layer: await canvasToDataUrl(work),
-        ...(cost !== null ? { cost } : {})
+        ...(cost !== null ? { cost } : {}),
+        /** The first image in an empty document is its original. */
+        ...(!replaceId && documentRef.current.base === "" && !documentRef.current.history.length ? { name: ORIGINAL_LAYER_NAME } : {})
       };
       const replaced = appendStep(step, work, replaceId);
       const estimateText = formatUsd(estimateOpenAiImage(model, quality, sizeText, instruction.length));
       onNotice({
         tone: "success",
-        message: `${replaced ? "Layer replaced." : empty ? "Image generated." : "Whole image edited."} ${cost !== null ? `Charged ${formatUsd(cost)}.` : `Estimated cost ${estimateText}.`}`,
+        message: `${replaced ? `Layer replaced${hasMaskOrAdjust(replaced) ? "; its mask and adjustments were removed" : ""}.` : empty ? "Image generated." : "Whole image edited."} ${cost !== null ? `Charged ${formatUsd(cost)}.` : `Estimated cost ${estimateText}.`}`,
         ...(replaced ? { action: { label: "Undo", run: () => undoReplace(replaced, step.id) } } : {})
       });
     } catch (error) {
@@ -1255,7 +1345,9 @@ export function Editor({
     const current = documentRef.current;
     const step = current.history[node - 1];
     if (!step) return;
-    onCommit(current.id, { history: current.history.filter((_, index) => index !== node - 1), historyIndex: node - 1 });
+    const history = current.history.filter((_, index) => index !== node - 1);
+    /** Without a separate original image, node 0 is no layer, so the layer above is selected instead. */
+    onCommit(current.id, { history, historyIndex: current.base ? node - 1 : Math.max(node - 1, Math.min(1, history.length)) });
     setPrompt(step.prompt);
     onNotice({ tone: "success", message: `Layer ${node + 1} deleted.`, action: { label: "Undo", run: () => undoDelete(step, node) } });
   };
@@ -1371,13 +1463,18 @@ export function Editor({
       const size = videoSize(width, height);
       const full = createCanvas(width, height);
       const context = full.getContext("2d")!;
-      if (base) drawLayer(context, base);
-      const stages = [scaledCanvas(full, size.width, size.height)];
+      /** A separate original image (older documents) is the first picture; otherwise the bottom visible layer is. */
+      const stages: HTMLCanvasElement[] = [];
+      if (base) {
+        drawLayer(context, base);
+        stages.push(scaledCanvas(full, size.width, size.height));
+      }
       for (const layer of layers) {
         drawLayer(context, layer);
         stages.push(scaledCanvas(full, size.width, size.height));
       }
-      const names = ["Original image", ...visible.map(({ step, node }) => step.name || `Layer ${node}`)];
+      if (!stages.length) throw new Error("Show at least one layer first.");
+      const names = [...(base ? ["Original image"] : []), ...visible.map(({ step, node }) => step.name || `Layer ${node}`)];
       const video = await encodeSlideshow(stages, names, options, (progress) => updateJob(requestId, (existing) => ({ ...existing, progress })));
       await onExportVideo(doc.id, video);
     } catch (error) {
@@ -1397,33 +1494,35 @@ export function Editor({
     setImportLayerOpen(false);
     const current = documentRef.current;
     if (applyingRef.current || resizeRef.current || clickSelectRef.current) return;
+    const file = path.split(/[\\/]/).pop() ?? "image";
     try {
-      const opened = await invoke<{ dataUrl: string }>("open_image_file", { path, includeHistory: false });
-      const image = await canvasFromDataUrl(opened.dataUrl);
-      const { width: docWidth, height: docHeight } = current.surface;
-      const scale = Math.min(1, docWidth / image.width, docHeight / image.height);
-      const drawWidth = Math.round(image.width * scale);
-      const drawHeight = Math.round(image.height * scale);
-      const layer = createCanvas(docWidth, docHeight);
-      const context = layer.getContext("2d")!;
-      context.imageSmoothingEnabled = true;
-      context.imageSmoothingQuality = "high";
-      context.drawImage(image, Math.round((docWidth - drawWidth) / 2), Math.round((docHeight - drawHeight) / 2), drawWidth, drawHeight);
-      const file = path.split(/[\\/]/).pop() ?? "image";
-      const name = file.replace(/\.[^.]+$/, "");
-      const area: Rect = { x: 0, y: 0, width: docWidth, height: docHeight };
-      const step: EditStep = {
-        id: crypto.randomUUID(),
-        prompt: `Imported from ${file}`,
-        model: IMPORTED_MODEL,
-        quality: "",
-        createdAt: new Date().toISOString(),
-        selection: { x: 0, y: 0, size: Math.min(docWidth, docHeight) },
-        area,
-        sent: { ...area, margin: 0, requestWidth: docWidth, requestHeight: docHeight },
-        layer: await canvasToDataUrl(layer),
-        name
-      };
+      const { step, layer, scale } = await onFileTask(`Importing ${file}…`, async () => {
+        const opened = await invoke<{ dataUrl: string }>("open_image_file", { path, includeHistory: false });
+        const image = await canvasFromDataUrl(opened.dataUrl);
+        const { width: docWidth, height: docHeight } = current.surface;
+        const scale = Math.min(1, docWidth / image.width, docHeight / image.height);
+        const drawWidth = Math.round(image.width * scale);
+        const drawHeight = Math.round(image.height * scale);
+        const layer = createCanvas(docWidth, docHeight);
+        const context = layer.getContext("2d")!;
+        context.imageSmoothingEnabled = true;
+        context.imageSmoothingQuality = "high";
+        context.drawImage(image, Math.round((docWidth - drawWidth) / 2), Math.round((docHeight - drawHeight) / 2), drawWidth, drawHeight);
+        const area: Rect = { x: 0, y: 0, width: docWidth, height: docHeight };
+        const step: EditStep = {
+          id: crypto.randomUUID(),
+          prompt: `Imported from ${file}`,
+          model: IMPORTED_MODEL,
+          quality: "",
+          createdAt: new Date().toISOString(),
+          selection: { x: 0, y: 0, size: Math.min(docWidth, docHeight) },
+          area,
+          sent: { ...area, margin: 0, requestWidth: docWidth, requestHeight: docHeight },
+          layer: await canvasToDataUrl(layer),
+          name: file.replace(/\.[^.]+$/, "")
+        };
+        return { step, layer, scale };
+      });
       appendStep(step, layer);
       onNotice({ tone: "success", message: `Imported ${file} as a new layer${scale < 1 ? ", scaled down to fit" : ""}. Drag to place it; Enter applies.` });
       /** Transform starts once the new layer is in the document. */
@@ -1477,7 +1576,7 @@ export function Editor({
     switch (action) {
       case "pick":
         /** A click on the mask that is already the target deselects it: the Mask tool turns off. R still shows or hides the red view. */
-        if (isMaskTool && !gradient && node === current.historyIndex && part === targetPart) {
+        if (isMaskTool && !gradient && !lasso && node === current.historyIndex && part === targetPart) {
           setTool("whole");
           return;
         }
@@ -1485,11 +1584,18 @@ export function Editor({
         pick(part);
         setMaskOverlay(true);
         setGradient(null);
+        setLasso(false);
         return;
       case "linear":
       case "radial":
         pick(part);
+        setLasso(false);
         setGradient(action);
+        return;
+      case "lasso":
+        pick(part);
+        setGradient(null);
+        setLasso(true);
         return;
       case "add-brightness":
       case "add-contrast":
@@ -1550,6 +1656,8 @@ export function Editor({
         return;
       }
       case "mask-toggle":
+        /** Turning a mask on or off is checked by looking at the image, so the red view goes off. */
+        setMaskOverlay(false);
         if (part === "mask") {
           if (!step?.layerMask) return;
           const { maskOff: _off, ...rest } = step;
@@ -1996,6 +2104,8 @@ export function Editor({
       if (event.key === "Escape" && !typing) {
         if (gradientRef.current) cancelGradientDrag();
         else if (gradient) setGradient(null);
+        else if (lassoPointsRef.current.length) setLassoPoints([]);
+        else if (lasso) setLasso(false);
         else if (isMaskTool) setTool("whole");
       }
       if (event.ctrlKey && event.key.toLowerCase() === "z" && !typing) {
@@ -2007,13 +2117,6 @@ export function Editor({
       if (event.ctrlKey && (event.key.toLowerCase() === "y" || event.key.toLowerCase() === "r") && !typing) {
         event.preventDefault();
         redoMask();
-      }
-      /** Ctrl+M adds a layer mask to the selected layer when it has none. */
-      if (event.ctrlKey && event.key.toLowerCase() === "m" && !typing) {
-        event.preventDefault();
-        const doc = documentRef.current;
-        const step = doc.historyIndex > 0 ? doc.history[doc.historyIndex - 1] : null;
-        if (step && !step.layerMask) void partAction(doc.historyIndex, "mask", "add-mask");
       }
       /** Ctrl+T transforms the selected layer, as in Photoshop; the original image cannot be transformed. */
       if (event.ctrlKey && event.key.toLowerCase() === "t" && !typing) {
@@ -2052,6 +2155,20 @@ export function Editor({
       }
       if (isMaskTool && event.key.toLowerCase() === "x") setMaskShows((shows) => !shows);
       if (isMaskTool && event.key.toLowerCase() === "r") setMaskOverlay((shown) => !shown);
+      if (isMaskTool && event.key.toLowerCase() === "p") toggleBrushPrecise();
+      /** L turns the polygon lasso on or off; Enter fills the shape, and Backspace removes its last corner. */
+      if (isMaskTool && targetPart && event.key.toLowerCase() === "l") {
+        setGradient(null);
+        setLasso((on) => !on);
+      }
+      if (lasso && event.key === "Enter" && lassoPointsRef.current.length >= 3) {
+        event.preventDefault();
+        fillLasso(lassoPointsRef.current, false);
+      }
+      if (lasso && event.key === "Backspace" && lassoPointsRef.current.length) {
+        event.preventDefault();
+        setLassoPoints(lassoPointsRef.current.slice(0, -1));
+      }
       if (brushLike && (event.key === "[" || event.key === "]")) {
         event.preventDefault();
         const step = Math.max(2, Math.round(brushRadius * 0.15));
@@ -2136,17 +2253,66 @@ export function Editor({
     return () => workspace.removeEventListener("wheel", onWheel);
   }, [height, width]);
 
-  /** After a Ctrl+wheel zoom, scroll so the anchored image point is back under the pointer. */
+  /** The image point (as a fraction of the image) at the middle of the window, kept while the user pans. */
+  const viewCenterRef = useRef<{ x: number; y: number } | null>(null);
+  /** Counts clicks on the zoom percent (fit to window); each one centers the image. */
+  const [fitRequest, setFitRequest] = useState(0);
+  const centeredFitRef = useRef(-1);
+  /** The middle-of-window point right after the image was centered; while the view is still there, the image stays centered. */
+  const centeredViewRef = useRef<{ x: number; y: number } | null>(null);
+  const rememberViewCenter = () => {
+    const workspace = workspaceRef.current;
+    const stage = stageRef.current;
+    if (!workspace || !stage || workspace.clientWidth === 0) return;
+    const view = workspace.getBoundingClientRect();
+    const rect = stage.getBoundingClientRect();
+    viewCenterRef.current = {
+      x: (view.left + workspace.clientWidth / 2 - rect.left) / rect.width,
+      y: (view.top + workspace.clientHeight / 2 - rect.top) / rect.height
+    };
+  };
+
+  /**
+   * After the zoom or the window size changes, scroll so the image stays where
+   * the user expects it. A Ctrl+wheel or Space-click zoom keeps the image point
+   * under the pointer. The image is centered only when it first shows and when
+   * the user clicks the zoom percent to fit it, with room for the layer name
+   * above and the mask tips below. Any other change, such as the Mask tool
+   * turning on or off, keeps the image point at the middle of the window there.
+   */
   useLayoutEffect(() => {
     const anchor = zoomAnchorRef.current;
     const workspace = workspaceRef.current;
     const stage = stageRef.current;
     zoomAnchorRef.current = null;
-    if (!anchor || !workspace || !stage) return;
+    if (!workspace || !stage || workspace.clientWidth === 0) return;
+    const view = workspace.getBoundingClientRect();
     const rect = stage.getBoundingClientRect();
-    workspace.scrollLeft += rect.left + (anchor.imageX / width) * rect.width - anchor.clientX;
-    workspace.scrollTop += rect.top + (anchor.imageY / height) * rect.height - anchor.clientY;
-  }, [displayScale, height, width]);
+    if (anchor) {
+      workspace.scrollLeft += rect.left + (anchor.imageX / width) * rect.width - anchor.clientX;
+      workspace.scrollTop += rect.top + (anchor.imageY / height) * rect.height - anchor.clientY;
+    } else if (
+      centeredFitRef.current !== fitRequest
+      || !viewCenterRef.current
+      || (zoom === null && centeredViewRef.current
+        && Math.abs(centeredViewRef.current.x - viewCenterRef.current.x) < 0.001
+        && Math.abs(centeredViewRef.current.y - viewCenterRef.current.y) < 0.001)
+    ) {
+      centeredFitRef.current = fitRequest;
+      const left = view.left + (workspace.clientWidth - rect.width) / 2;
+      const top = view.top + (workspace.clientHeight - rect.height - CANVAS_TOP_SPACE - MASK_TIPS_SPACE) / 2 + CANVAS_TOP_SPACE;
+      workspace.scrollLeft += rect.left - left;
+      workspace.scrollTop += rect.top - top;
+      rememberViewCenter();
+      centeredViewRef.current = viewCenterRef.current;
+      return;
+    } else {
+      const center = viewCenterRef.current;
+      workspace.scrollLeft += rect.left + center.x * rect.width - (view.left + workspace.clientWidth / 2);
+      workspace.scrollTop += rect.top + center.y * rect.height - (view.top + workspace.clientHeight / 2);
+    }
+    rememberViewCenter();
+  }, [displayScale, fitRequest, height, panSpaceBottom, panSpaceTop, panSpaceX, width, zoom]);
 
   /**
    * Space+drag (or a middle drag) pans. With Space held, Ctrl+click zooms in
@@ -2280,7 +2446,7 @@ export function Editor({
     if (!stroke) return;
     const context = stroke.stroke.getContext("2d")!;
     context.save();
-    context.filter = `blur(${Math.max(0.5, brushRadius * 0.3)}px)`;
+    context.filter = `blur(${brushPrecise ? PRECISE_BRUSH_BLUR : Math.max(0.5, brushRadius * 0.3)}px)`;
     context.strokeStyle = "#fff";
     context.fillStyle = "#fff";
     context.lineCap = "round";
@@ -2370,6 +2536,85 @@ export function Editor({
   };
   const cancelGradientDrag = () => finishGradientDrag(false);
 
+  /** Moves the line from the last lasso corner to the pointer. */
+  const moveLassoRubber = () => {
+    const line = lassoRubberRef.current;
+    const last = lassoPointsRef.current.at(-1);
+    const hover = lassoHoverRef.current;
+    if (!line) return;
+    if (!last || !hover) {
+      line.style.display = "none";
+      return;
+    }
+    line.style.display = "";
+    line.setAttribute("x1", String(last.x * cssScale));
+    line.setAttribute("y1", String(last.y * cssScale));
+    line.setAttribute("x2", String(hover.x * cssScale));
+    line.setAttribute("y2", String(hover.y * cssScale));
+  };
+  useLayoutEffect(moveLassoRubber);
+
+  /**
+   * Fills the closed lasso shape in the target mask, like one brush stroke:
+   * it shows or hides (Alt or `reverse` does the other one) at the brush
+   * opacity, with a clean edge.
+   */
+  const fillLasso = (points: Point[], reverse: boolean) => {
+    setLassoPoints([]);
+    lassoClickRef.current = null;
+    const prep = maskPrepRef.current;
+    const doc = documentRef.current;
+    const node = doc.historyIndex;
+    if (!targetPart || points.length < 3 || !prep || prep.part !== targetPart || prep.owner !== (node > 0 ? doc.history[node - 1].id : BASE_OWNER)) return;
+    const before = partMaskState(doc, node, targetPart);
+    let { mask, hides } = prepTarget(prep);
+    let shows = maskShows !== reverse;
+    /** As with the brush, a mask that shows (or hides) everything can only be changed the other way. */
+    const forced = forcedMaskMode(prep);
+    if (forced !== null && forced !== shows) {
+      shows = forced;
+      if (!reverse) setMaskShows(forced);
+    }
+    if (!mask) {
+      mask = createCanvas(width, height);
+      hides = !shows;
+      setPrepTarget(prep, mask, hides);
+    }
+    const shape = createCanvas(width, height);
+    const context = shape.getContext("2d")!;
+    context.fillStyle = "#fff";
+    context.beginPath();
+    points.forEach((point, index) => index ? context.lineTo(point.x, point.y) : context.moveTo(point.x, point.y));
+    context.closePath();
+    context.fill();
+    applyMaskStroke(mask, drawingCopy(mask), shape, maskOpacity / 100, shows !== hides);
+    redrawPrepared(prep);
+    const filled = mask;
+    const filledHides = hides;
+    void canvasToDataUrl(filled).then((url) => recordMaskChange({ owner: prep.owner, part: prep.part, before, after: { mask: url, hides: filledHides } }, filled));
+  };
+
+  /**
+   * A lasso click adds a corner. With three corners or more, a click on the
+   * first corner or a double-click closes the shape and fills it.
+   */
+  const lassoClick = (point: Point, reverse: boolean) => {
+    const points = lassoPointsRef.current;
+    const now = performance.now();
+    const last = lassoClickRef.current;
+    lassoClickRef.current = { time: now, point };
+    const near = (a: Point, b: Point, reach: number) => Math.hypot(a.x - b.x, a.y - b.y) * cssScale <= reach;
+    if (points.length >= 3 && near(point, points[0], LASSO_CLOSE_REACH)) {
+      fillLasso(points, reverse);
+      return;
+    }
+    if (points.length >= 3 && last && now - last.time < 400 && near(point, last.point, 4)) {
+      fillLasso(points, reverse);
+      return;
+    }
+    setLassoPoints([...points, point]);
+  };
+
   const onPointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
     if (event.button !== 0 || resizeRef.current) return;
     if (clickSelectRef.current) {
@@ -2378,13 +2623,19 @@ export function Editor({
     }
     if (isMaskTool) {
       if (!targetPart) {
-        onNotice({ tone: "error", message: "The original image is the bottom layer, so it cannot have a layer mask. Add an adjustment to it to paint where the adjustment applies." });
+        onNotice({ tone: "error", message: documentRef.current.base
+          ? "The original image is the bottom layer, so it cannot have a layer mask. Add an adjustment to it to paint where the adjustment applies."
+          : "Select a layer first." });
         return;
       }
       const prep = maskPrepRef.current;
       const doc = documentRef.current;
       const node = doc.historyIndex;
       if (!prep || prep.part !== targetPart || prep.owner !== (node > 0 ? doc.history[node - 1].id : BASE_OWNER)) return;
+      if (lasso) {
+        lassoClick(pointFromEvent(event), event.altKey);
+        return;
+      }
       const before = partMaskState(doc, node, targetPart);
       const point = pointFromEvent(event);
       event.currentTarget.setPointerCapture(event.pointerId);
@@ -2451,7 +2702,11 @@ export function Editor({
         drawGradientDrag(drag);
         return;
       }
-      moveBrushCursor(gradient ? null : point);
+      if (lasso) {
+        lassoHoverRef.current = point;
+        moveLassoRubber();
+      }
+      moveBrushCursor(gradient || lasso ? null : point);
       const stroke = maskStrokeRef.current;
       if (!stroke || !event.currentTarget.hasPointerCapture(event.pointerId)) return;
       if (Math.hypot(point.x - stroke.last.x, point.y - stroke.last.y) < Math.max(1, brushRadius * 0.15)) return;
@@ -2574,11 +2829,11 @@ export function Editor({
    * mask it paints, for example "Layer 7 - Brightness Mask".
    */
   const maskTargetAdjustment = targetPart && targetPart !== "mask" ? findAdjustment(selectedAdjust, targetPart) : undefined;
-  const selectedLayerName = lastStep ? lastStep.name || `Layer ${imageDocument.historyIndex}` : "Original image";
+  const selectedLayerName = lastStep ? lastStep.name || `Layer ${imageDocument.historyIndex}` : imageDocument.base ? "Original image" : "";
   const canvasLabel = isMaskTool && targetPart
     ? `${selectedLayerName} - ${maskTargetAdjustment ? `${ADJUSTMENT_LABELS[maskTargetAdjustment.kind]} Mask` : "Layer Mask"}`
     : selectedLayerName;
-  /** Regenerate replaces the selected layer; the original image and layers not made by AI cannot be regenerated. */
+  /** Regenerate replaces the selected layer; layers not made by AI cannot be regenerated. */
   const regenStep = lastStep && lastStep.model !== IMPORTED_MODEL && lastStep.model !== ORIGINAL_COPY_MODEL ? lastStep : undefined;
   const regenName = lastStep ? lastStep.name || `Layer ${imageDocument.historyIndex}` : "the original image";
   const regenerate = () => {
@@ -2607,6 +2862,14 @@ export function Editor({
       <button onClick={() => changeBrushRadius(brushRadius - Math.max(2, Math.round(brushRadius * 0.15)))} aria-label="Smaller brush" data-help="Smaller brush ([)"><Minus size={15} /></button>
       <span data-help="Brush diameter in image pixels">{brushRadius * 2} px</span>
       <button onClick={() => changeBrushRadius(brushRadius + Math.max(2, Math.round(brushRadius * 0.15)))} aria-label="Larger brush" data-help="Larger brush (])"><Plus size={15} /></button>
+      <button
+        className={`brush-precise ${brushPrecise ? "active" : ""}`}
+        onClick={toggleBrushPrecise}
+        aria-pressed={brushPrecise}
+        data-help={brushPrecise ? "Precise brush: a thin soft edge at every size. Click for a soft brush (P)" : "Soft brush. Click for a precise brush with a thin soft edge (P)"}
+      >
+        Precise
+      </button>
     </span>
   );
 
@@ -2646,12 +2909,21 @@ export function Editor({
         <div className="toolbar-side" />
         {/* The mask brush size stays centered; the sides take the rest of the width. */}
         <div className="toolbar-center">
-          {brushLike && (
-            <div className="tool-section" role="group" aria-label="Mask brush">
-              <span className="tool-section-label">Brush</span>
+          {isMaskTool && !gradient && (
+            <div className="tool-section" role="group" aria-label={lasso ? "Polygon lasso" : "Mask brush"}>
+              <span className="tool-section-label">{lasso ? "Lasso" : "Brush"}</span>
               <div className="tool-group brush-size-group">
-                {brushSizeControls}
+                {!lasso && brushSizeControls}
                 {brushOpacityControl}
+                <button
+                  className={`brush-lasso ${lasso ? "active" : ""}`}
+                  onClick={() => setLasso((on) => !on)}
+                  aria-pressed={lasso}
+                  aria-label="Polygon lasso"
+                  data-help={lasso ? "Polygon lasso is on: click corners, then close the shape to fill it. Click to paint with the brush again (L)" : "Polygon lasso: click corners on the image, then close the shape to fill it (L)"}
+                >
+                  <Lasso size={15} />
+                </button>
                 <button className="brush-close" onClick={() => setTool("whole")} aria-label="Stop painting the mask" data-help="Stop painting the mask (Esc)">
                   <X size={13} weight="bold" />
                 </button>
@@ -2666,6 +2938,9 @@ export function Editor({
           {isMaskTool && gradient && (
             <span className="crop-size">Drag on the image for the {gradient} gradient. Esc cancels.</span>
           )}
+          {isMaskTool && lasso && (
+            <span className="crop-size">Click to add corners. Click the first corner, double-click, or press Enter to fill. Backspace removes a corner; Esc cancels.</span>
+          )}
           <div className="editor-toolbar-spacer" />
         </div>
       </div>
@@ -2679,20 +2954,54 @@ export function Editor({
           onPointerUp={endPan}
           onPointerCancel={endPan}
           onAuxClick={(event) => event.preventDefault()}
+          onScroll={rememberViewCenter}
         >
-          <div className="canvas-scroll-area">
+          <div className="canvas-scroll-area" style={{ padding: `${panSpaceTop}px ${panSpaceX}px ${panSpaceBottom}px` }}>
             <div
               ref={stageRef}
-              className={`canvas-stage ${displayScale >= 2 ? "pixelated" : ""} ${isMaskTool && targetPart ? "mask-editing" : ""}`}
+              className={`canvas-stage ${displayScale >= 2 ? "pixelated" : ""} ${generating ? "generating" : ""} ${isMaskTool && targetPart ? `mask-editing ${brushHides ? "mask-hides" : "mask-shows"}` : ""}`}
               style={{ width: width * cssScale, height: height * cssScale }}
             >
               <div ref={surfaceHostRef} className="surface-host" />
-              <span className="canvas-layer-label" role="status">
-                {canvasLabel}
-                {isMaskTool && targetPart && <small className="canvas-layer-hint">(ESC to exit)</small>}
-              </span>
+              {canvasLabel && (
+                <span className="canvas-layer-label" role="status">
+                  {canvasLabel}
+                </span>
+              )}
               <span className="image-size">{width} × {height}</span>
+              {isMaskTool && targetPart && (
+                <ul className="mask-shortcuts" aria-label="Mask shortcuts">
+                  <li className={brushHides ? "hiding" : "showing"}>
+                    Painting <strong>{brushHides ? "HIDES" : "SHOWS"}</strong> the current {targetPart === "mask" ? "layer" : "adjustment"} (<kbd>x</kbd> to swap)
+                  </li>
+                  <li className={maskOverlay ? "red-on" : ""}>Red mask: <strong>{maskOverlay ? "ON" : "OFF"}</strong> (<kbd>r</kbd> to toggle)</li>
+                  <li className={brushPrecise ? "precise-on" : ""}>Brush: <strong>{brushPrecise ? "PRECISE" : "SOFT"}</strong> (<kbd>p</kbd> to toggle)</li>
+                  <li className={lasso ? "precise-on" : ""}>Polygon lasso: <strong>{lasso ? "ON" : "OFF"}</strong> (<kbd>l</kbd> to toggle)</li>
+                  <li><kbd>[</kbd> <kbd>]</kbd> - change brush size</li>
+                  <li><kbd>1-9</kbd> - brush opacity (<kbd>0</kbd> for 100%)</li>
+                  <li><kbd>esc</kbd> - exit mask</li>
+                </ul>
+              )}
+              {!(isMaskTool && targetPart) && !resize && !clickSelect && (
+                <ul className="mask-shortcuts" aria-label="Canvas shortcuts">
+                  <li><kbd>m</kbd> - layer mask (add/edit)</li>
+                  <li><kbd>space</kbd> - pan</li>
+                  <li><kbd>CTRL</kbd> + <kbd>SCROLL</kbd> - zoom</li>
+                  <li><kbd>click</kbd> - select a layer</li>
+                </ul>
+              )}
               <canvas ref={layerMaskCanvasRef} className={`mask-preview ${isMaskTool ? "" : "hidden"}`} aria-hidden="true" />
+              {/* The lasso shape so far: its edges, a line to the pointer, and its corners; the first corner is larger, as the place to close it. */}
+              {isMaskTool && lasso && lassoPoints.length > 0 && (
+                <svg className="lasso-shape" width={width * cssScale} height={height * cssScale} aria-hidden="true">
+                  <polyline className="lasso-edge-shadow" points={lassoPoints.map((point) => `${point.x * cssScale},${point.y * cssScale}`).join(" ")} />
+                  <polyline className="lasso-edge" points={lassoPoints.map((point) => `${point.x * cssScale},${point.y * cssScale}`).join(" ")} />
+                  <line ref={lassoRubberRef} className="lasso-rubber" />
+                  {lassoPoints.map((point, index) => (
+                    <circle key={index} className={index === 0 ? "lasso-start" : "lasso-corner"} cx={point.x * cssScale} cy={point.y * cssScale} r={index === 0 ? 5 : 3} />
+                  ))}
+                </svg>
+              )}
               {/* The gradient being dragged: a line from start (white dot) to end (black dot), and the radius of a radial gradient. */}
               <svg ref={gradientLineRef} className="gradient-line" width={width * cssScale} height={height * cssScale} style={{ display: "none" }} aria-hidden="true">
                 <line className="gradient-line-shadow" />
@@ -2788,7 +3097,7 @@ export function Editor({
               {brushLike && (
                 <div
                   ref={brushCursorRef}
-                  className={`brush-cursor ${maskShows === erasing ? "erasing" : ""}`}
+                  className={`brush-cursor ${brushHides ? "erasing" : ""} ${spaceHeld || panning ? "pan-hidden" : ""}`}
                   aria-hidden="true"
                   style={{ left: 0, top: 0, width: brushDiameter, height: brushDiameter }}
                 />
@@ -2823,8 +3132,11 @@ export function Editor({
           <button onClick={zoomIn} data-help="Zoom in" aria-label="Zoom in"><Plus size={16} /></button>
           <button
             className={`canvas-zoom-value ${zoom === null ? "fit" : ""}`}
-            onClick={() => setZoom(null)}
-            data-help={`Fit to window (${Math.round(fitScale * 100)}%). Middle-drag or use the scrollbars to pan.`}
+            onClick={() => {
+              setZoom(null);
+              setFitRequest((count) => count + 1);
+            }}
+            data-help={`Fit to window (${Math.round(fitScale * 100)}%). Hold Space and drag, or middle-drag, to pan.`}
             aria-label={`Zoom ${Math.round(displayScale * 100)} percent; click to fit`}
           >
             {Math.round(displayScale * 100)}%
@@ -2834,6 +3146,7 @@ export function Editor({
       </div>
       <StepsPanel
         documentId={imageDocument.id}
+        hasBase={Boolean(imageDocument.base)}
         baseAdjust={imageDocument.baseAdjust}
         origin={imageDocument.origin}
         history={imageDocument.history}
@@ -2919,8 +3232,8 @@ export function Editor({
               disabled={!wholeSize || !regenStep || !prompt.trim()}
               onClick={regenerate}
               data-help={regenStep
-                ? `Regenerate ${regenName} with this prompt (Ctrl+Shift+Enter). The result replaces the layer and keeps its name, masks and adjustments. The old layer comes back if it fails or you cancel.`
-                : `Select a layer made by AI to regenerate it. ${lastStep ? `${regenName} was not made by AI.` : "The original image cannot be regenerated."}`}
+                ? `Regenerate ${regenName} with this prompt (Ctrl+Shift+Enter). The result replaces the layer and keeps its name; its mask and adjustments are removed. The old layer comes back if it fails or you cancel.`
+                : `Select a layer made by AI to regenerate it. ${lastStep ? `${regenName} was not made by AI.` : ""}`}
             >
               <ArrowArcLeft size={17} weight="bold" /> Regenerate
             </button>
@@ -2962,6 +3275,7 @@ export function Editor({
             <div className="confirm-copy">
               <h2 id="regenerate-confirm-title">Overwrite this layer by regenerating it from scratch?</h2>
               <p>“{confirmRegenStep.name || confirmRegenStep.prompt}” is replaced by a new GPT Image result. The old layer comes back if it fails or you cancel.</p>
+              {hasMaskOrAdjust(confirmRegenStep) && <p>Its layer mask and adjustments are removed, because they were made for the old image. Undo brings them back.</p>}
               <label className="confirm-check">
                 <input type="checkbox" checked={regenDontAsk} onChange={(event) => setRegenDontAsk(event.target.checked)} />
                 Don't show again

@@ -46,7 +46,7 @@ Image Sage.
 
 - **Each edit is a layer** above the original image. Show, hide, solo (`Ctrl`+click the eye), rename, reorder (drag), duplicate, regenerate, or delete each layer.
 - **Import** an image file as a new layer.
-- **Layer masks** — Paint to mask out existing areas of your image that you want to preserve. This is how you overcome GPTs limitations to make edits look like they were perfectly inpainted without artifacts.
+- **Layer masks** — Paint to mask out existing areas of your image that you want to preserve. This is how you overcome GPTs limitations to make edits look like they were perfectly inpainted without artifacts. `Ctrl`+click a mask to turn it off or on.
 - **Mask tools** — a Show and a Hide brush with size and opacity controls, linear and radial gradients, Click to auto-select the subject, invert, and copy and paste between layers and images. A red view shows where the mask hides.
 - **Blend modes** — Normal, Screen, or Overlay for each layer. Click the blend mode on the layer card to change it.
 - **Transform** — move, scale, and rotate a layer with handles on its bounds (`Shift` turns in 15° steps). The layer's masks move with it.
@@ -79,8 +79,7 @@ Image Sage.
 | Shortcut | Action |
 | --- | --- |
 | `Ctrl+Enter` | Send the edit |
-| `M` | Mask tool: paint the selected mask |
-| `Ctrl+M` | Add a layer mask to the selected layer |
+| `M` | Mask tool: paint the selected mask (a layer without a mask gets one when you paint) |
 | `Ctrl+T` | Transform the selected layer |
 | `Ctrl+J` | Duplicate the selected layer |
 | `Del` | Delete the selected layer (asks first) |
@@ -90,6 +89,8 @@ Image Sage.
 | `X` | Swap the mask brush between Show and Hide |
 | `Alt` (held) | Paint the other of Show and Hide (Mask) |
 | `R` | Show or hide the red mask view |
+| `P` | Switch the mask brush between soft and precise (Mask) |
+| `L` | Polygon lasso on or off (Mask): click corners, then click the first corner, double-click, or press `Enter` to fill |
 | `Ctrl+I` | Invert the selected mask (Mask tool on) |
 | `Ctrl+Z` / `Ctrl+Y` (or `Ctrl+R`) | Undo / redo a mask change |
 | `Esc` | Turn off the Mask tool, or cancel Regenerate |

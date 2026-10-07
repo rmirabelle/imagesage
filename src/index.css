@@ -695,7 +695,10 @@ select option:disabled { color: #777d8e; }
   background-image: radial-gradient(#30343f 1px, transparent 1px);
   background-size: 18px 18px;
   overscroll-behavior: contain;
+  /* No scrollbars: the image is panned with Space+drag, a middle drag, or the mouse wheel. */
+  scrollbar-width: none;
 }
+.editor-workspace::-webkit-scrollbar { display: none; }
 .editor-workspace.panning,
 .editor-workspace.panning * { cursor: grabbing !important; user-select: none; }
 .editor-workspace.pan-ready,
@@ -718,6 +721,33 @@ select option:disabled { color: #777d8e; }
 .canvas-stage { position: relative; flex: 0 0 auto; box-shadow: 0 12px 38px rgba(0,0,0,.55); }
 /* While a mask is being edited, a bright blue dashed line runs just outside the image. */
 .canvas-stage.mask-editing { outline: 2px dashed var(--secondary); }
+/* The line is green while the brush shows and red while it hides, like the mode in the tips below the image. */
+.canvas-stage.mask-editing.mask-shows { outline-color: #4ade80; }
+.canvas-stage.mask-editing.mask-hides { outline-color: #ff5c85; }
+/* While GPT Image makes an image, a band of light runs around the image, just outside the mask line. */
+@property --generating-angle {
+  syntax: "<angle>";
+  inherits: false;
+  initial-value: 0deg;
+}
+.canvas-stage.generating::after {
+  content: "";
+  position: absolute;
+  z-index: 9;
+  inset: -6px;
+  padding: 3px;
+  border-radius: 3px;
+  background: conic-gradient(from var(--generating-angle), transparent 0deg, var(--accent) 70deg, #b9c9ff 110deg, var(--accent) 150deg, transparent 220deg, transparent 360deg);
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+  pointer-events: none;
+  animation: generating-spin 2.4s linear infinite;
+}
+@keyframes generating-spin { to { --generating-angle: 360deg; } }
+@media (prefers-reduced-motion: reduce) {
+  .canvas-stage.generating::after { animation: none; background: var(--accent); opacity: .7; }
+}
 .canvas-stage canvas { display: block; width: 100%; height: 100%; touch-action: none; }
 .tool-select .canvas-stage canvas { cursor: default; }
 .editor-workspace.cropping .canvas-stage canvas { cursor: crosshair; }
@@ -1091,6 +1121,32 @@ select option:disabled { color: #777d8e; }
   background: rgba(31,34,43,.97);
   box-shadow: 0 12px 35px rgba(0,0,0,.45);
 }
+/** Blocks input while a file is read or written; it fades in late so fast work does not flash it. */
+.file-task-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 150;
+  display: grid;
+  place-items: center;
+  background: rgba(10,11,15,.35);
+  cursor: progress;
+  animation: file-task-in 160ms ease-out 150ms both;
+}
+.file-task-card {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  max-width: min(480px, calc(100vw - 36px));
+  padding: 14px 18px;
+  border: 1px solid rgba(75,118,247,.4);
+  border-radius: 10px;
+  background: rgba(31,34,43,.97);
+  box-shadow: 0 12px 35px rgba(0,0,0,.45);
+  color: #dbe5ff;
+}
+.file-task-card > svg { flex: 0 0 auto; color: var(--accent); }
+.file-task-card span { min-width: 0; overflow-wrap: anywhere; line-height: 1.4; }
+@keyframes file-task-in { from { opacity: 0; } to { opacity: 1; } }
 .notice.success { border-color: rgba(75,118,247,.4); color: #dbe5ff; }
 .notice.success > svg { color: var(--accent); }
 .notice.error { border-color: rgba(248,113,113,.45); color: #fecaca; }
@@ -1801,6 +1857,8 @@ select option:disabled { color: #777d8e; }
   will-change: transform;
 }
 .brush-cursor.erasing { border-style: dashed; }
+/* While Space is held or the image is panned, the hand cursor shows instead of the brush ring. */
+.brush-cursor.pan-hidden { visibility: hidden; }
 /* The mask brush size, centered in the toolbar while the mask brush is on. */
 .brush-size-group .brush-size-inline { padding-left: 0; }
 .tool-section > .tool-group.brush-size-group { padding: 1px 3px; }
@@ -1814,12 +1872,20 @@ select option:disabled { color: #777d8e; }
 .tool-group.brush-size-group button.brush-close { width: 22px; margin-left: 2px; color: #6f7585; }
 .tool-group.brush-size-group button.brush-close:hover { color: #edf0f5; }
 .brush-size-inline { display: flex; align-items: center; gap: 2px; padding-left: 4px; }
+/* The size buttons are fixed squares; the Precise button fits its label. */
+.tool-group.brush-size-group button.brush-precise { width: auto; margin-left: 4px; padding: 0 8px; font-size: 11px; white-space: nowrap; }
 .brush-size-inline > span { min-width: 52px; color: #d4d7df; font-size: 11px; text-align: center; font-variant-numeric: tabular-nums; }
 .gradient-line { position: absolute; z-index: 6; inset: 0; overflow: visible; pointer-events: none; }
 .gradient-line-shadow { stroke: rgba(0,0,0,.6); stroke-width: 3.5; }
 .gradient-line-main { stroke: #ffffff; stroke-width: 1.5; }
 .gradient-line-start { fill: #ffffff; stroke: #000000; stroke-width: 1.5; }
 .gradient-line-end { fill: #000000; stroke: #ffffff; stroke-width: 1.5; }
+.lasso-shape { position: absolute; z-index: 6; inset: 0; overflow: visible; pointer-events: none; }
+.lasso-edge-shadow { fill: none; stroke: rgba(0,0,0,.6); stroke-width: 3.5; stroke-linejoin: round; }
+.lasso-edge { fill: rgba(255,255,255,.08); stroke: #ffffff; stroke-width: 1.5; stroke-linejoin: round; }
+.lasso-rubber { stroke: #ffffff; stroke-width: 1.5; stroke-dasharray: 5 4; }
+.lasso-corner { fill: #ffffff; stroke: #000000; stroke-width: 1; }
+.lasso-start { fill: var(--secondary); stroke: #000000; stroke-width: 1.5; }
 .gradient-line-ring { fill: none; stroke: rgba(255,255,255,.85); stroke-width: 1.5; stroke-dasharray: 6 5; }
 .settings-key-actions .button { min-height: 30px; padding: 0 11px; font-size: 12px; }
 .settings-key-actions .icon-button { width: 30px; padding: 0; }
@@ -1849,7 +1915,41 @@ select option:disabled { color: #777d8e; }
 }
 /* While a mask is being edited, the name is bright blue. */
 .canvas-stage.mask-editing .canvas-layer-label { color: var(--secondary); }
-.canvas-layer-hint { margin-left: 12px; color: #777d8e; font-size: 12px; font-weight: 400; }
+/* While the Mask tool is on, its keyboard shortcuts sit just below the image, inside the canvas padding. */
+.mask-shortcuts {
+  position: absolute;
+  top: calc(100% + 20px);
+  left: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  color: #777d8e;
+  font-size: 12px;
+  white-space: nowrap;
+  pointer-events: none;
+}
+.mask-shortcuts li { display: flex; align-items: center; gap: 5px; }
+.mask-shortcuts li.showing strong { color: #4ade80; }
+.mask-shortcuts li.hiding strong { color: #ff5c85; }
+.mask-shortcuts li.red-on strong { color: #ff5c85; }
+.mask-shortcuts li.precise-on strong { color: var(--secondary); }
+.mask-shortcuts strong { color: #c9cedb; }
+.mask-shortcuts kbd {
+  min-width: 20px;
+  padding: 1px 5px;
+  border: 1px solid #454a59;
+  border-bottom-width: 2px;
+  border-radius: 4px;
+  background: #262a34;
+  color: #c9cedb;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.4;
+  text-align: center;
+}
 /* The layers list scrollbar is a little darker than the panel. */
 .steps-list::-webkit-scrollbar-track { background: #252832; }
 .steps-list::-webkit-scrollbar-thumb { background: #3c4151; background-clip: padding-box; }
