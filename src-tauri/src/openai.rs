@@ -171,15 +171,42 @@ impl SseBuffer {
     }
 }
 
-async fn stream_image(
-    reporter: ProgressReporter,
-    builder: reqwest::RequestBuilder,
-) -> Result<AiImage, String> {
+/// How many times a request is sent when the connection fails before OpenAI accepts it.
+const SEND_ATTEMPTS: u32 = 3;
+
+/**
+ * Sends a request, and sends it again (with a new connection) when the
+ * connection fails before OpenAI answers, such as a TLS "BadRecordMac" alert.
+ * OpenAI has not accepted the request then, so a retry costs nothing. A
+ * timeout is not retried.
+ */
+async fn send_with_retry<F>(make: &F) -> Result<reqwest::Response, String>
+where
+    F: Fn() -> Result<reqwest::RequestBuilder, String>,
+{
+    let mut attempt = 1;
+    loop {
+        match make()?.send().await {
+            Ok(response) => return Ok(response),
+            Err(error) if attempt < SEND_ATTEMPTS && !error.is_timeout() => {
+                eprintln!(
+                    "[imagesage] OpenAI send failed (attempt {attempt} of {SEND_ATTEMPTS}), retrying: {}",
+                    transport_error(&error)
+                );
+                tokio::time::sleep(Duration::from_millis(750 * u64::from(attempt))).await;
+                attempt += 1;
+            }
+            Err(error) => return Err(transport_error(&error)),
+        }
+    }
+}
+
+async fn stream_image<F>(reporter: ProgressReporter, make: F) -> Result<AiImage, String>
+where
+    F: Fn() -> Result<reqwest::RequestBuilder, String>,
+{
     reporter.stage("sending");
-    let response = builder
-        .send()
-        .await
-        .map_err(|error| transport_error(&error))?;
+    let response = send_with_retry(&make).await?;
     let status = response.status();
     if !status.is_success() {
         let body = response.text().await.unwrap_or_default();
@@ -302,14 +329,18 @@ fn solid_png(size: &str, color: [u8; 3]) -> Result<String, String> {
     Ok(png_data_url(&base64::engine::general_purpose::STANDARD.encode(bytes.into_inner())))
 }
 
-async fn send_or_simulate(
+/// `make` builds the request; it is called again for each retry, because a multipart body cannot be sent twice.
+async fn send_or_simulate<F>(
     reporter: ProgressReporter,
-    builder: reqwest::RequestBuilder,
+    make: F,
     simulated: Option<Simulated>,
     size: String,
-) -> Result<AiImage, String> {
+) -> Result<AiImage, String>
+where
+    F: Fn() -> Result<reqwest::RequestBuilder, String>,
+{
     let Some(answer) = simulated else {
-        return stream_image(reporter, builder).await;
+        return stream_image(reporter, make).await;
     };
     reporter.stage("sending");
     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
@@ -361,12 +392,14 @@ pub async fn ai_generate(
         "stream": true,
         "partial_images": PARTIAL_IMAGES
     });
-    let builder = requests::client()?
-        .post(format!("{API_BASE}/images/generations"))
-        .bearer_auth(key)
-        .json(&body);
+    let make = move || {
+        Ok(requests::client()?
+            .post(format!("{API_BASE}/images/generations"))
+            .bearer_auth(&key)
+            .json(&body))
+    };
     requests::run_cancellable(app, &requests, request.request_id, move |reporter| {
-        send_or_simulate(reporter, builder, simulated, size)
+        send_or_simulate(reporter, make, simulated, size)
     })
     .await
 }
@@ -390,28 +423,32 @@ pub async fn ai_edit_whole(
     request: WholeEditRequest,
 ) -> Result<AiImage, String> {
     let key = credentials::api_key(Provider::OpenAi)?;
-    let part = reqwest::multipart::Part::bytes(requests::decode_png(&request.image_png, "image")?)
-        .file_name("image.png")
-        .mime_str("image/png")
-        .map_err(|error| format!("Could not prepare the upload: {error}"))?;
+    let image = requests::decode_png(&request.image_png, "image")?;
     let simulated = simulated_answer(&request.prompt);
-    let size = request.size.clone();
-    let form = reqwest::multipart::Form::new()
-        .text("model", request.model)
-        .text("prompt", request.prompt)
-        .text("size", request.size)
-        .text("quality", request.quality)
-        .text("output_format", "png")
-        .text("n", "1")
-        .text("stream", "true")
-        .text("partial_images", PARTIAL_IMAGES.to_string())
-        .part("image", part);
-    let builder = requests::client()?
-        .post(format!("{API_BASE}/images/edits"))
-        .bearer_auth(key)
-        .multipart(form);
-    requests::run_cancellable(app, &requests, request.request_id, move |reporter| {
-        send_or_simulate(reporter, builder, simulated, size)
+    let WholeEditRequest { request_id, model, prompt, size, quality, .. } = request;
+    let request_size = size.clone();
+    let make = move || {
+        let part = reqwest::multipart::Part::bytes(image.clone())
+            .file_name("image.png")
+            .mime_str("image/png")
+            .map_err(|error| format!("Could not prepare the upload: {error}"))?;
+        let form = reqwest::multipart::Form::new()
+            .text("model", model.clone())
+            .text("prompt", prompt.clone())
+            .text("size", request_size.clone())
+            .text("quality", quality.clone())
+            .text("output_format", "png")
+            .text("n", "1")
+            .text("stream", "true")
+            .text("partial_images", PARTIAL_IMAGES.to_string())
+            .part("image", part);
+        Ok(requests::client()?
+            .post(format!("{API_BASE}/images/edits"))
+            .bearer_auth(&key)
+            .multipart(form))
+    };
+    requests::run_cancellable(app, &requests, request_id, move |reporter| {
+        send_or_simulate(reporter, make, simulated, size)
     })
     .await
 }

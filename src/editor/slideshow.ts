@@ -9,19 +9,41 @@
  * With an intro: the very first frame is the final image, with no fade from
  * black, so a video site's thumbnail from the first frame is never black.
  * After OPEN_PAUSE seconds the intro overlay (a box with the title and
- * credits) fades in over it, and it holds for OPEN_HOLD more seconds. Then the build-up: the original
- * image named "Original image", then every STEP seconds the next layer fading
- * in over FADE_IN seconds with its name at the top center, the top layer
- * too. Then the top layer fades to black and the final image (the same
- * picture) fades in from black, named "Final image", over FINAL_FADE seconds;
- * the name fades out FINAL_LABEL seconds later.
+ * credits) fades in over it, and it holds for OPEN_HOLD more seconds. After the
+ * overlay fades out, the final image stays OPEN_REST seconds more. Then the
+ * build-up: the original image named "Original image" for STEP seconds, then
+ * each layer for LAYER_STEP seconds, the top layer too. A layer's name at the
+ * top center fades in over LABEL_FADE seconds first and shows alone for
+ * LABEL_PAUSE seconds; then the layer flashes FLASHES times (FLASH seconds on,
+ * FLASH seconds off) and fades in over LAYER_FADE seconds. Then the top layer
+ * fades to black and the original image fades in from black again, named
+ * "Original image", over RETURN_FADE seconds, and shows for RETURN_HOLD
+ * seconds; its name fades out at the end. Then the final image fades in over
+ * it, named "Final image", over FINAL_FADE seconds; the name fades out
+ * FINAL_LABEL seconds later.
  * It rests for FINAL_REST seconds; with an intro, the overlay then shows
  * again for FINAL_TITLE seconds.
  */
 export const SLIDESHOW_FPS = 30;
 export const STEP = 3.5;
 export const FADE_IN = 0.5;
-/** Half of it fades the top layer to black, half fades the final image in. */
+/** Seconds a layer's name fades in, before the layer shows. */
+export const LABEL_FADE = 0.5;
+/** Seconds the layer's name shows alone after it fades in, before the layer flashes. */
+export const LABEL_PAUSE = 0.4;
+export const LABEL_LEAD = LABEL_FADE + LABEL_PAUSE;
+export const FLASH = 0.1;
+export const FLASHES = 1;
+export const LAYER_FADE = 0.5;
+/** Seconds the layer shows fully, after its flashes and fade. */
+export const LAYER_HOLD = 1.5;
+export const LAYER_STEP = LABEL_LEAD + FLASH * 2 * FLASHES + LAYER_FADE + LAYER_HOLD;
+/** Half of it fades the top layer to black, half fades the original image in again. */
+export const RETURN_FADE = 3;
+/** Seconds the original image shows again, after it is in, before the final image fades in over it. */
+export const RETURN_HOLD = 2;
+export const RETURN_STEP = RETURN_FADE + RETURN_HOLD;
+/** Seconds the final image takes to fade in over the original image. */
 export const FINAL_FADE = 3;
 export const FINAL_REST = 10;
 /** Seconds the "Final image" name stays after the final image is in, before it fades out. */
@@ -33,6 +55,8 @@ export const FADE_OUT = 3.5;
 /** Seconds the opening final image shows alone before the intro overlay fades in. */
 export const OPEN_PAUSE = 0.5;
 export const OPEN_HOLD = 7;
+/** Seconds the opening final image stays alone after the intro overlay is gone. */
+export const OPEN_REST = 2;
 export const INTRO_FADE = 1;
 /** The video fits inside 1080p and keeps the image's shape. */
 export const VIDEO_MAX_WIDTH = 1920;
@@ -49,6 +73,10 @@ export interface Segment {
   fade: number;
   /** The fade goes through black: the previous picture fades out in its first half, this one fades in in its second half. */
   throughBlack: boolean;
+  /** Seconds the name fades in before the picture changes; 0 fades the name in with the picture. */
+  labelLead: number;
+  /** Times the picture flashes on and off before it fades in. */
+  flashes: number;
   /** The name shown; it fades out after `labelFor` seconds when that is shorter than the segment. */
   label: SlideLabel;
   labelFor: number;
@@ -82,12 +110,14 @@ export function videoSize(width: number, height: number) {
 /** The segments for `stages` pictures (the original image plus each visible layer), with or without the intro. */
 export function slideshowSegments(stages: number, intro: boolean): Segment[] {
   const top = Math.max(0, stages - 1);
-  /** The last segment: the final image from black, a long rest, then the overlay again until the end. */
+  /** The last segment: the final image fading in over the original image, a long rest, then the overlay again until the end. */
   const final = (picture: number, label: SlideLabel, fade: number): Segment => ({
     picture,
     duration: FINAL_HOLD,
     fade,
-    throughBlack: true,
+    throughBlack: false,
+    labelLead: 0,
+    flashes: 0,
     label,
     /** The name stays FINAL_LABEL seconds after the image is in, then fades, so the image can be seen alone. */
     labelFor: fade + FINAL_LABEL,
@@ -98,13 +128,15 @@ export function slideshowSegments(stages: number, intro: boolean): Segment[] {
   if (top === 0) return [final(0, 0, 0)];
   const segments: Segment[] = [];
   if (intro) {
-    const duration = OPEN_PAUSE + OPEN_HOLD;
-    segments.push({ picture: top, duration, fade: 0, throughBlack: false, label: null, labelFor: 0, overlay: { from: OPEN_PAUSE, to: duration } });
+    const overlayEnd = OPEN_PAUSE + OPEN_HOLD;
+    segments.push({ picture: top, duration: overlayEnd + OPEN_REST, fade: 0, throughBlack: false, labelLead: 0, flashes: 0, label: null, labelFor: 0, overlay: { from: OPEN_PAUSE, to: overlayEnd } });
   }
-  segments.push({ picture: 0, duration: STEP, fade: intro ? INTRO_FADE : 0, throughBlack: false, label: 0, labelFor: STEP, overlay: null });
+  segments.push({ picture: 0, duration: STEP, fade: intro ? INTRO_FADE : 0, throughBlack: false, labelLead: 0, flashes: 0, label: 0, labelFor: STEP, overlay: null });
   for (let picture = 1; picture <= top; picture++) {
-    segments.push({ picture, duration: STEP, fade: FADE_IN, throughBlack: false, label: picture, labelFor: STEP, overlay: null });
+    segments.push({ picture, duration: LAYER_STEP, fade: LAYER_FADE, throughBlack: false, labelLead: LABEL_LEAD, flashes: FLASHES, label: picture, labelFor: LAYER_STEP, overlay: null });
   }
+  /** The original image again, through black; its name is gone before the final image fades in. */
+  segments.push({ picture: 0, duration: RETURN_STEP, fade: RETURN_FADE, throughBlack: true, labelLead: 0, flashes: 0, label: 0, labelFor: RETURN_STEP - FADE_IN, overlay: null });
   segments.push(final(top, "final", FINAL_FADE));
   return segments;
 }
@@ -138,10 +170,15 @@ export function slideshowFrame(segments: Segment[], time: number): SlideFrame {
   }
   const segment = segments[index];
   const since = time - start;
-  const progress = segment.fade > 0 ? clamp01(since / segment.fade) : 1;
+  /** The picture changes after the name's lead, then flashes, then fades in. */
+  const flashing = segment.flashes * 2 * FLASH;
+  const shown = since - segment.labelLead;
+  const fadeSince = shown - flashing;
+  const progress = shown < 0 ? 0 : segment.fade > 0 ? clamp01(fadeSince / segment.fade) : 1;
+  const flash = shown >= 0 && fadeSince < 0 ? (Math.floor(shown / FLASH + 1e-6) % 2 === 0 ? 1 : 0) : null;
   /** Through black: the previous picture shows until half way, then this one; black peaks at half way. */
   const dip = segment.throughBlack && index > 0 ? 1 - Math.abs(progress * 2 - 1) : 0;
-  const mix = segment.throughBlack && index > 0 ? (progress < 0.5 ? 0 : 1) : progress;
+  const mix = flash ?? (segment.throughBlack && index > 0 ? (progress < 0.5 ? 0 : 1) : progress);
   /** The first segment fades in from black instead of from a picture. */
   const opening = index === 0 ? 1 - progress : 0;
   const closing = clamp01((time - (slideshowDuration(segments) - FADE_OUT)) / FADE_OUT);
@@ -149,7 +186,8 @@ export function slideshowFrame(segments: Segment[], time: number): SlideFrame {
   /** While the previous picture fades to black, its name goes down with it. */
   const keepsPrevious = segment.throughBlack && index > 0 && mix === 0;
   const label = keepsPrevious ? segments[index - 1].label : segment.label;
-  const labelAlpha = label === null ? 0 : keepsPrevious ? 1 : Math.min(mix, clamp01((segment.labelFor + FADE_IN - since) / FADE_IN));
+  const labelIn = segment.labelLead > 0 ? clamp01(since / LABEL_FADE) : mix;
+  const labelAlpha = label === null ? 0 : keepsPrevious ? 1 : Math.min(labelIn, clamp01((segment.labelFor + FADE_IN - since) / FADE_IN));
   const overlay = segment.overlay
     ? Math.min(clamp01((since - segment.overlay.from) / OVERLAY_FADE), clamp01((segment.overlay.to - since) / OVERLAY_FADE))
     : 0;

@@ -7,7 +7,13 @@ import { AUDIO_FILE_EXTENSIONS, decodeAudioFile, decodeTrack, downloadTrack, lis
 import type { SlideshowOptions } from "../lib/slideshowVideo";
 import { MusicPicker } from "./MusicPicker";
 
+/** The music picked last in any image: the choice for an image that has no video yet. */
 const MUSIC_KEY = "imagesage.slideshow-music";
+/** Each image's music from its last video: a map from the image's keys to the track and its start. */
+const IMAGE_MUSIC_KEY = "imagesage.slideshow-music-by-image";
+/** The newest choices kept in that map; older ones are dropped. */
+const IMAGE_MUSIC_LIMIT = 200;
+type ImageMusic = { track: string; start: number };
 /** A music choice that is an audio file on this PC: this prefix, then its path. */
 const FILE_PREFIX = "file:";
 /** The list item that opens the file picker; it is never the chosen music itself. */
@@ -22,11 +28,33 @@ const readStored = (key: string) => {
   }
 };
 
+const readImageMusic = (): Record<string, ImageMusic> => {
+  try {
+    const parsed: unknown = JSON.parse(readStored(IMAGE_MUSIC_KEY) ?? "{}");
+    return parsed && typeof parsed === "object" ? parsed as Record<string, ImageMusic> : {};
+  } catch {
+    return {};
+  }
+};
+
+/** Remembers an image's music under each of its keys, newest last. */
+const storeImageMusic = (keys: string[], music: ImageMusic) => {
+  const map = readImageMusic();
+  for (const key of keys) {
+    delete map[key];
+    map[key] = music;
+  }
+  const kept = Object.entries(map).slice(-IMAGE_MUSIC_LIMIT);
+  try { localStorage.setItem(IMAGE_MUSIC_KEY, JSON.stringify(Object.fromEntries(kept))); } catch { /* Remembering is a convenience only. */ }
+};
+
 interface Props {
   /** The default title: the image's name. */
   defaultTitle: string;
   /** How long the video runs, in seconds: the music box is this long. */
   videoSeconds: number;
+  /** The image's keys (its file path, its document id), most lasting first: its last video's music is stored under them. */
+  imageKeys: string[];
   onCancel: () => void;
   onExport: (options: SlideshowOptions) => void;
 }
@@ -35,7 +63,7 @@ interface Props {
 type TrackLoad = { id: string; progress: number | null; requestId: string };
 
 /** Settings for the video slideshow: the title in its title box, and the music. */
-export function SlideshowDialog({ defaultTitle, videoSeconds, onCancel, onExport }: Props) {
+export function SlideshowDialog({ defaultTitle, videoSeconds, imageKeys, onCancel, onExport }: Props) {
   const [title, setTitle] = useState(defaultTitle);
   const [tracks, setTracks] = useState<TrackInfo[]>([]);
   const [trackId, setTrackId] = useState("");
@@ -67,7 +95,8 @@ export function SlideshowDialog({ defaultTitle, videoSeconds, onCancel, onExport
     if (typeof path === "string") await pickTrack(`${FILE_PREFIX}${path}`, tracks);
   };
 
-  const pickTrack = async (id: string, list: TrackInfo[]) => {
+  /** `startAt` is where a remembered choice started in the track; it is kept inside the track. */
+  const pickTrack = async (id: string, list: TrackInfo[], startAt = 0) => {
     if (id === CHOOSE_FILE) {
       await chooseFile();
       return;
@@ -80,12 +109,16 @@ export function SlideshowDialog({ defaultTitle, videoSeconds, onCancel, onExport
     setError(null);
     try { localStorage.setItem(MUSIC_KEY, id); } catch { /* Remembering is a convenience only. */ }
     if (!id) return;
+    const ready = (buffer: AudioBuffer) => {
+      setStart(Math.max(0, Math.min(startAt, buffer.duration - videoSeconds)));
+      setMusic({ id, buffer });
+    };
     const requestId = crypto.randomUUID();
     if (id.startsWith(FILE_PREFIX)) {
       try {
         setLoad({ id, progress: null, requestId });
         const buffer = await decodeAudioFile(id.slice(FILE_PREFIX.length));
-        if (pickRef.current === id) setMusic({ id, buffer });
+        if (pickRef.current === id) ready(buffer);
       } catch (caught) {
         if (pickRef.current === id) setError(caught instanceof Error ? caught.message : String(caught));
       } finally {
@@ -107,7 +140,7 @@ export function SlideshowDialog({ defaultTitle, videoSeconds, onCancel, onExport
       setLoad({ id, progress: null, requestId });
       const buffer = await decodeTrack(id);
       if (pickRef.current !== id) return;
-      setMusic({ id, buffer });
+      ready(buffer);
     } catch (caught) {
       if (pickRef.current === id) setError(caught instanceof Error ? caught.message : String(caught));
     } finally {
@@ -115,14 +148,22 @@ export function SlideshowDialog({ defaultTitle, videoSeconds, onCancel, onExport
     }
   };
 
-  /** The track list loads once; the last picked track comes back when it is still offered. */
+  /**
+   * The track list loads once. The music of this image's last video comes
+   * back, with its start; an image without one gets the track picked last in
+   * any image. Either comes back only when it is still offered.
+   */
   useEffect(() => {
     let cancelled = false;
     listTracks().then((list) => {
       if (cancelled) return;
       setTracks(list);
-      const stored = readStored(MUSIC_KEY);
-      if (stored && (stored.startsWith(FILE_PREFIX) || list.some((track) => track.id === stored))) void pickTrack(stored, list);
+      const map = readImageMusic();
+      const remembered = imageKeys.map((key) => map[key]).find((entry) => entry && typeof entry.track === "string");
+      const stored = remembered ? remembered.track : readStored(MUSIC_KEY);
+      const startAt = remembered && Number.isFinite(remembered.start) ? remembered.start : 0;
+      if (stored === "") return;
+      if (stored && (stored.startsWith(FILE_PREFIX) || list.some((track) => track.id === stored))) void pickTrack(stored, list, startAt);
     }).catch((caught) => { if (!cancelled) setError(String(caught)); });
     return () => { cancelled = true; };
   }, []);
@@ -138,6 +179,7 @@ export function SlideshowDialog({ defaultTitle, videoSeconds, onCancel, onExport
   const busy = load !== null;
   const submit = () => {
     if (busy || (trackId && !music)) return;
+    storeImageMusic(imageKeys, { track: music ? trackId : "", start: music ? start : 0 });
     onExport({ title, music: music ? { buffer: music.buffer, start } : null });
   };
 
@@ -148,7 +190,7 @@ export function SlideshowDialog({ defaultTitle, videoSeconds, onCancel, onExport
           <div className="save-dialog-title-icon"><FilmStrip size={22} weight="duotone" /></div>
           <div>
             <h2 id="slideshow-title">Export video slideshow</h2>
-            <p>Opens on the final image with a title box, shows the original image and each visible layer with its name, then closes on the final image. MP4, up to 1080p.</p>
+            <p>Opens on the final image with a title box, shows the original image and each visible layer with its name, then the original image again, and closes as the final image fades in over it. MP4, up to 1080p.</p>
           </div>
           <button className="save-dialog-close" onClick={onCancel} aria-label="Close" data-help="Close">
             <X size={18} />

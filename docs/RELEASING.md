@@ -46,37 +46,25 @@ generated executable and NSIS script again after the release build.
    .\set-version.ps1 0.2.0
    ```
 
-3. Review the version changes, build the installer locally, and resolve every
-   warning or error:
-
-   ```powershell
-   npm run tauri build
-   ```
-
-4. Install that exact local NSIS bundle from
-   `src-tauri\target\release\bundle\nsis` and manually verify:
-
-   - no console window appears;
-   - ImageSage opens its main window, and closing it quits the process;
-   - Start Menu and optional desktop shortcuts show the ImageSage icon (test a
-     **GUI** install, not `/S`; silent installs order shortcut creation differently);
-   - double-clicking an `.imagesage` file opens it in ImageSage;
-   - the fresh install, same-version repair, upgrade, and uninstall paths all
-     behave as expected.
-
-5. Commit and push the reviewed source changes. Publishing requires a clean work
-   tree and the public `rmirabelle/imagesage` origin.
-6. Confirm GitHub CLI authentication, then publish:
+3. Run the tests (`npm test`, and `cargo test` in `src-tauri`).
+4. Commit the source changes. Publishing requires a clean work tree and the
+   public `rmirabelle/imagesage` origin.
+5. Confirm GitHub CLI authentication, then publish:
 
    ```powershell
    gh auth status
    .\publish.ps1
    ```
 
-7. Confirm the printed release URL and test the app's update check if the release
-   is intended to update an older installed version.
+   The script builds the installer and checks it automatically; a manual
+   install check is not required. It also pushes the commit and the version
+   tag, so when the user says "publish", that includes the push.
+6. Confirm the printed release URL.
 
-Do not run `publish.ps1` until the local installer has passed the manual check.
+If the user asks for a manual installer check, install the NSIS bundle from
+`src-tauri\target\release\bundle\nsis` with a **GUI** install (not `/S`) and
+check the window, the shortcuts' icon, and `.imagesage` file opening.
+
 The script creates and verifies the new public release first, then deletes every
 older release and its tag, except the `model-*` and `music-*` releases. If verification fails before cleanup, older releases
 are intentionally preserved.

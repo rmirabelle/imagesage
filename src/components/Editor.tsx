@@ -52,6 +52,7 @@ import {
 import type { Adjustment, BlendMode, EditStep, LayerAdjust, LayerPart, MaskImage, Point, Rect, SentRegion } from "../editor/types";
 import {
   CANCELLED_MESSAGE,
+  canAbort,
   canCancel,
   cancelAiRequest,
   IMAGE_MODELS,
@@ -376,6 +377,8 @@ export type Notice = {
   file?: string;
   sticky?: boolean;
   actions?: { label: string; run: () => void; keepOpen?: boolean }[];
+  /** The image the message is about: it shows only while that image is selected. */
+  documentId?: string;
 } | null;
 
 interface Props {
@@ -580,8 +583,10 @@ export function Editor({
   const [slideshowDialogOpen, setSlideshowDialogOpen] = useState(false);
   /** The file dialog for importing an image as a new layer is open. */
   const [importLayerOpen, setImportLayerOpen] = useState(false);
-  /** The layers under a click, to pick from, and where the menu opens. */
-  const [layerPick, setLayerPick] = useState<{ x: number; y: number; nodes: number[] } | null>(null);
+  /** The layers under a click, to pick from, where the menu opens, and each listed layer's visible pixels (`bounds`, by node). */
+  const [layerPick, setLayerPick] = useState<{ x: number; y: number; nodes: number[]; bounds: Record<number, Rect | null> } | null>(null);
+  /** The pick menu's layer under the pointer: the image marks its visible pixels with a box. */
+  const [layerPickHover, setLayerPickHover] = useState<number | null>(null);
   /** The one-time click-to-select model download dialog; `resolve` gets true when the model is ready. */
   const [modelPrompt, setModelPrompt] = useState<{ model: ModelId; sizeBytes: number; resolve: (installed: boolean) => void } | null>(null);
 
@@ -2385,12 +2390,30 @@ export function Editor({
       return probe.getImageData(0, 0, 1, 1).data[3] > PICK_ALPHA;
     }).map(({ node }) => node);
     if (documentRef.current.id !== doc.id) return;
-    if (hits.length > 1) setLayerPick({ x: clientX, y: clientY, nodes: [...hits, 0] });
-    else selectLayer(hits[0] ?? 0);
+    /** Only an older document's separate original image is node 0; otherwise the original image is a layer among the hits. */
+    const nodes = doc.base ? [...hits, 0] : hits;
+    if (hits.length <= 1) {
+      selectLayer(hits[0] ?? 0);
+      return;
+    }
+    /** The bounds count only clearly visible pixels, as the click does; the separate original image fills the image. */
+    const rendered = createCanvas(width, height);
+    const renderedContext = context2d(rendered);
+    const bounds: Record<number, Rect | null> = { 0: { x: 0, y: 0, width, height } };
+    visible.forEach(({ node }, index) => {
+      if (!hits.includes(node)) return;
+      renderedContext.clearRect(0, 0, width, height);
+      drawLayer(renderedContext, layers[index]);
+      bounds[node] = opaqueBounds(rendered, PICK_ALPHA);
+    });
+    setLayerPickHover(null);
+    setLayerPick({ x: clientX, y: clientY, nodes, bounds });
   };
 
+
   /**
-   * The layer pick menu closes on any outside press or Escape. The press that
+   * The layer pick menu closes on any outside press, Escape, or when the
+   * pointer leaves it after it was over it. The press that
    * opened it can still reach the window after this listener is added, so
    * presses from before the menu opened are ignored.
    */
@@ -2402,11 +2425,25 @@ export function Editor({
       setLayerPick(null);
     };
     const onKeyDown = (event: KeyboardEvent) => { if (event.key === "Escape") close(); };
+    /**
+     * Once the pointer has been over the menu, moving off it closes the menu.
+     * WebView2 can drop a menu item's pointer leave, so any move off the items
+     * also removes the box.
+     */
+    let entered = false;
+    const onPointerMove = (event: PointerEvent) => {
+      const target = event.target instanceof Element ? event.target : null;
+      if (!target?.closest(".layer-pick-menu button")) setLayerPickHover(null);
+      if (target?.closest(".layer-pick-menu")) entered = true;
+      else if (entered) close();
+    };
     window.addEventListener("pointerdown", close);
+    window.addEventListener("pointermove", onPointerMove);
     window.addEventListener("keydown", onKeyDown);
     window.addEventListener("blur", close);
     return () => {
       window.removeEventListener("pointerdown", close);
+      window.removeEventListener("pointermove", onPointerMove);
       window.removeEventListener("keydown", onKeyDown);
       window.removeEventListener("blur", close);
     };
@@ -2791,10 +2828,12 @@ export function Editor({
       else undoMask();
     } else if (command.name === "redo") {
       if (!clickSelectRef.current) redoMask();
-    } else if (command.name === "export-image") {
-      if (!exporting) setExportDialogOpen(true);
-    } else if (command.name === "export-video") {
-      if (!exporting) setSlideshowDialogOpen(true);
+    } else if (command.name === "export-image" || command.name === "export-video") {
+      if (exporting) return;
+      /** A new export first removes the message of the one before. */
+      onNotice(null);
+      if (command.name === "export-image") setExportDialogOpen(true);
+      else setSlideshowDialogOpen(true);
     } else if (resizeRef.current || clickSelectRef.current) {
       onNotice({ tone: "error", message: "Apply or cancel the current tool (Enter or Esc) before you import an image." });
     } else {
@@ -2986,7 +3025,8 @@ export function Editor({
                 <ul className="mask-shortcuts" aria-label="Canvas shortcuts">
                   <li><kbd>m</kbd> - layer mask (add/edit)</li>
                   <li><kbd>space</kbd> - pan</li>
-                  <li><kbd>CTRL</kbd> + <kbd>SCROLL</kbd> - zoom</li>
+                  <li><kbd>CTRL</kbd> + <kbd>SPACE</kbd> - zoom in</li>
+                  <li><kbd>CTRL</kbd> + <kbd>ALT</kbd> + <kbd>SPACE</kbd> - zoom out</li>
                   <li><kbd>click</kbd> - select a layer</li>
                 </ul>
               )}
@@ -3085,9 +3125,14 @@ export function Editor({
                         {job.progress !== null && (job.stage === "generating" || job.stage === "encoding") && ` ${Math.round(job.progress * 100)}%`}
                       </strong>
                       <span>{formatElapsed(now - job.startedAt)}</span>
-                      {canCancel(job.stage) && (
-                        <button className="button secondary" onPointerDown={(event) => event.stopPropagation()} onClick={() => cancelJob(job.requestId)}>
-                          <StopCircle size={15} weight="bold" /> Cancel
+                      {(canCancel(job.stage) || canAbort(job.stage)) && (
+                        <button
+                          className="button secondary"
+                          onPointerDown={(event) => event.stopPropagation()}
+                          onClick={() => cancelJob(job.requestId)}
+                          data-help={canCancel(job.stage) ? undefined : "Stop waiting and discard this image. OpenAI still charges for it."}
+                        >
+                          <StopCircle size={15} weight="bold" /> {canCancel(job.stage) ? "Cancel" : "Abort"}
                         </button>
                       )}
                     </div>
@@ -3111,6 +3156,22 @@ export function Editor({
                 onPointerCancel={onPointerUp}
                 onPointerLeave={() => moveBrushCursor(null)}
               />
+              {(() => {
+                /**
+                 * The box around the visible pixels of the layer under the pointer
+                 * in the pick menu, above everything else on the image; the rest
+                 * of the image goes darker. It is placed in percent of the image.
+                 */
+                const box = layerPick && layerPickHover !== null ? layerPick.bounds[layerPickHover] : null;
+                return box ? (
+                  <div className="layer-pick-clip" aria-hidden="true">
+                    <div
+                      className="layer-pick-box"
+                      style={{ left: `${(box.x / width) * 100}%`, top: `${(box.y / height) * 100}%`, width: `${(box.width / width) * 100}%`, height: `${(box.height / height) * 100}%` }}
+                    />
+                  </div>
+                ) : null;
+              })()}
             </div>
           </div>
         </div>
@@ -3160,7 +3221,8 @@ export function Editor({
             status: `${stageLabel(job.stage, job.service)}${job.progress !== null && (job.stage === "generating" || job.stage === "encoding") ? ` ${Math.round(job.progress * 100)}%` : ""}`,
             prompt: job.prompt,
             note: `${formatElapsed(now - job.startedAt)}${replaced ? ` · replaces ${replaced.name || "a layer"}` : ""}`,
-            onCancel: canCancel(job.stage) ? () => cancelJob(job.requestId) : undefined,
+            onCancel: canCancel(job.stage) || canAbort(job.stage) ? () => cancelJob(job.requestId) : undefined,
+            aborts: !canCancel(job.stage),
             selected: job.requestId === selectedJob,
             onSelect: () => setSelectedJob(job.requestId),
             ...(job.replaceId ? { replaces: job.replaceId } : {})
@@ -3304,6 +3366,11 @@ export function Editor({
                 key={step?.id ?? "origin"}
                 role="menuitem"
                 className={node === imageDocument.historyIndex ? "current" : ""}
+                onPointerEnter={() => setLayerPickHover(node)}
+                onPointerMove={() => setLayerPickHover(node)}
+                onPointerLeave={() => setLayerPickHover((current) => current === node ? null : current)}
+                onFocus={() => setLayerPickHover(node)}
+                onBlur={() => setLayerPickHover((current) => current === node ? null : current)}
                 onClick={() => {
                   setLayerPick(null);
                   selectLayer(node);
@@ -3320,6 +3387,7 @@ export function Editor({
         <SlideshowDialog
           defaultTitle={imageDocument.name.replace(/\.[^.]+$/, "")}
           videoSeconds={slideshowDuration(slideshowSegments(imageDocument.history.filter((step) => !step.hidden).length + 1, true))}
+          imageKeys={imageDocument.path ? [`path:${imageDocument.path}`, `id:${imageDocument.id}`] : [`id:${imageDocument.id}`]}
           onCancel={() => setSlideshowDialogOpen(false)}
           onExport={(options) => void exportSlideshow(options)}
         />

@@ -348,15 +348,15 @@ export function applyMaskStroke(mask: HTMLCanvasElement, base: HTMLCanvasElement
   context.restore();
 }
 
-/** The smallest rectangle that holds every pixel that is not fully transparent, or null when all are. */
-export function opaqueBounds(canvas: HTMLCanvasElement): Rect | null {
+/** The smallest rectangle that holds every pixel with alpha above `minAlpha` (0 to 255), or null when there is none. */
+export function opaqueBounds(canvas: HTMLCanvasElement, minAlpha = 0): Rect | null {
   const { width, height } = canvas;
   const pixels = context2d(canvas).getImageData(0, 0, width, height).data;
   let left = width, top = height, right = -1, bottom = -1;
   for (let y = 0; y < height; y++) {
     const row = y * width * 4;
     for (let x = 0; x < width; x++) {
-      if (pixels[row + x * 4 + 3] === 0) continue;
+      if (pixels[row + x * 4 + 3] <= minAlpha) continue;
       if (x < left) left = x;
       if (x > right) right = x;
       if (y < top) top = y;

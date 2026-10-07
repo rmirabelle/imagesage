@@ -104,7 +104,8 @@ interface Props {
 
 /** An AI edit that is still running: its status, prompt, a short note (time, what it replaces), and Cancel while possible. */
 /** A running AI edit. `replaces` is the id of the layer a regenerate replaces; its row takes that layer's place in the list. */
-export type PendingLayer = { id: string; status: string; prompt: string; note: string; onCancel?: () => void; selected: boolean; onSelect: () => void; replaces?: string };
+/** `aborts`: the service already charges for the edit, so stopping it is Abort, not Cancel. */
+export type PendingLayer = { id: string; status: string; prompt: string; note: string; onCancel?: () => void; aborts?: boolean; selected: boolean; onSelect: () => void; replaces?: string };
 
 /** A layer being dragged to a new place: where it started, and where it would land. */
 type LayerDrag = { from: number; pointerId: number; startY: number; moved: boolean; to: number | null; above: boolean };
@@ -770,8 +771,8 @@ Click to show its progress on the image.`}>
         </div>
         {item.onCancel && (
           <div className="layer-strip">
-            <button className="layer-strip-add" onClick={(event) => { event.stopPropagation(); item.onCancel?.(); }} data-help="Cancel this AI edit">
-              <StopCircle size={12} weight="bold" /> <span>Cancel</span>
+            <button className="layer-strip-add" onClick={(event) => { event.stopPropagation(); item.onCancel?.(); }} data-help={item.aborts ? "Stop waiting and discard this image. OpenAI still charges for it." : "Cancel this AI edit"}>
+              <StopCircle size={12} weight="bold" /> <span>{item.aborts ? "Abort" : "Cancel"}</span>
             </button>
           </div>
         )}

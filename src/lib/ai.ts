@@ -150,6 +150,9 @@ export const editWholeImage = (requestId: string, payload: WholeEditPayload, onP
  */
 const CANCELLABLE: (AiStage | null)[] = [null, "sending", "downloading", "loading", "preparing"];
 export const canCancel = (stage: AiStage | null) => CANCELLABLE.includes(stage);
+/** After that point, Abort stops waiting for the image; the service still charges for it. */
+const ABORTABLE: (AiStage | null)[] = ["generating", "partial", "finishing"];
+export const canAbort = (stage: AiStage | null) => ABORTABLE.includes(stage);
 
 export const cancelAiRequest = (requestId: string) => invoke<void>("ai_cancel", { requestId });
 

@@ -654,6 +654,18 @@ select option:disabled { color: #777d8e; }
 .layer-pick-menu button.current { background: #333a52; }
 .layer-pick-thumb { width: 36px; height: 28px; flex: 0 0 auto; overflow: hidden; border-radius: 3px; background: repeating-conic-gradient(#3a3f4c 0 25%, #2a2d38 0 50%) 0 0 / 8px 8px; }
 .layer-pick-thumb img { width: 100%; height: 100%; display: block; object-fit: cover; }
+/*
+ * The box on the image around the visible pixels of the layer under the
+ * pointer in the pick menu. It sits above everything else on the image,
+ * clipped to the image; its wide shadow darkens the rest of the image.
+ */
+.layer-pick-clip { position: absolute; z-index: 30; inset: 0; overflow: hidden; pointer-events: none; }
+.layer-pick-box {
+  position: absolute;
+  box-sizing: border-box;
+  border: 3px solid var(--secondary);
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, .8), 0 0 0 9999px rgba(0, 0, 0, .5), inset 0 0 0 1px rgba(0, 0, 0, .8);
+}
 .steps-menu-label { flex: 1; }
 .steps-menu button small { color: #8c91a1; font-size: 10px; }
 .steps-menu-check { width: 14px; display: grid; place-items: center; color: var(--secondary); }

@@ -117,9 +117,26 @@ function drawLabel(context: CanvasRenderingContext2D, name: string, alpha: numbe
   context.restore();
 }
 
-const loadIcon = () => new Promise<HTMLImageElement | null>((resolve) => {
+/** The app icon, cut at its right at the last visible pixel, so the space after it is only the column gap. */
+const loadIcon = () => new Promise<HTMLCanvasElement | null>((resolve) => {
   const image = new Image();
-  image.onload = () => resolve(image);
+  image.onload = () => {
+    const full = document.createElement("canvas");
+    full.width = image.naturalWidth;
+    full.height = image.naturalHeight;
+    const fullContext = full.getContext("2d", { willReadFrequently: true })!;
+    fullContext.drawImage(image, 0, 0);
+    const pixels = fullContext.getImageData(0, 0, full.width, full.height).data;
+    let right = 0;
+    for (let index = 3; index < pixels.length; index += 4) {
+      if (pixels[index] > 16) right = Math.max(right, ((index - 3) / 4) % full.width);
+    }
+    const cut = document.createElement("canvas");
+    cut.width = right + 1;
+    cut.height = full.height;
+    cut.getContext("2d")!.drawImage(full, 0, 0);
+    resolve(cut);
+  };
   image.onerror = () => resolve(null);
   image.src = "/app-icon.png";
 });
@@ -182,11 +199,13 @@ async function introOverlay(width: number, height: number, title: string) {
   const creditPadRight = 2 * unit;
   const creditPadY = 1.1 * unit;
   const iconSize = icon ? ICON * unit : 0;
-  const columnGap = icon ? 0.9 * unit : 0;
+  /** The cut icon keeps its height, so it is narrower than it is tall. */
+  const iconWidth = icon ? iconSize * (icon.width / icon.height) : 0;
+  const columnGap = icon ? 1 * unit : 0;
   const linesGap = 0.5 * unit;
   const linesHeight = MADE * LINE * unit + linesGap + CREDIT * LINE * unit;
   const linesWidth = Math.max(madeWidth, measure(credit, CREDIT, 500));
-  const creditWidth = creditPadLeft + iconSize + columnGap + linesWidth + creditPadRight;
+  const creditWidth = creditPadLeft + iconWidth + columnGap + linesWidth + creditPadRight;
   const creditHeight = Math.max(iconSize, linesHeight) + creditPadY * 2;
 
   /** The title wraps to stay within most of the video width; it is never narrower than the credit box needs. */
@@ -225,8 +244,8 @@ async function introOverlay(width: number, height: number, title: string) {
   context.roundRect(creditLeft, y, creditWidth, creditHeight, 1.2 * unit);
   context.stroke();
   const middle = y + creditHeight / 2;
-  if (icon) context.drawImage(icon, creditLeft + creditPadLeft, middle - iconSize / 2, iconSize, iconSize);
-  const textLeft = creditLeft + creditPadLeft + iconSize + columnGap;
+  if (icon) context.drawImage(icon, creditLeft + creditPadLeft, middle - iconSize / 2, iconWidth, iconSize);
+  const textLeft = creditLeft + creditPadLeft + iconWidth + columnGap;
   let lineTop = middle - linesHeight / 2;
   context.textAlign = "left";
   let x = textLeft;

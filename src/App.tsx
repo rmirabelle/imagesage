@@ -102,7 +102,13 @@ export default function App() {
   const setKeyStatus = useCallback((provider: Provider, status: ApiKeyStatus) => {
     setKeyStatuses((current) => ({ ...current, [provider]: status }));
   }, []);
-  const [notice, setNotice] = useState<Notice>(null);
+  const [storedNotice, setNotice] = useState<Notice>(null);
+  /** A message about one image shows only while that image is selected; it waits, without closing, while another is. */
+  const notice = storedNotice && (!storedNotice.documentId || storedNotice.documentId === activeDocumentId) ? storedNotice : null;
+  /** A message about an image that was closed is dropped. */
+  useEffect(() => {
+    if (storedNotice?.documentId && !documents.some((document) => document.id === storedNotice.documentId)) setNotice(null);
+  }, [documents, storedNotice]);
   /**
    * Where messages show: centered across the image, about 30px below its top
    * (or below the top of the work area when the image is scrolled up past it).
@@ -563,6 +569,7 @@ export default function App() {
       message: "Exported",
       file: path,
       sticky: true,
+      documentId,
       actions: [
         { label: "Play", keepOpen: true, run: () => void invoke("play_video", { path }).catch((error) => showNotice({ tone: "error", message: String(error) })) },
         { label: "OK", run: () => {} }
@@ -600,7 +607,7 @@ export default function App() {
     const path = /\.[a-z0-9]+$/i.test(chosenPath) ? chosenPath : `${chosenPath}.${extension}`;
     await runFileTask(`Exporting ${fileName(path)}…`, () => invoke("save_image", { path, dataUrl }));
     try { localStorage.setItem(SAVE_SEQUENCE_KEY, String(sequence + 1)); } catch { /* See above. */ }
-    showNotice({ tone: "success", message: `Exported ${path}` });
+    showNotice({ tone: "success", message: `Exported ${path}`, documentId });
     return true;
   }, [runFileTask, showNotice]);
 
