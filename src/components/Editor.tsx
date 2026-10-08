@@ -3,9 +3,13 @@ import {
   ArrowArcLeft,
   Camera,
   Check,
+  CircleDashed,
+  Gradient,
   Lasso,
   MagicWand,
   Minus,
+  PaintBrush,
+  PencilSimple,
   Plus,
   SpinnerGap,
   StopCircle,
@@ -45,7 +49,7 @@ import {
   type LayerCanvases
 } from "../editor/canvas";
 import type { ImageDocument } from "../editor/imageDocument";
-import { ADJUSTMENT_FIELDS, ADJUSTMENT_LABELS, adjustList, newAdjustmentId, toggleAllAdjustments, adjustmentFilter, adjustmentOpacity, adjustSignature, findAdjustment, hasAdjustments, maskSignature, moveLayer, newAdjustment, replaceAdjustment, resetAdjustment, type AdjustmentField } from "../editor/layers";
+import { ADJUSTMENT_LABELS, adjustList, adjustmentFields, setColorize, newAdjustmentId, toggleAllAdjustments, adjustmentFilter, adjustmentOpacity, adjustSignature, findAdjustment, hasAdjustments, maskSignature, moveLayer, newAdjustment, replaceAdjustment, resetAdjustment, type AdjustmentField } from "../editor/layers";
 import {
   wholeImageSize
 } from "../editor/region";
@@ -86,8 +90,13 @@ import { StepsPanel, stepKey, type PartAction } from "./StepsPanel";
 type Corner = "nw" | "ne" | "sw" | "se";
 /** "mask" paints the selected layer's mask; "whole" is no tool. */
 type Tool = "whole" | "mask";
-/** A mask: the painted area (a PNG data URL), and whether that area is hidden; no `mask` means no mask. */
-type MaskState = { mask?: string; hides?: boolean };
+/**
+ * A mask: the painted area (a PNG data URL), whether that area is hidden, and
+ * its link id when it is a linked copy; no `mask` means no mask.
+ */
+type MaskState = { mask?: string; hides?: boolean; link?: string };
+/** One mask of a document: the owner (a step id, or `BASE_OWNER`) and the part. */
+type MaskRef = { owner: string; part: LayerPart };
 /** The owner of a mask: a step id, or `BASE_OWNER` for the original image. */
 const BASE_OWNER = "";
 /**
@@ -95,12 +104,14 @@ const BASE_OWNER = "";
  * and the size of the image it came from. The event tells every editor that
  * it changed, so their menus can offer Paste.
  */
-let maskClipboard: { mask: string; hides: boolean; width: number; height: number } | null = null;
+let maskClipboard: { mask: string; hides: boolean; width: number; height: number; documentId: string; source: MaskRef } | null = null;
 const MASK_CLIPBOARD_EVENT = "imagesage-mask-clipboard";
 /** The model name of a layer imported from a file; the layers list shows it under the layer name. */
 const IMPORTED_MODEL = "Imported image";
 /** The model name of a layer copied from the original image. Like an imported layer, it cannot be regenerated. */
 const ORIGINAL_COPY_MODEL = "Copy of the original";
+/** The model of a snapshot layer: all visible layers combined, made without AI. */
+const SNAPSHOT_MODEL = "Snapshot";
 /** The name the bottom layer gets: an opened image, or the first image generated in a new document. */
 const ORIGINAL_LAYER_NAME = "Original image";
 /**
@@ -134,6 +145,10 @@ const skipRegenConfirm = () => {
 const PICK_ALPHA = 24;
 /** One mask change, for Ctrl+Z and Ctrl+Y: the layer mask or an adjustment mask of one layer. */
 type MaskChange = { owner: string; part: LayerPart; before: MaskState; after: MaskState };
+/** All the adjustments of one layer, before and after a change such as Delete all adjustments. */
+type AdjustChange = { kind: "adjust"; owner: string; before: LayerAdjust | undefined; after: LayerAdjust | undefined };
+/** One step for Ctrl+Z and Ctrl+Y. */
+type UndoEntry = MaskChange | AdjustChange;
 /** One adjustment of a prepared layer: its filter (null when it changes nothing), its opacity (for opacity adjustments), and its mask. */
 type PrepAdjustment = { id: string; filter: string | null; opacity: number | null; mask: HTMLCanvasElement | null; hides: boolean };
 /**
@@ -217,6 +232,13 @@ const rotateCursor = (flipX: boolean, flipY: boolean) => `url("data:image/svg+xm
   + "</g></svg>"
 )}") 12 12, crosshair`;
 const ROTATE_CURSORS = [rotateCursor(false, false), rotateCursor(true, false), rotateCursor(false, true), rotateCursor(true, true)];
+/** A trash can cursor, for Ctrl over a lasso corner: a click there deletes the corner. */
+const TRASH_CURSOR = `url("data:image/svg+xml,${encodeURIComponent(
+  "<svg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='none' stroke-linecap='round' stroke-linejoin='round'>"
+  + "<g stroke='#000' stroke-width='4'><path d='M4 6.5h16M9.5 6.5V4h5v2.5M6 6.5l1 14h10l1-14'/></g>"
+  + "<g stroke='#fff' stroke-width='2'><path d='M4 6.5h16M9.5 6.5V4h5v2.5M6 6.5l1 14h10l1-14M10 10.5v6M14 10.5v6'/></g>"
+  + "</svg>"
+)}") 12 12, not-allowed`;
 
 /** The adjustments of a node; the original image (node 0) keeps its own on the document. */
 const adjustOf = (doc: ImageDocument, node: number): LayerAdjust | undefined => {
@@ -233,11 +255,26 @@ const nodeOfOwner = (doc: ImageDocument, owner: string) => {
 const partMaskState = (doc: ImageDocument, node: number, part: LayerPart): MaskState => {
   if (part === "mask") {
     const step = doc.history[node - 1];
-    return step?.layerMask ? { mask: step.layerMask, hides: step.maskHides === true } : {};
+    return step?.layerMask ? { mask: step.layerMask, hides: step.maskHides === true, ...(step.maskLink ? { link: step.maskLink } : {}) } : {};
   }
   const adjustment = findAdjustment(adjustOf(doc, node), part);
-  return adjustment?.mask ? { mask: adjustment.mask, hides: adjustment.maskHides === true } : {};
+  return adjustment?.mask ? { mask: adjustment.mask, hides: adjustment.maskHides === true, ...(adjustment.maskLink ? { link: adjustment.maskLink } : {}) } : {};
 };
+/** Every mask in the document with the link id `link`. */
+const linkedMasks = (doc: ImageDocument, link: string): MaskRef[] => {
+  const found: MaskRef[] = [];
+  const fromAdjust = (owner: string, adjust: LayerAdjust | undefined) => {
+    for (const adjustment of adjustList(adjust)) if (adjustment.mask && adjustment.maskLink === link) found.push({ owner, part: adjustment.id });
+  };
+  fromAdjust(BASE_OWNER, doc.baseAdjust);
+  for (const step of doc.history) {
+    if (step.layerMask && step.maskLink === link) found.push({ owner: step.id, part: "mask" });
+    fromAdjust(step.id, step.adjust);
+  }
+  return found;
+};
+/** A new link id for masks pasted as linked copies. */
+const newMaskLink = () => `link-${crypto.randomUUID().slice(0, 8)}`;
 /** The decode-cache key of an adjustment's mask; `ownerKey` is the step id, or `base:<document id>`. */
 const adjustMaskKey = (ownerKey: string, id: string) => `${ownerKey}:adjust-${id}-mask`;
 /** The decode-cache key of one part's mask. */
@@ -408,7 +445,7 @@ interface Props {
  * `documentId`. `nonce` changes each time, so the same command can run again,
  * and an editor runs each nonce only once.
  */
-export type EditorCommand = { name: "export-image" | "export-video" | "import-image" | "undo" | "redo"; documentId: string; nonce: number };
+export type EditorCommand = { name: "export-image" | "export-video" | "import-image" | "undo" | "redo" | "snapshot"; documentId: string; nonce: number };
 
 /** Ctrl+wheel zoom: the scale changes by exp(-deltaY × this); one wheel notch (100) is about 5%. */
 const WHEEL_ZOOM_RATE = 0.0005;
@@ -428,6 +465,8 @@ const CANVAS_TOP_SPACE = 46;
 const MASK_TIPS_SPACE = 230;
 /** Screen pixels around the first lasso corner where a click closes the shape. */
 const LASSO_CLOSE_REACH = 8;
+/** Screen pixels around a placed lasso corner where the pointer can grab it. */
+const LASSO_GRAB_REACH = 7;
 /** Panning stops when this much of the image (in screen pixels) is still in view at the window's edge. */
 const PAN_KEEP_VISIBLE = 80;
 /** Largest side of the mask preview canvas, in device pixels; it is redrawn when zoom changes. */
@@ -527,6 +566,8 @@ export function Editor({
   const [exportDialogOpen, setExportDialogOpen] = useState(false);
   /** The layer waiting for the user to confirm Delete. */
   const [confirmDelete, setConfirmDelete] = useState<number | null>(null);
+  /** The adjustment being renamed in the Rename dialog, with the name typed so far. */
+  const [renameAdjust, setRenameAdjust] = useState<{ node: number; id: string; draft: string } | null>(null);
   const promptRef = useRef<HTMLTextAreaElement>(null);
   /** Regenerate waiting for the user to confirm: the layer, and the prompt to run. */
   const [confirmRegen, setConfirmRegen] = useState<{ stepId: string; instruction: string } | null>(null);
@@ -557,7 +598,20 @@ export function Editor({
   const lassoClickRef = useRef<{ time: number; point: Point } | null>(null);
   /** The pointer's place, for the line from the last corner to the pointer. */
   const lassoHoverRef = useRef<Point | null>(null);
-  const lassoRubberRef = useRef<SVGLineElement>(null);
+  const lassoRubberRef = useRef<SVGGElement>(null);
+  /**
+   * A press on a placed corner: it moves the corner once the pointer moves a
+   * few pixels; a press without movement is an ordinary lasso click.
+   */
+  const lassoDragRef = useRef<{ index: number; point: Point; startX: number; startY: number; moved: boolean; reverse: boolean } | null>(null);
+  /** The corner just placed cannot be grabbed until the pointer leaves it, so a double-click still closes the shape. */
+  const lassoFreshRef = useRef<number | null>(null);
+  /** The corner under the pointer that it can grab, or null. */
+  const lassoHoverCornerRef = useRef<number | null>(null);
+  /** The hand cursor over a corner that can be moved, and while one moves. */
+  const [lassoCursor, setLassoCursor] = useState<"grab" | "grabbing" | null>(null);
+  /** The pointer is over any placed corner, the one just placed too: with Ctrl held, a click deletes it. */
+  const [lassoOverCorner, setLassoOverCorner] = useState(false);
   /** The layer being resized: its bounds before resizing and the resize so far, for the handles. */
   const [resize, setResize] = useState<{ bounds: Rect; transform: LayerTransform } | null>(null);
   const resizeRef = useRef<ResizeSession | null>(null);
@@ -894,9 +948,9 @@ export function Editor({
     onCommit(current.id, { history: current.history.map((item, at) => at === index ? old : item), historyIndex: index + 1 });
   }, [onCommit]);
 
-  /** Mask changes for Ctrl+Z and Ctrl+Y. */
-  const maskUndoRef = useRef<MaskChange[]>([]);
-  const maskRedoRef = useRef<MaskChange[]>([]);
+  /** Mask changes, and adjustment changes such as Delete all adjustments, for Ctrl+Z and Ctrl+Y. */
+  const maskUndoRef = useRef<UndoEntry[]>([]);
+  const maskRedoRef = useRef<UndoEntry[]>([]);
 
   /**
    * Writes a layer's adjustments (node 0 is the original image) and selects
@@ -916,48 +970,83 @@ export function Editor({
     onCommit(doc.id, { history, historyIndex: node }, markDirty);
   }, [onCommit]);
 
-  /** Sets or removes the mask of one part of a layer and selects that layer. False when the layer or the adjustment is gone. */
-  const setPartMask = useCallback((owner: string, part: LayerPart, state: MaskState, canvas?: HTMLCanvasElement) => {
+  /**
+   * Sets or removes the mask of one part of a layer and selects that layer.
+   * A mask with a link id also sets every linked copy, and the masks in
+   * `linkWith`, which join the link; all of it is one change. Removing a mask
+   * leaves its linked copies alone. False when the layer or the adjustment is gone.
+   */
+  const setPartMask = useCallback((owner: string, part: LayerPart, state: MaskState, canvas?: HTMLCanvasElement, linkWith: MaskRef[] = []) => {
     const current = documentRef.current;
     const node = nodeOfOwner(current, owner);
     if (node < 0 || (part === "mask" && node === 0)) return false;
-    const adjust = adjustOf(current, node);
-    const adjustment = part === "mask" ? undefined : findAdjustment(adjust, part);
-    if (part !== "mask" && !adjustment) return false;
+    if (part !== "mask" && !findAdjustment(adjustOf(current, node), part)) return false;
     const key = maskCacheKey(current, node, part);
     if (state.mask && canvas) layerCacheRef.current.set(key, { src: state.mask, canvas });
     if (!state.mask) layerCacheRef.current.delete(key);
-    /** Changing a mask turns it back on. */
-    if (adjustment) {
-      const { mask: _mask, maskHides: _hides, maskOff: _off, ...rest } = adjustment;
-      const next: Adjustment = state.mask ? { ...rest, mask: state.mask, ...(state.hides ? { maskHides: true } : {}) } : rest;
-      commitAdjust(current, node, replaceAdjustment(adjust, part, next));
-      return true;
-    }
+    /**
+     * A state without a `link` key (a brush stroke, a gradient, a fill) keeps
+     * the mask's link; a `link` key, even undefined, sets it. A removed mask has no link.
+     */
+    const link = !state.mask ? undefined : "link" in state ? state.link : partMaskState(current, node, part).link;
+    const targets: MaskRef[] = [{ owner, part }, ...(state.mask && link ? [...linkedMasks(current, link), ...linkWith] : [])];
+    const isTarget = (ownerId: string, partId: LayerPart) => targets.some((target) => target.owner === ownerId && target.part === partId);
+    /** Changing a mask turns it back on; its linked copies keep their own on or off. */
+    const keepsOff = (ownerId: string, partId: LayerPart, off: boolean | undefined) => off === true && (ownerId !== owner || partId !== part);
+    const fields = <T,>(off: boolean | undefined, ownerId: string, partId: LayerPart, maskKey: "mask" | "layerMask") => (state.mask ? {
+      [maskKey]: state.mask,
+      ...(state.hides ? { maskHides: true } : {}),
+      ...(link ? { maskLink: link } : {}),
+      ...(keepsOff(ownerId, partId, off) ? { maskOff: true } : {})
+    } : {}) as Partial<T>;
+    const adjustWith = (ownerId: string, adjust: LayerAdjust | undefined) => adjust && adjustList(adjust).some((adjustment) => isTarget(ownerId, adjustment.id))
+      ? adjustList(adjust).map((adjustment) => {
+        if (!isTarget(ownerId, adjustment.id)) return adjustment;
+        const { mask: _mask, maskHides: _hides, maskOff, maskLink: _link, ...rest } = adjustment;
+        return { ...rest, ...fields<Adjustment>(maskOff, ownerId, adjustment.id, "mask") };
+      })
+      : adjust;
     const history = current.history.map((step) => {
-      if (step.id !== owner) return step;
-      const { layerMask: _mask, maskHides: _hides, maskOff: _off, ...rest } = step;
-      return state.mask ? { ...rest, layerMask: state.mask, ...(state.hides ? { maskHides: true } : {}) } : rest;
+      let next = step;
+      if (isTarget(step.id, "mask")) {
+        const { layerMask: _mask, maskHides: _hides, maskOff, maskLink: _link, ...rest } = step;
+        next = { ...rest, ...fields<EditStep>(maskOff, step.id, "mask", "layerMask") };
+      }
+      const adjust = adjustWith(step.id, step.adjust);
+      return adjust === step.adjust ? next : { ...next, adjust };
     });
-    onCommit(current.id, { history, historyIndex: node });
+    const baseAdjust = adjustWith(BASE_OWNER, current.baseAdjust);
+    onCommit(current.id, { history, ...(baseAdjust !== current.baseAdjust ? { baseAdjust } : {}), historyIndex: node });
     return true;
-  }, [commitAdjust, onCommit]);
+  }, [onCommit]);
 
-  const recordMaskChange = useCallback((change: MaskChange, canvas?: HTMLCanvasElement) => {
+  const recordMaskChange = useCallback((change: MaskChange, canvas?: HTMLCanvasElement, linkWith: MaskRef[] = []) => {
     maskUndoRef.current.push(change);
     maskRedoRef.current = [];
-    setPartMask(change.owner, change.part, change.after, canvas);
+    setPartMask(change.owner, change.part, change.after, canvas, linkWith);
   }, [setPartMask]);
+
+  /** Puts back one side of a change; false when its layer (or adjustment) is gone. */
+  const applyUndoEntry = useCallback((entry: UndoEntry, side: "before" | "after") => {
+    if ("kind" in entry) {
+      const current = documentRef.current;
+      const node = nodeOfOwner(current, entry.owner);
+      if (node < 0) return false;
+      commitAdjust(current, node, entry[side]);
+      return true;
+    }
+    return setPartMask(entry.owner, entry.part, entry[side]);
+  }, [commitAdjust, setPartMask]);
 
   const undoMask = useCallback(() => {
     const change = maskUndoRef.current.pop();
-    if (change && setPartMask(change.owner, change.part, change.before)) maskRedoRef.current.push(change);
-  }, [setPartMask]);
+    if (change && applyUndoEntry(change, "before")) maskRedoRef.current.push(change);
+  }, [applyUndoEntry]);
 
   const redoMask = useCallback(() => {
     const change = maskRedoRef.current.pop();
-    if (change && setPartMask(change.owner, change.part, change.after)) maskUndoRef.current.push(change);
-  }, [setPartMask]);
+    if (change && applyUndoEntry(change, "after")) maskUndoRef.current.push(change);
+  }, [applyUndoEntry]);
 
   const isMaskTool = tool === "mask";
   /** The mask brush hides now: its mode, reversed while Alt is held. */
@@ -974,6 +1063,9 @@ export function Editor({
   useEffect(() => {
     setLassoPoints([]);
     lassoClickRef.current = null;
+    lassoDragRef.current = null;
+    lassoFreshRef.current = null;
+    lassoHoverCornerRef.current = null;
   }, [lasso, targetPart, imageDocument.historyIndex, setLassoPoints]);
 
   /** While a mask tool is on, the selected layer and the combined layers below and above it are ready for fast painting. */
@@ -1293,6 +1385,14 @@ export function Editor({
     clickSeqRef.current += 1;
     setClickSelect(null);
   };
+  /**
+   * Turning the Mask tool on (a mask chip, a mask menu item) ends Magic
+   * without applying it. Otherwise Magic would still take every click, and
+   * the brush would add selection points instead of paint.
+   */
+  useEffect(() => {
+    if (isMaskTool && clickSelectRef.current) cancelClickSelect();
+  }, [isMaskTool]);
 
   /** Writes the mask into its target, a layer or adjustment mask; Ctrl+Z undoes it. */
   const applyClickSelect = async () => {
@@ -1354,7 +1454,7 @@ export function Editor({
     /** Without a separate original image, node 0 is no layer, so the layer above is selected instead. */
     onCommit(current.id, { history, historyIndex: current.base ? node - 1 : Math.max(node - 1, Math.min(1, history.length)) });
     setPrompt(step.prompt);
-    onNotice({ tone: "success", message: `Layer ${node + 1} deleted.`, action: { label: "Undo", run: () => undoDelete(step, node) } });
+    onNotice({ tone: "success", message: `Deleted ${step.name || `Layer ${node}`}.`, action: { label: "Undo", run: () => undoDelete(step, node) } });
   };
 
   /**
@@ -1444,6 +1544,34 @@ export function Editor({
     };
     onCommit(current.id, { history: [copy, ...current.history], historyIndex: 1 });
     onNotice({ tone: "success", message: "Duplicated the original image." });
+  };
+
+  /**
+   * Adds a snapshot of all visible layers, combined as they show, as a new top
+   * layer and selects it (Photoshop calls this Stamp Visible). Hidden layers
+   * are left out; the layers themselves do not change.
+   */
+  const snapshotVisible = async () => {
+    const current = documentRef.current;
+    if (current.base === undefined || applyingRef.current || resizeRef.current || clickSelectRef.current) return;
+    const image = await compositeOf(current, current.history);
+    const { width, height } = current.surface;
+    const area: Rect = { x: 0, y: 0, width, height };
+    const count = current.history.filter((step) => step.model === SNAPSHOT_MODEL).length + 1;
+    const step: EditStep = {
+      id: crypto.randomUUID(),
+      name: `Snapshot ${count}`,
+      prompt: "Snapshot of the visible layers",
+      model: SNAPSHOT_MODEL,
+      quality: "",
+      createdAt: new Date().toISOString(),
+      selection: { x: 0, y: 0, size: Math.min(width, height) },
+      area,
+      sent: { ...area, margin: 0, requestWidth: width, requestHeight: height },
+      layer: await canvasToDataUrl(image)
+    };
+    appendStep(step, image);
+    onNotice({ tone: "success", message: `Added ${step.name}: the visible layers combined, as a new top layer.` });
   };
 
   /**
@@ -1606,9 +1734,10 @@ export function Editor({
       case "add-contrast":
       case "add-blur":
       case "add-hue-saturation":
-      case "add-opacity": {
+      case "add-opacity":
+      case "add-sharpen": {
         /** A layer can have several adjustments, even of the same kind, each with its own mask. */
-        const added = newAdjustment(action === "add-brightness" ? "brightness" : action === "add-contrast" ? "contrast" : action === "add-blur" ? "blur" : action === "add-opacity" ? "opacity" : "hueSaturation");
+        const added = newAdjustment(action === "add-brightness" ? "brightness" : action === "add-contrast" ? "contrast" : action === "add-blur" ? "blur" : action === "add-opacity" ? "opacity" : action === "add-sharpen" ? "sharpen" : "hueSaturation");
         commitAdjust(current, node, [...(adjust ?? []), added]);
         pick(added.id);
         return;
@@ -1632,7 +1761,7 @@ export function Editor({
       case "mask-copy": {
         const state = partMaskState(current, node, part);
         if (!state.mask) return;
-        maskClipboard = { mask: state.mask, hides: state.hides === true, width, height };
+        maskClipboard = { mask: state.mask, hides: state.hides === true, width, height, documentId: current.id, source: { owner, part } };
         window.dispatchEvent(new Event(MASK_CLIPBOARD_EVENT));
         onNotice({ tone: "success", message: "Mask copied." });
         return;
@@ -1641,6 +1770,23 @@ export function Editor({
         /** The pasted mask replaces this one (Ctrl+Z undoes it); a mask from an image of another size is scaled to fit. */
         const copied = maskClipboard;
         if (!copied || (part === "mask" && node === 0)) return;
+        /**
+         * In the same image, the paste is a linked copy of the copied mask, as
+         * it is now: a change to either changes both. The copied mask joins the
+         * link too. Unlink in the mask menu makes a copy independent again.
+         */
+        const sourceNode = copied.documentId === current.id ? nodeOfOwner(current, copied.source.owner) : -1;
+        const sourceState = sourceNode >= 0 ? partMaskState(current, sourceNode, copied.source.part) : {};
+        const isSelf = copied.source.owner === owner && copied.source.part === part;
+        if (sourceState.mask && !isSelf) {
+          const link = sourceState.link ?? newMaskLink();
+          /** The `link` key is always set, so an undo also puts back the old link (or none). */
+          const old = partMaskState(current, node, part);
+          const before: MaskState = { ...old, link: old.link };
+          recordMaskChange({ owner, part, before, after: { mask: sourceState.mask, ...(sourceState.hides ? { hides: true } : {}), link } }, undefined, [copied.source]);
+          onNotice({ tone: "success", message: "Mask pasted as a linked copy: a change to one changes all its copies." });
+          return;
+        }
         let mask = copied.mask;
         if (copied.width !== width || copied.height !== height) {
           mask = await canvasToDataUrl(scaledCanvas(await canvasFromDataUrl(copied.mask), width, height));
@@ -1648,6 +1794,26 @@ export function Editor({
         const before = partMaskState(current, node, part);
         recordMaskChange({ owner, part, before, after: { mask, ...(copied.hides ? { hides: true } : {}) } });
         onNotice({ tone: "success", message: copied.width !== width || copied.height !== height ? "Mask pasted and scaled to this image." : "Mask pasted." });
+        return;
+      }
+      case "mask-unlink": {
+        /**
+         * The mask becomes independent of its linked copies. Its older undo
+         * steps are dropped, so an undo cannot link it again.
+         */
+        if (!partMaskState(current, node, part).link) return;
+        const notThis = (change: UndoEntry) => "kind" in change || change.owner !== owner || change.part !== part;
+        maskUndoRef.current = maskUndoRef.current.filter(notThis);
+        maskRedoRef.current = maskRedoRef.current.filter(notThis);
+        if (part === "mask") {
+          if (!step) return;
+          const { maskLink: _link, ...rest } = step;
+          onCommit(current.id, { history: current.history.map((item, index) => index === node - 1 ? rest : item) });
+        } else if (adjustment) {
+          const { maskLink: _link, ...rest } = adjustment;
+          update(rest);
+        }
+        onNotice({ tone: "success", message: "Mask unlinked: it no longer changes with its copies." });
         return;
       }
       case "mask-invert": {
@@ -1713,16 +1879,34 @@ export function Editor({
       }
       case "delete":
         if (!adjustment) return;
-        layerCacheRef.current.delete(maskCacheKey(current, node, part));
-        commitAdjust(current, node, replaceAdjustment(adjust, part, undefined));
         if (node === current.historyIndex && maskPart === part) setMaskPart("mask");
+        deleteAdjustments(replaceAdjustment(adjust, part, undefined), `Deleted ${adjustment.label || ADJUSTMENT_LABELS[adjustment.kind]}.`);
         return;
       case "delete-all":
         if (!adjust?.length) return;
-        for (const item of adjust) layerCacheRef.current.delete(maskCacheKey(current, node, item.id));
-        commitAdjust(current, node, undefined);
         if (node === current.historyIndex && maskPart !== "mask") setMaskPart("mask");
+        deleteAdjustments(undefined, `Deleted ${adjust.length} ${adjust.length === 1 ? "adjustment" : "adjustments"}.`);
         return;
+    }
+    /** Deletes one or all adjustments of this layer; Ctrl+Z, or Undo in the message, puts them back. */
+    function deleteAdjustments(after: LayerAdjust | undefined, message: string) {
+      const change: AdjustChange = { kind: "adjust", owner, before: adjust, after };
+      maskUndoRef.current.push(change);
+      maskRedoRef.current = [];
+      commitAdjust(current, node, after);
+      onNotice({
+        tone: "success",
+        message,
+        action: {
+          label: "Undo",
+          run: () => {
+            /** Undo from the message takes this change off the Ctrl+Z list, so Ctrl+Z cannot apply it twice. */
+            if (!maskUndoRef.current.includes(change)) return;
+            maskUndoRef.current = maskUndoRef.current.filter((entry) => entry !== change);
+            if (applyUndoEntry(change, "before")) maskRedoRef.current.push(change);
+          }
+        }
+      });
     }
   };
 
@@ -2000,7 +2184,7 @@ export function Editor({
       if (!pending || pending.node > current.history.length) return;
       const adjust = adjustOf(current, pending.node);
       const adjustment = findAdjustment(adjust, pending.id);
-      const range = adjustment && ADJUSTMENT_FIELDS[adjustment.kind].find((item) => item.field === pending.field);
+      const range = adjustment && adjustmentFields(adjustment).find((item) => item.field === pending.field);
       if (!adjustment || !range) return;
       const next = Math.round(Math.max(range.min, Math.min(range.max, pending.value)));
       if ((adjustment[pending.field] ?? 0) === next) return;
@@ -2008,6 +2192,44 @@ export function Editor({
     });
   };
 
+  /** Gives an adjustment of a layer its own name; an empty name removes it, so the chip shows the numbers again. */
+  const setAdjustmentLabel = (node: number, id: string, label: string) => {
+    const current = documentRef.current;
+    if (node > current.history.length) return;
+    const adjust = adjustOf(current, node);
+    const adjustment = findAdjustment(adjust, id);
+    const trimmed = label.trim();
+    if (!adjustment || (adjustment.label ?? "") === trimmed) return;
+    const { label: _label, ...rest } = adjustment;
+    commitAdjust(current, node, replaceAdjustment(adjust, id, trimmed ? { ...rest, label: trimmed } : rest));
+  };
+
+  /** Opens the Rename dialog for an adjustment, with its current name. */
+  const requestAdjustRename = (node: number, id: string) => {
+    const adjustment = findAdjustment(adjustOf(documentRef.current, node), id);
+    if (adjustment) setRenameAdjust({ node, id, draft: adjustment.label ?? "" });
+  };
+
+  /** Sets whether a Sharpen adjustment sharpens brightness only (the default) or each color. */
+  const setSharpenBrightnessOnly = (node: number, id: string, brightnessOnly: boolean) => {
+    const current = documentRef.current;
+    if (node > current.history.length) return;
+    const adjust = adjustOf(current, node);
+    const adjustment = findAdjustment(adjust, id);
+    if (!adjustment || adjustment.kind !== "sharpen" || !adjustment.colorSharpen === brightnessOnly) return;
+    const { colorSharpen: _color, ...rest } = adjustment;
+    commitAdjust(current, node, replaceAdjustment(adjust, id, brightnessOnly ? rest : { ...rest, colorSharpen: true }));
+  };
+
+  /** Turns Colorize on or off for a Hue/Saturation adjustment of a layer, the original image included. */
+  const setAdjustmentColorize = (node: number, id: string, colorize: boolean) => {
+    const current = documentRef.current;
+    if (node > current.history.length) return;
+    const adjust = adjustOf(current, node);
+    const adjustment = findAdjustment(adjust, id);
+    if (!adjustment || adjustment.kind !== "hueSaturation" || Boolean(adjustment.colorize) === colorize) return;
+    commitAdjust(current, node, replaceAdjustment(adjust, id, setColorize(adjustment, colorize)));
+  };
   /** Shows or hides every layer at once. */
   const setAllLayersVisible = (visible: boolean) => {
     const current = documentRef.current;
@@ -2102,7 +2324,11 @@ export function Editor({
         if (!event.repeat) setSpaceHeld(true);
         return;
       }
-      if (event.ctrlKey && event.key.toLowerCase() === "s") {
+      /** Ctrl+Alt+S, or Photoshop's Ctrl+Shift+Alt+E, adds a snapshot of the visible layers. */
+      if (event.ctrlKey && event.altKey && !typing && (event.code === "KeyS" || (event.shiftKey && event.code === "KeyE"))) {
+        event.preventDefault();
+        if (!event.repeat) void snapshotVisible();
+      } else if (event.ctrlKey && event.key.toLowerCase() === "s") {
         event.preventDefault();
         void onSave(documentRef.current.id, event.shiftKey);
       }
@@ -2165,6 +2391,11 @@ export function Editor({
       if (isMaskTool && targetPart && event.key.toLowerCase() === "l") {
         setGradient(null);
         setLasso((on) => !on);
+      }
+      /** B goes back to the brush from the polygon lasso or a gradient. */
+      if (isMaskTool && event.key.toLowerCase() === "b") {
+        setLasso(false);
+        setGradient(null);
       }
       if (lasso && event.key === "Enter" && lassoPointsRef.current.length >= 3) {
         event.preventDefault();
@@ -2566,28 +2797,32 @@ export function Editor({
       redrawPrepared(drag.prep);
       return;
     }
+    /** The gradient tool stays on for the next drag, until another tool is picked. */
     drawMaskGradient(mask, drag.base, drag.kind, drag.from, drag.to, drag.opacity, hides);
     redrawPrepared(drag.prep);
-    setGradient(null);
     void canvasToDataUrl(mask).then((url) => recordMaskChange({ owner: drag.prep.owner, part: drag.prep.part, before: drag.before, after: { mask: url, hides } }, mask));
   };
   const cancelGradientDrag = () => finishGradientDrag(false);
 
   /** Moves the line from the last lasso corner to the pointer. */
   const moveLassoRubber = () => {
-    const line = lassoRubberRef.current;
+    const group = lassoRubberRef.current;
     const last = lassoPointsRef.current.at(-1);
     const hover = lassoHoverRef.current;
-    if (!line) return;
-    if (!last || !hover) {
-      line.style.display = "none";
+    if (!group) return;
+    const hoverCorner = lassoHoverCornerRef.current;
+    if (!last || !hover || lassoDragRef.current?.moved || (hoverCorner !== null && hoverCorner > 0)) {
+      group.style.display = "none";
       return;
     }
-    line.style.display = "";
-    line.setAttribute("x1", String(last.x * cssScale));
-    line.setAttribute("y1", String(last.y * cssScale));
-    line.setAttribute("x2", String(hover.x * cssScale));
-    line.setAttribute("y2", String(hover.y * cssScale));
+    group.style.display = "";
+    /** Two lines: a solid base and the marching ants on top. */
+    for (const line of Array.from(group.children)) {
+      line.setAttribute("x1", String(last.x * cssScale));
+      line.setAttribute("y1", String(last.y * cssScale));
+      line.setAttribute("x2", String(hover.x * cssScale));
+      line.setAttribute("y2", String(hover.y * cssScale));
+    }
   };
   useLayoutEffect(moveLassoRubber);
 
@@ -2650,6 +2885,36 @@ export function Editor({
       return;
     }
     setLassoPoints([...points, point]);
+    lassoFreshRef.current = points.length;
+  };
+
+  /** The placed corner under `point` that the pointer can grab, or null. The corner just placed is left out unless `withFresh`. */
+  const lassoCornerAt = (point: Point, withFresh = false) => {
+    let found: number | null = null;
+    let best = LASSO_GRAB_REACH;
+    lassoPointsRef.current.forEach((corner, index) => {
+      if (index === lassoFreshRef.current && !withFresh) return;
+      const distance = Math.hypot(point.x - corner.x, point.y - corner.y) * cssScale;
+      if (distance <= best) {
+        best = distance;
+        found = index;
+      }
+    });
+    return found;
+  };
+
+  /**
+   * The pointer moves over the lasso without a press: it shows the hand over a
+   * corner that can be moved. Over any corner but the first, the line to the
+   * pointer hides, so the corner is easy to see.
+   */
+  const hoverLasso = (point: Point) => {
+    const corner = lassoCornerAt(point);
+    lassoHoverRef.current = point;
+    lassoHoverCornerRef.current = corner;
+    moveLassoRubber();
+    setLassoCursor(corner === null ? null : "grab");
+    setLassoOverCorner(lassoCornerAt(point, true) !== null);
   };
 
   const onPointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
@@ -2670,7 +2935,25 @@ export function Editor({
       const node = doc.historyIndex;
       if (!prep || prep.part !== targetPart || prep.owner !== (node > 0 ? doc.history[node - 1].id : BASE_OWNER)) return;
       if (lasso) {
-        lassoClick(pointFromEvent(event), event.altKey);
+        const point = pointFromEvent(event);
+        /** Ctrl+click on a corner deletes it; the next corner takes its place in the shape. */
+        if (event.ctrlKey) {
+          const doomed = lassoCornerAt(point, true);
+          if (doomed !== null) {
+            setLassoPoints(lassoPointsRef.current.filter((_, index) => index !== doomed));
+            lassoFreshRef.current = null;
+            lassoClickRef.current = null;
+            hoverLasso(point);
+          }
+          return;
+        }
+        const corner = lassoCornerAt(point);
+        if (corner !== null) {
+          lassoDragRef.current = { index: corner, point, startX: event.clientX, startY: event.clientY, moved: false, reverse: event.altKey };
+          event.currentTarget.setPointerCapture(event.pointerId);
+          return;
+        }
+        lassoClick(point, event.altKey);
         return;
       }
       const before = partMaskState(doc, node, targetPart);
@@ -2740,8 +3023,25 @@ export function Editor({
         return;
       }
       if (lasso) {
-        lassoHoverRef.current = point;
-        moveLassoRubber();
+        const lassoDrag = lassoDragRef.current;
+        if (lassoDrag) {
+          const points = lassoPointsRef.current;
+          if (lassoDrag.index >= points.length) {
+            lassoDragRef.current = null;
+          } else {
+            /** A few pixels of movement turn the press into a drag of the corner. */
+            if (!lassoDrag.moved && Math.hypot(event.clientX - lassoDrag.startX, event.clientY - lassoDrag.startY) < 3) return;
+            lassoDrag.moved = true;
+            setLassoCursor("grabbing");
+            moveLassoRubber();
+            setLassoPoints(points.map((corner, index) => index === lassoDrag.index ? point : corner));
+            return;
+          }
+        }
+        const fresh = lassoFreshRef.current;
+        const freshCorner = fresh === null ? undefined : lassoPointsRef.current[fresh];
+        if (freshCorner && Math.hypot(point.x - freshCorner.x, point.y - freshCorner.y) * cssScale > LASSO_GRAB_REACH) lassoFreshRef.current = null;
+        hoverLasso(point);
       }
       moveBrushCursor(gradient || lasso ? null : point);
       const stroke = maskStrokeRef.current;
@@ -2753,6 +3053,19 @@ export function Editor({
   };
 
   const onPointerUp = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const lassoDrag = lassoDragRef.current;
+    if (lassoDrag) {
+      if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
+      lassoDragRef.current = null;
+      /** A press without movement is a click; after a drag, drawing goes on from the last corner. */
+      if (!lassoDrag.moved) {
+        if (event.type === "pointerup") lassoClick(lassoDrag.point, lassoDrag.reverse);
+      } else {
+        lassoClickRef.current = null;
+      }
+      hoverLasso(pointFromEvent(event));
+      return;
+    }
     if (gradientRef.current) {
       if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
       finishGradientDrag(event.type === "pointerup");
@@ -2828,6 +3141,8 @@ export function Editor({
       else undoMask();
     } else if (command.name === "redo") {
       if (!clickSelectRef.current) redoMask();
+    } else if (command.name === "snapshot") {
+      void snapshotVisible();
     } else if (command.name === "export-image" || command.name === "export-video") {
       if (exporting) return;
       /** A new export first removes the message of the one before. */
@@ -2842,17 +3157,21 @@ export function Editor({
   }, [command]);
 
   /** Stable handlers for the memoized layers panel; each calls the latest version of its function. */
-  const panelActionsRef = useRef({ selectLayer, toggleLayerVisible, setAllLayersVisible, requestDelete, renameLayer, moveLayerTo, partAction, setAdjustmentValue });
-  panelActionsRef.current = { selectLayer, toggleLayerVisible, setAllLayersVisible, requestDelete, renameLayer, moveLayerTo, partAction, setAdjustmentValue };
+  const panelActionsRef = useRef({ selectLayer, toggleLayerVisible, setAllLayersVisible, snapshotVisible, requestDelete, renameLayer, moveLayerTo, partAction, setAdjustmentValue, setAdjustmentColorize, setAdjustmentLabel, requestAdjustRename, setSharpenBrightnessOnly });
+  panelActionsRef.current = { selectLayer, toggleLayerVisible, setAllLayersVisible, snapshotVisible, requestDelete, renameLayer, moveLayerTo, partAction, setAdjustmentValue, setAdjustmentColorize, setAdjustmentLabel, requestAdjustRename, setSharpenBrightnessOnly };
   const panelHandlers = useMemo(() => ({
     onSelect: (node: number) => panelActionsRef.current.selectLayer(node),
     onToggleVisible: (node: number, solo: boolean) => panelActionsRef.current.toggleLayerVisible(node, solo),
     onShowAll: (visible: boolean) => panelActionsRef.current.setAllLayersVisible(visible),
+    onSnapshot: () => void panelActionsRef.current.snapshotVisible(),
     onDelete: (node: number) => panelActionsRef.current.requestDelete(node),
     onRename: (node: number, name: string) => panelActionsRef.current.renameLayer(node, name),
     onMove: (from: number, to: number, above: boolean) => panelActionsRef.current.moveLayerTo(from, to, above),
     onPartAction: (node: number, part: LayerPart, action: PartAction) => void panelActionsRef.current.partAction(node, part, action),
     onAdjustValue: (node: number, id: string, field: AdjustmentField, value: number) => panelActionsRef.current.setAdjustmentValue(node, id, field, value),
+    onAdjustColorize: (node: number, id: string, colorize: boolean) => panelActionsRef.current.setAdjustmentColorize(node, id, colorize),
+    onSharpenBrightnessOnly: (node: number, id: string, brightnessOnly: boolean) => panelActionsRef.current.setSharpenBrightnessOnly(node, id, brightnessOnly),
+    onAdjustRename: (node: number, id: string) => panelActionsRef.current.requestAdjustRename(node, id),
     onMaskDeselect: () => setTool("whole")
   }), []);
 
@@ -2873,7 +3192,7 @@ export function Editor({
     ? `${selectedLayerName} - ${maskTargetAdjustment ? `${ADJUSTMENT_LABELS[maskTargetAdjustment.kind]} Mask` : "Layer Mask"}`
     : selectedLayerName;
   /** Regenerate replaces the selected layer; layers not made by AI cannot be regenerated. */
-  const regenStep = lastStep && lastStep.model !== IMPORTED_MODEL && lastStep.model !== ORIGINAL_COPY_MODEL ? lastStep : undefined;
+  const regenStep = lastStep && lastStep.model !== IMPORTED_MODEL && lastStep.model !== ORIGINAL_COPY_MODEL && lastStep.model !== SNAPSHOT_MODEL ? lastStep : undefined;
   const regenName = lastStep ? lastStep.name || `Layer ${imageDocument.historyIndex}` : "the original image";
   const regenerate = () => {
     if (!regenStep || !prompt.trim()) return;
@@ -2894,6 +3213,20 @@ export function Editor({
   const confirmRegenStep = confirmRegen ? imageDocument.history.find((item) => item.id === confirmRegen.stepId) : undefined;
   /** GPT Image models offered for edits: the 2.5 models, plus the current one if it is older. */
   const editModels = IMAGE_MODELS.filter((model) => model.id.startsWith("gpt-image-2.5") || model.id === settings.wholeModel);
+
+  /** The Mask tool in use: the brush, the polygon lasso, or a gradient. */
+  const maskToolKind: "brush" | "lasso" | "linear" | "radial" = lasso ? "lasso" : gradient ?? "brush";
+  const selectMaskTool = (kind: typeof maskToolKind) => {
+    setLasso(kind === "lasso");
+    setGradient(kind === "linear" || kind === "radial" ? kind : null);
+  };
+  /** The four Mask tools, in toolbar order. */
+  const maskTools = [
+    { kind: "brush", label: "Brush", icon: <PaintBrush size={16} />, help: "Brush: paint the mask (B)" },
+    { kind: "lasso", label: "Polygon lasso", icon: <Lasso size={16} />, help: "Polygon lasso: click points on the image, then close the shape to fill it (L)" },
+    { kind: "linear", label: "Linear gradient", icon: <Gradient size={16} />, help: "Linear gradient: drag on the image" },
+    { kind: "radial", label: "Radial gradient", icon: <CircleDashed size={16} />, help: "Radial gradient: drag on the image from the center out" }
+  ] as const;
 
   /** Brush size controls, shown in the toolbar while the mask brush is on. */
   const brushSizeControls = (
@@ -2948,21 +3281,27 @@ export function Editor({
         <div className="toolbar-side" />
         {/* The mask brush size stays centered; the sides take the rest of the width. */}
         <div className="toolbar-center">
-          {isMaskTool && !gradient && (
-            <div className="tool-section" role="group" aria-label={lasso ? "Polygon lasso" : "Mask brush"}>
-              <span className="tool-section-label">{lasso ? "Lasso" : "Brush"}</span>
-              <div className="tool-group brush-size-group">
-                {!lasso && brushSizeControls}
+          {isMaskTool && (
+            <div className="tool-section" role="group" aria-label="Mask tools">
+              {/* The tool picker, then the settings of the tool in use. */}
+              <div className="tool-group icon-buttons mask-tool-picker" role="radiogroup" aria-label="Mask tool">
+                {maskTools.map(({ kind, label, icon, help }) => (
+                  <button
+                    key={kind}
+                    role="radio"
+                    aria-checked={maskToolKind === kind}
+                    aria-label={label}
+                    className={maskToolKind === kind ? "active" : ""}
+                    onClick={() => selectMaskTool(kind)}
+                    data-help={help}
+                  >
+                    {icon}
+                  </button>
+                ))}
+              </div>
+              <div className={`tool-group brush-size-group ${maskToolKind === "brush" ? "" : "opacity-only"}`}>
+                {maskToolKind === "brush" && brushSizeControls}
                 {brushOpacityControl}
-                <button
-                  className={`brush-lasso ${lasso ? "active" : ""}`}
-                  onClick={() => setLasso((on) => !on)}
-                  aria-pressed={lasso}
-                  aria-label="Polygon lasso"
-                  data-help={lasso ? "Polygon lasso is on: click corners, then close the shape to fill it. Click to paint with the brush again (L)" : "Polygon lasso: click corners on the image, then close the shape to fill it (L)"}
-                >
-                  <Lasso size={15} />
-                </button>
                 <button className="brush-close" onClick={() => setTool("whole")} aria-label="Stop painting the mask" data-help="Stop painting the mask (Esc)">
                   <X size={13} weight="bold" />
                 </button>
@@ -2978,7 +3317,7 @@ export function Editor({
             <span className="crop-size">Drag on the image for the {gradient} gradient. Esc cancels.</span>
           )}
           {isMaskTool && lasso && (
-            <span className="crop-size">Click to add corners. Click the first corner, double-click, or press Enter to fill. Backspace removes a corner; Esc cancels.</span>
+            <span className="crop-size">Click to add points; drag a point to move it, Ctrl+click to delete it. Click the first point, double-click, or press Enter to fill. Esc cancels.</span>
           )}
           <div className="editor-toolbar-spacer" />
         </div>
@@ -3009,26 +3348,67 @@ export function Editor({
               )}
               <span className="image-size">{width} × {height}</span>
               {isMaskTool && targetPart && (
-                <ul className="mask-shortcuts" aria-label="Mask shortcuts">
-                  <li className={brushHides ? "hiding" : "showing"}>
-                    Painting <strong>{brushHides ? "HIDES" : "SHOWS"}</strong> the current {targetPart === "mask" ? "layer" : "adjustment"} (<kbd>x</kbd> to swap)
-                  </li>
-                  <li className={maskOverlay ? "red-on" : ""}>Red mask: <strong>{maskOverlay ? "ON" : "OFF"}</strong> (<kbd>r</kbd> to toggle)</li>
-                  <li className={brushPrecise ? "precise-on" : ""}>Brush: <strong>{brushPrecise ? "PRECISE" : "SOFT"}</strong> (<kbd>p</kbd> to toggle)</li>
-                  <li className={lasso ? "precise-on" : ""}>Polygon lasso: <strong>{lasso ? "ON" : "OFF"}</strong> (<kbd>l</kbd> to toggle)</li>
-                  <li><kbd>[</kbd> <kbd>]</kbd> - change brush size</li>
-                  <li><kbd>1-9</kbd> - brush opacity (<kbd>0</kbd> for 100%)</li>
-                  <li><kbd>esc</kbd> - exit mask</li>
-                </ul>
+                <div className="mask-shortcuts cards" role="group" aria-label="Mask shortcuts">
+                  <section className="shortcut-card">
+                    <div className="shortcut-card-head">
+                      Mask:
+                      <span className={`shortcut-card-status ${brushHides ? "hiding" : "showing"}`}>Painting <strong>{brushHides ? "HIDES" : "SHOWS"}</strong> current {targetPart === "mask" ? "layer" : "adjustment"}</span>                    </div>
+                    <ul>
+                      <li><kbd>x</kbd> Paint to {brushHides ? "show" : "hide"} current {targetPart === "mask" ? "layer" : "adjustment"}</li>
+                      <li><kbd>esc</kbd> Exit mask</li>
+                      <li className={maskOverlay ? "red-on" : ""}>Red mask: <strong>{maskOverlay ? "ON" : "OFF"}</strong> <kbd>r</kbd> {maskOverlay ? "Off" : "On"}</li>
+                    </ul>
+                  </section>
+                  {/* The tool card: the brush or the polygon lasso, its keys, and the key to the other tool. */}
+                  <section className="shortcut-card">
+                    <div className="shortcut-card-head">
+                      Tool:
+                      <span className={`shortcut-card-status ${maskToolKind !== "brush" || brushPrecise ? "precise-on" : ""}`}><strong>{maskToolKind === "lasso" ? "LASSO" : maskToolKind === "linear" ? "LINEAR GRADIENT" : maskToolKind === "radial" ? "RADIAL GRADIENT" : `${brushPrecise ? "PRECISE" : "SOFT"} BRUSH`}</strong></span>
+                    </div>
+                    {gradient ? (
+                      <ul>
+                        <li><kbd>drag</kbd> draw the gradient</li>
+                        <li><kbd>1-9</kbd> opacity, <kbd>0</kbd> for 100%</li>
+                        <li><kbd>b</kbd> Switch to Brush tool</li>
+                      </ul>
+                    ) : lasso ? (
+                      <ul>
+                        <li><kbd>drag</kbd> move a point</li>
+                        <li><kbd>CTRL</kbd> + <kbd>click</kbd> delete a point</li>
+                        <li><kbd>1-9</kbd> opacity, <kbd>0</kbd> for 100%</li>
+                        <li><kbd>b</kbd> Switch to Brush tool</li>
+                      </ul>
+                    ) : (
+                      <ul>
+                        <li><kbd>p</kbd> {brushPrecise ? "Soft" : "Precise"}</li>
+                        <li><kbd>[</kbd> <kbd>]</kbd> size</li>
+                        <li><kbd>1-9</kbd> opacity, <kbd>0</kbd> for 100%</li>
+                        <li><kbd>l</kbd> Switch to Lasso tool</li>
+                      </ul>
+                    )}
+                  </section>
+                </div>
               )}
               {!(isMaskTool && targetPart) && !resize && !clickSelect && (
-                <ul className="mask-shortcuts" aria-label="Canvas shortcuts">
-                  <li><kbd>m</kbd> - layer mask (add/edit)</li>
-                  <li><kbd>space</kbd> - pan</li>
-                  <li><kbd>CTRL</kbd> + <kbd>SPACE</kbd> - zoom in</li>
-                  <li><kbd>CTRL</kbd> + <kbd>ALT</kbd> + <kbd>SPACE</kbd> - zoom out</li>
-                  <li><kbd>click</kbd> - select a layer</li>
-                </ul>
+                <div className="mask-shortcuts cards" role="group" aria-label="Canvas shortcuts">
+                  <section className="shortcut-card">
+                    <div className="shortcut-card-head">Viewport</div>
+                    <ul>
+                      <li><kbd>space</kbd> pan</li>
+                      <li><kbd>CTRL</kbd> + <kbd>mouse</kbd> zoom</li>
+                    </ul>
+                  </section>
+                  <section className="shortcut-card">
+                    <div className="shortcut-card-head">Layer</div>
+                    <ul>
+                      <li><kbd>click</kbd> select a layer</li>
+                      <li><kbd>m</kbd> Mask (add/edit)</li>
+                      <li><kbd>CTRL</kbd> + <kbd>T</kbd> transform</li>
+                      <li><kbd>CTRL</kbd> + <kbd>J</kbd> duplicate</li>
+                      <li><kbd>del</kbd> delete</li>
+                    </ul>
+                  </section>
+                </div>
               )}
               <canvas ref={layerMaskCanvasRef} className={`mask-preview ${isMaskTool ? "" : "hidden"}`} aria-hidden="true" />
               {/* The lasso shape so far: its edges, a line to the pointer, and its corners; the first corner is larger, as the place to close it. */}
@@ -3036,9 +3416,12 @@ export function Editor({
                 <svg className="lasso-shape" width={width * cssScale} height={height * cssScale} aria-hidden="true">
                   <polyline className="lasso-edge-shadow" points={lassoPoints.map((point) => `${point.x * cssScale},${point.y * cssScale}`).join(" ")} />
                   <polyline className="lasso-edge" points={lassoPoints.map((point) => `${point.x * cssScale},${point.y * cssScale}`).join(" ")} />
-                  <line ref={lassoRubberRef} className="lasso-rubber" />
+                  <g ref={lassoRubberRef}>
+                    <line className="lasso-edge-shadow" />
+                    <line className="lasso-edge" />
+                  </g>
                   {lassoPoints.map((point, index) => (
-                    <circle key={index} className={index === 0 ? "lasso-start" : "lasso-corner"} cx={point.x * cssScale} cy={point.y * cssScale} r={index === 0 ? 5 : 3} />
+                    <circle key={index} className={index === 0 ? "lasso-start" : "lasso-corner"} cx={point.x * cssScale} cy={point.y * cssScale} r={index === 0 ? 4 : 3} />
                   ))}
                 </svg>
               )}
@@ -3149,7 +3532,7 @@ export function Editor({
               )}
               <div
                 className="interaction-layer"
-                style={{ cursor: clickSelect ? "crosshair" : brushLike ? "none" : isMaskTool ? "crosshair" : "default" }}
+                style={{ cursor: clickSelect ? "crosshair" : brushLike ? "none" : isMaskTool ? (lasso && lassoPoints.length && (zoomKeys && lassoOverCorner && !lassoDragRef.current ? TRASH_CURSOR : lassoCursor)) || "crosshair" : "default" }}
                 onPointerDown={onPointerDown}
                 onPointerMove={onPointerMove}
                 onPointerUp={onPointerUp}
@@ -3301,7 +3684,51 @@ export function Editor({
             </button>
           </div>
         </div>
-      </div>      {confirmDelete !== null && imageDocument.history[confirmDelete - 1] && (
+      </div>      {renameAdjust && (() => {
+        const adjustment = findAdjustment(adjustOf(imageDocument, renameAdjust.node), renameAdjust.id);
+        if (!adjustment) return null;
+        const save = () => {
+          setAdjustmentLabel(renameAdjust.node, renameAdjust.id, renameAdjust.draft);
+          setRenameAdjust(null);
+        };
+        return (
+          <div className="confirm-overlay" role="presentation" onPointerDown={() => setRenameAdjust(null)}>
+            <div
+              className="confirm-dialog"
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="rename-adjustment-title"
+              onPointerDown={(event) => event.stopPropagation()}
+              onKeyDown={(event) => { if (event.key === "Escape") setRenameAdjust(null); }}
+            >
+              <div className="confirm-icon"><PencilSimple size={22} weight="bold" /></div>
+              <div className="confirm-copy">
+                <h2 id="rename-adjustment-title">Rename {ADJUSTMENT_LABELS[adjustment.kind]}</h2>
+                <p>The chip shows the label in place of the numbers. Leave it empty to show the numbers again.</p>
+              </div>
+              <label className="form-row rename-row">
+                <span className="form-row-label">Label</span>
+                <input
+                  className="settings-input"
+                  value={renameAdjust.draft}
+                  placeholder={ADJUSTMENT_LABELS[adjustment.kind]}
+                  maxLength={40}
+                  autoFocus
+                  spellCheck={false}
+                  onFocus={(event) => event.currentTarget.select()}
+                  onChange={(event) => setRenameAdjust({ ...renameAdjust, draft: event.target.value })}
+                  onKeyDown={(event) => { if (event.key === "Enter") save(); }}
+                />
+              </label>
+              <div className="confirm-actions">
+                <button className="button secondary" onClick={() => setRenameAdjust(null)}>Cancel</button>
+                <button className="button primary" onClick={save}>Rename</button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+      {confirmDelete !== null && imageDocument.history[confirmDelete - 1] && (
         <div className="confirm-overlay" role="presentation" onPointerDown={() => setConfirmDelete(null)}>
           <div
             className="confirm-dialog"
@@ -3313,7 +3740,7 @@ export function Editor({
           >
             <div className="confirm-icon"><WarningCircle size={22} weight="fill" /></div>
             <div className="confirm-copy">
-              <h2 id="discard-step-title">Delete layer {confirmDelete + 1}?</h2>
+              <h2 id="discard-step-title">Delete {imageDocument.history[confirmDelete - 1].name || `Layer ${confirmDelete}`}?</h2>
               <p>“{imageDocument.history[confirmDelete - 1].name || imageDocument.history[confirmDelete - 1].prompt}” is removed from the image and from the layers list. You can undo this from the message that follows.</p>
             </div>
             <div className="confirm-actions">

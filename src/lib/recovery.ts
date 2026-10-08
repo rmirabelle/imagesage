@@ -16,16 +16,21 @@ import type { ImageDocument } from "../editor/imageDocument";
 
 /** Tile keys already in each document's tile store. */
 const storedKeys = new Map<string, Set<string>>();
-/** Mask versions by step id, so a changed mask gets a new key. */
-const maskVersions = new Map<string, { src: string; version: number }>();
+/**
+ * Tile versions by name (a layer image, a mask, or the base), so a tile whose
+ * content changed gets a new key and is sent again. A layer image changes too,
+ * for example after Transform; a key by step id alone kept the old image.
+ */
+const tileVersions = new Map<string, { src: string; version: number }>();
 
-const maskKey = (stepId: string, src: string) => {
-  const known = maskVersions.get(stepId);
-  if (known?.src === src) return `${stepId}-mask-${known.version}`;
+const tileKey = (name: string, src: string) => {
+  const known = tileVersions.get(name);
+  if (known?.src === src) return `${name}-${known.version}`;
   const version = (known?.version ?? 0) + 1;
-  maskVersions.set(stepId, { src, version });
-  return `${stepId}-mask-${version}`;
+  tileVersions.set(name, { src, version });
+  return `${name}-${version}`;
 };
+const layerKey = (stepId: string, src: string) => tileKey(`${stepId}-layer`, src);
 
 /** Saves for one document run one after another, so a save never removes tiles another save still needs. */
 const queues = new Map<string, Promise<void>>();
@@ -58,18 +63,18 @@ async function storeTiles(document: ImageDocument, recovery: boolean) {
     { base, baseAdjust: document.baseAdjust, ...(recovery ? { recovery: { name: document.name, path: document.path } } : {}) }
   );
   /**
-   * Each manifest tile path maps to a stable key: the base, a layer by step id,
-   * or a mask (a layer mask or an adjustment mask) by its owner and version.
+   * Each manifest tile path maps to a key by its owner and the version of its
+   * content: the base, a layer image, or a mask (a layer mask or an adjustment mask).
    */
   const keyed = tiles.map((tile) => {
     const baseMatch = /^history\/base-adjust-(\d+)-mask\.png$/.exec(tile.path);
-    if (baseMatch) return { ...tile, key: maskKey(`${document.id}-base-${document.baseAdjust?.[Number(baseMatch[1]) - 1]?.id}`, tile.dataUrl) };
+    if (baseMatch) return { ...tile, key: tileKey(`${document.id}-base-${document.baseAdjust?.[Number(baseMatch[1]) - 1]?.id}-mask`, tile.dataUrl) };
     const match = /^history\/(\d{4})-(layer|mask|adjust-(\d+)-mask)\.png$/.exec(tile.path);
-    if (!match) return { ...tile, key: "base" };
+    if (!match) return { ...tile, key: tileKey(`${document.id}-base`, tile.dataUrl) };
     const step = history[Number(match[1]) - 1];
-    if (match[2] === "layer") return { ...tile, key: `${step.id}-layer` };
-    if (match[2] === "mask") return { ...tile, key: maskKey(step.id, tile.dataUrl) };
-    return { ...tile, key: maskKey(`${step.id}-${step.adjust?.[Number(match[3]) - 1]?.id}`, tile.dataUrl) };
+    if (match[2] === "layer") return { ...tile, key: layerKey(step.id, tile.dataUrl) };
+    if (match[2] === "mask") return { ...tile, key: tileKey(`${step.id}-mask`, tile.dataUrl) };
+    return { ...tile, key: tileKey(`${step.id}-${step.adjust?.[Number(match[3]) - 1]?.id}-mask`, tile.dataUrl) };
   });
   const stored = storedKeys.get(document.id) ?? new Set<string>();
   storedKeys.set(document.id, stored);
@@ -91,11 +96,11 @@ async function writeRecovery(document: ImageDocument) {
   await invoke("recovery_save", {
     id: document.id,
     manifestJson: JSON.stringify(manifest),
-    imageKey: top ? `${top.id}-layer` : "base",
+    imageKey: top?.layer ? layerKey(top.id, top.layer) : tileKey(`${document.id}-base`, base),
     tiles: keyed.map(({ path, key }) => ({ path, key }))
   });
   /** The app removes stored tiles the document no longer uses. */
-  storedKeys.set(document.id, new Set(["base", ...keyed.map((tile) => tile.key)]));
+  storedKeys.set(document.id, new Set(keyed.map((tile) => tile.key)));
 }
 
 /**

@@ -22,6 +22,7 @@ const SECTIONS: { title: string; shortcuts: Shortcut[] }[] = [
     shortcuts: [
       { keys: [["Ctrl", "T"]], action: "Transform the selected layer" },
       { keys: [["Ctrl", "J"]], action: "Duplicate the selected layer" },
+      { keys: [["Ctrl", "Alt", "S"], ["Ctrl", "Shift", "Alt", "E"]], action: "Snapshot: a new top layer of all visible layers combined" },
       { keys: [["Del"]], action: "Delete the selected layer (asks first)" },
       { keys: [["Ctrl", "Click"]], action: "On a layer's eye: show only that layer, or show all again" }
     ]
@@ -37,7 +38,12 @@ const SECTIONS: { title: string; shortcuts: Shortcut[] }[] = [
       { keys: [["Alt"]], action: "Hold to paint the other of Show and Hide" },
       { keys: [["R"]], action: "Show or hide the red mask view" },
       { keys: [["P"]], action: "Switch the mask brush between soft and precise" },
-      { keys: [["L"]], action: "Turn the polygon lasso on or off; Enter fills the shape, Backspace removes a corner" },
+      { keys: [["L"]], action: "Turn the polygon lasso on or off" },
+      { keys: [["B"]], action: "Go back to the brush from the polygon lasso or a gradient" },
+      { keys: [["Drag"]], action: "Polygon lasso: move a placed point" },
+      { keys: [["Ctrl", "Click"]], action: "Polygon lasso: delete a placed point" },
+      { keys: [["Backspace"]], action: "Polygon lasso: delete the last point" },
+      { keys: [["Enter"]], action: "Polygon lasso: fill the shape" },
       { keys: [["Ctrl", "I"]], action: "Invert the mask" },
       { keys: [["Ctrl", "Z"]], action: "Undo a mask change" },
       { keys: [["Ctrl", "Y"], ["Ctrl", "R"]], action: "Redo a mask change" },

@@ -3,7 +3,7 @@ import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { save } from "@tauri-apps/plugin-dialog";
-import { ArrowClockwise, ArrowCounterClockwise, CheckCircle, DownloadSimple, FilmStrip, FloppyDisk, FolderOpen, GearSix, ImageSquare, Info, Keyboard, MagicWand, SpinnerGap, Warning, WarningCircle, X } from "@phosphor-icons/react";
+import { ArrowClockwise, ArrowCounterClockwise, Camera, CheckCircle, DownloadSimple, FilmStrip, FloppyDisk, FolderOpen, GearSix, ImageSquare, Info, Keyboard, MagicWand, SpinnerGap, Warning, WarningCircle, X } from "@phosphor-icons/react";
 import { AboutDialog } from "./components/AboutDialog";
 import { ShortcutsDialog } from "./components/ShortcutsDialog";
 import { ConnectDialog, type SettingsSection } from "./components/ConnectDialog";
@@ -716,7 +716,9 @@ export default function App() {
       label: "Edit",
       items: [
         { label: "Undo", icon: <ArrowCounterClockwise size={15} />, shortcut: "Ctrl+Z", disabled: !activeDocument, run: () => sendCommand("undo") },
-        { label: "Redo", icon: <ArrowClockwise size={15} />, shortcut: "Ctrl+Y", disabled: !activeDocument, run: () => sendCommand("redo") }
+        { label: "Redo", icon: <ArrowClockwise size={15} />, shortcut: "Ctrl+Y", disabled: !activeDocument, run: () => sendCommand("redo") },
+        "separator",
+        { label: "Snapshot Visible Layers", icon: <Camera size={15} />, shortcut: "Ctrl+Alt+S", disabled: !activeDocument, run: () => sendCommand("snapshot") }
       ]
     },
     {
@@ -757,6 +759,8 @@ export default function App() {
             const dirty = isDocumentDirty(document);
             const label = document.path ? document.name.replace(/\.imagesage$/i, "") : document.origin.kind === "imported" ? document.origin.fileName : "New Image";
             const spent = documentSpend(document);
+            /** On the active tab of a saved image, a click on the name opens its folder in File Explorer. */
+            const revealPath = active ? document.path : undefined;
             return (
               <div className={`doc-tab ${active ? "active" : ""}`} key={document.id}>
                 <button
@@ -767,12 +771,18 @@ export default function App() {
                   aria-selected={active}
                   aria-controls={`image-panel-${document.id}`}
                   aria-label={dirty ? `${label}, unsaved changes` : label}
-                  data-help={document.path ?? label}
-                  onClick={() => setActiveDocumentId(document.id)}
+                  data-help={revealPath ? `${revealPath} (click the name to open its folder)` : document.path ?? label}
+                  onClick={(event) => {
+                    if (revealPath && (event.target as HTMLElement).closest(".doc-tab-name")) {
+                      void invoke("reveal_file", { path: revealPath }).catch((error) => showNotice({ tone: "error", message: String(error) }));
+                      return;
+                    }
+                    setActiveDocumentId(document.id);
+                  }}
                 >
                   {document.busy && <SpinnerGap className="spin doc-tab-busy" size={13} />}
                   <span>
-                    <strong className="doc-tab-name">{label}</strong>
+                    <strong className={`doc-tab-name ${revealPath ? "revealable" : ""}`}>{label}</strong>
                     {dirty && <i className="doc-tab-dirty" aria-hidden="true">*</i>}
                     {spent > 0 && <span className="doc-tab-spend"> ({formatUsd(spent)})</span>}
                   </span>
@@ -796,23 +806,26 @@ export default function App() {
       <div className="app-content">
         {documents.length === 0 && (
           <section className="empty-state">
-            <div className="empty-glow" />
-            <div className="empty-icon"><img src="/app-icon.png" alt="" /></div>
-            <h1>Prompt. Refine. Repeat.</h1>
-            <p className="empty-copy">Open or generate images in layers. Edit using professional-grade tools. Export images and slideshows.</p>
-            <div className="empty-actions">
-              <button className="button primary large" onClick={() => setNewImageOpen(true)}>
-                <MagicWand size={19} weight="bold" /> New from prompt
-              </button>
-              <button className="button secondary large" onClick={openFile}>
-                <FolderOpen size={19} weight="bold" /> Open image
-              </button>
+            <div className="empty-above">
+              <div className="empty-icon"><div className="empty-glow" /><img src="/app-icon.png" alt="" /></div>
             </div>
-            {!openaiReady && isTauri() && (
-              <button className="empty-connect" onClick={openConnect}>
-                Add your OpenAI API key to start
-              </button>
-            )}
+            <h1>Prompt. Refine. Repeat.</h1>
+            <div className="empty-below">
+              <p className="empty-copy">Open or generate images in layers. Edit using professional-grade tools. Export images and slideshows.</p>
+              <div className="empty-actions">
+                <button className="button primary large" onClick={() => setNewImageOpen(true)}>
+                  <MagicWand size={19} weight="bold" /> New from prompt
+                </button>
+                <button className="button secondary large" onClick={openFile}>
+                  <FolderOpen size={19} weight="bold" /> Open image
+                </button>
+              </div>
+              {!openaiReady && isTauri() && (
+                <button className="empty-connect" onClick={openConnect}>
+                  Add your OpenAI API key to start
+                </button>
+              )}
+            </div>
           </section>
         )}
         {documents.map((document) => (

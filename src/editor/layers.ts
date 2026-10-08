@@ -1,4 +1,6 @@
+import { colorizeFilterUrl } from "./colorize";
 import { contrastFilterUrl, type ContrastParams } from "./contrast";
+import { sharpenFilterUrl } from "./sharpen";
 import type { Adjustment, AdjustmentKind, LayerAdjust } from "./types";
 
 /**
@@ -24,17 +26,19 @@ export function moveLayer<T>(history: T[], from: number, to: number, above: bool
 export const adjustList = (adjust: LayerAdjust | undefined): LayerAdjust => Array.isArray(adjust) ? adjust : [];
 
 /** The name of each kind of adjustment, for chips and menus. */
-export const ADJUSTMENT_LABELS: Record<AdjustmentKind, string> = { brightness: "Brightness", contrast: "Contrast", hueSaturation: "Hue/Saturation", opacity: "Opacity", blur: "Blur" };
+export const ADJUSTMENT_LABELS: Record<AdjustmentKind, string> = { brightness: "Brightness", contrast: "Contrast", hueSaturation: "Hue/Saturation", opacity: "Opacity", blur: "Blur", sharpen: "Sharpen" };
 
 /** A number an adjustment keeps. */
-export type AdjustmentField = "value" | "hue" | "saturation" | "pivot" | "curve" | "color";
+export type AdjustmentField = "value" | "hue" | "saturation" | "pivot" | "curve" | "color" | "radius";
 
 /**
  * The sliders of each kind of adjustment: which number, its name, its range,
  * its unit, the value that changes nothing (`neutral`), and whether it shows
- * with a sign.
+ * with a sign. With `decimals`, the stored whole number is shown divided by
+ * 10 to that power, such as 12 shown as 1.2. With `log`, the slider moves on
+ * a log scale: fine steps at the low end, large steps at the high end.
  */
-export const ADJUSTMENT_FIELDS: Record<AdjustmentKind, { field: AdjustmentField; label: string; min: number; max: number; unit: string; neutral: number; signed: boolean }[]> = {
+export const ADJUSTMENT_FIELDS: Record<AdjustmentKind, { field: AdjustmentField; label: string; min: number; max: number; unit: string; neutral: number; signed: boolean; decimals?: number; log?: boolean }[]> = {
   brightness: [{ field: "value", label: "Brightness", min: -100, max: 100, unit: "", neutral: 0, signed: true }],
   /** Only Amount changes the image by itself; the other three shape how it does. */
   contrast: [
@@ -48,12 +52,38 @@ export const ADJUSTMENT_FIELDS: Record<AdjustmentKind, { field: AdjustmentField;
     { field: "saturation", label: "Saturation", min: -100, max: 100, unit: "", neutral: 0, signed: true }
   ],
   opacity: [{ field: "value", label: "Opacity", min: 0, max: 100, unit: "%", neutral: 100, signed: false }],
-  blur: [{ field: "value", label: "Radius", min: 0, max: 100, unit: " px", neutral: 0, signed: false }]
+  blur: [{ field: "value", label: "Radius", min: 0, max: 100, unit: " px", neutral: 0, signed: false }],
+  /** Only Amount changes the image by itself; Radius sets the size of the edges it works on. */
+  sharpen: [
+    { field: "value", label: "Amount", min: 0, max: 500, unit: "%", neutral: 0, signed: false },
+    { field: "radius", label: "Radius", min: 1, max: 3000, unit: " px", neutral: 10, signed: false, decimals: 1, log: true }
+  ]
 };
+
+/** Slider steps of a log-scale slider, from its minimum to its maximum. */
+export const LOG_SLIDER_STEPS = 1000;
+/** The slider place (0 to `LOG_SLIDER_STEPS`) of a value on a log-scale slider, and back. */
+export const logSliderPosition = (value: number, min: number, max: number) =>
+  Math.round(LOG_SLIDER_STEPS * Math.log(Math.max(min, value) / min) / Math.log(max / min));
+export const logSliderValue = (position: number, min: number, max: number) =>
+  Math.round(min * (max / min) ** (position / LOG_SLIDER_STEPS));
+
+/** A slider number as text: whole, or with its decimals (12 with one decimal is "1.2"). */
+export const formatAdjustNumber = (value: number, decimals = 0) => decimals ? (value / 10 ** decimals).toFixed(decimals) : String(value);
+
+/** Hue/Saturation with Colorize on: one hue for every pixel, at a strength (Photoshop starts at 0° and 25). */
+export const COLORIZE_FIELDS: typeof ADJUSTMENT_FIELDS[AdjustmentKind] = [
+  { field: "hue", label: "Hue", min: 0, max: 360, unit: "°", neutral: 0, signed: false },
+  { field: "saturation", label: "Saturation", min: 0, max: 100, unit: "", neutral: 25, signed: false }
+];
+
+/** The sliders of one adjustment; Colorize changes the ranges of Hue/Saturation. */
+export const adjustmentFields = (adjustment: Pick<Adjustment, "kind" | "colorize">) =>
+  adjustment.kind === "hueSaturation" && adjustment.colorize ? COLORIZE_FIELDS : ADJUSTMENT_FIELDS[adjustment.kind];
 
 /** One number of an adjustment; a number it does not keep is its neutral value, or 0. */
 export const adjustmentNumber = (adjustment: Adjustment, field: AdjustmentField) =>
-  adjustment[field] ?? ADJUSTMENT_FIELDS[adjustment.kind].find((item) => item.field === field)?.neutral ?? 0;
+  adjustment[field] ?? adjustmentFields(adjustment).find((item) => item.field === field)?.neutral ?? 0;
 
 /** The settings of a contrast adjustment, each from 0 to 1 (the amount from -1 to 1). */
 export const contrastParams = (adjustment: Adjustment): ContrastParams => ({
@@ -69,8 +99,17 @@ export const newAdjustment = (kind: AdjustmentKind): Adjustment => resetAdjustme
 /** The adjustment with every number back at the value that changes nothing. */
 export const resetAdjustment = (adjustment: Adjustment): Adjustment => {
   const reset: Adjustment = { ...adjustment, value: 0 };
-  for (const { field, neutral } of ADJUSTMENT_FIELDS[adjustment.kind]) reset[field] = neutral;
+  for (const { field, neutral } of adjustmentFields(adjustment)) reset[field] = neutral;
   return reset;
+};
+
+/**
+ * Hue/Saturation with Colorize turned on or off. Each mode starts from its own
+ * neutral numbers, because the same numbers mean different things in each.
+ */
+export const setColorize = (adjustment: Adjustment, colorize: boolean): Adjustment => {
+  const { colorize: _colorize, ...rest } = adjustment;
+  return resetAdjustment(colorize ? { ...rest, colorize: true } : rest);
 };
 
 /** How opaque an opacity adjustment leaves the layer (0 to 1), or null when it changes nothing (absent, off, other kinds, or 100%). */
@@ -89,6 +128,10 @@ export function adjustmentFilter(adjustment?: Adjustment): string | null {
     const opacity = adjustmentOpacity(adjustment);
     return opacity === null ? null : `opacity(${opacity})`;
   }
+  /** Colorize always changes the image: at saturation 0 it makes the layer gray. */
+  if (adjustment.kind === "hueSaturation" && adjustment.colorize) {
+    return colorizeFilterUrl({ hue: adjustmentNumber(adjustment, "hue"), saturation: adjustmentNumber(adjustment, "saturation") / 100 });
+  }
   if (adjustment.kind === "hueSaturation") {
     const parts = [
       adjustment.hue ? `hue-rotate(${adjustment.hue}deg)` : "",
@@ -97,6 +140,11 @@ export function adjustmentFilter(adjustment?: Adjustment): string | null {
     return parts.length ? parts.join(" ") : null;
   }
   if (adjustment.kind === "blur") return adjustment.value > 0 ? `blur(${adjustment.value}px)` : null;
+  if (adjustment.kind === "sharpen") {
+    return adjustment.value > 0
+      ? sharpenFilterUrl({ amount: adjustment.value / 100, radius: adjustmentNumber(adjustment, "radius") / 10, brightnessOnly: !adjustment.colorSharpen })
+      : null;
+  }
   if (adjustment.kind === "contrast") return adjustment.value ? contrastFilterUrl(contrastParams(adjustment)) : null;
   return adjustment.value ? `brightness(${(100 + adjustment.value) / 100})` : null;
 }

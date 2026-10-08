@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { adjustmentFilter, adjustmentOpacity, adjustSignature, resetAdjustment, allAdjustmentsOff, findAdjustment, hasAdjustments, moveLayer, replaceAdjustment, toggleAllAdjustments } from "./layers";
+import { adjustmentFilter, adjustmentOpacity, adjustSignature, LOG_SLIDER_STEPS, logSliderPosition, logSliderValue, resetAdjustment, allAdjustmentsOff, findAdjustment, hasAdjustments, moveLayer, replaceAdjustment, toggleAllAdjustments } from "./layers";
 import type { Adjustment } from "./types";
 
 /** Nodes 1, 2, 3 are A, B, C from the bottom up; node 0 is the original image. */
@@ -34,6 +34,21 @@ describe("layer adjustments", () => {
     expect(adjustmentFilter(bright("a", 30, { off: true }))).toBeNull();
     expect(hasAdjustments(undefined)).toBe(false);
     expect(hasAdjustments([bright("a", 0), bright("b", 10)])).toBe(true);
+  });
+
+  it("maps a log-scale slider place to a value and back", () => {
+    expect(logSliderValue(0, 1, 3000)).toBe(1);
+    expect(logSliderValue(LOG_SLIDER_STEPS, 1, 3000)).toBe(3000);
+    expect(logSliderPosition(1, 1, 3000)).toBe(0);
+    expect(logSliderPosition(3000, 1, 3000)).toBe(LOG_SLIDER_STEPS);
+    for (const value of [1, 10, 55, 300, 2999]) expect(Math.abs(logSliderValue(logSliderPosition(value, 1, 3000), 1, 3000) - value)).toBeLessThanOrEqual(Math.ceil(value * 0.01));
+  });
+
+  it("turns sharpen into an SVG filter, and none at amount 0", () => {
+    const sharpen = (values: Partial<Adjustment>): Adjustment => ({ id: "s", kind: "sharpen", value: 0, radius: 10, ...values });
+    expect(adjustmentFilter(sharpen({ value: 150, radius: 12 }))).toBe("url(#shp_150_12_1)");
+    expect(adjustmentFilter(sharpen({ value: 80, colorSharpen: true }))).toBe("url(#shp_80_10_0)");
+    expect(adjustmentFilter(sharpen({ value: 0 }))).toBeNull();
   });
 
   it("turns hue and saturation into canvas filters", () => {

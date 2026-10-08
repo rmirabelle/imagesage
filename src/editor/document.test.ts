@@ -85,6 +85,16 @@ describe("Image Sage manifest", () => {
     expect(parseManifest(JSON.stringify({ ...manifest, baseAdjust }), tiles).baseAdjust).toEqual([{ id: "adj-h", kind: "hueSaturation", value: 0, hue: -180, saturation: 35 }]);
   });
 
+  it("round-trips mask links, labels and colorize", () => {
+    const { manifest, tiles } = createManifest(10, 10, { kind: "imported", fileName: "a.png" }, [], 0, "2026-10-01T00:00:00.000Z");
+    const baseAdjust = [
+      { id: "adj-1", kind: "brightness", value: 5, mask: "data:image/png;base64,inline", maskLink: "link-1", label: "Sky" },
+      { id: "adj-2", kind: "hueSaturation", value: 0, colorize: true, hue: 210, saturation: 40 },
+      { id: "adj-3", kind: "sharpen", value: 150, radius: 12, colorSharpen: true }
+    ];
+    expect(parseManifest(JSON.stringify({ ...manifest, baseAdjust }), tiles).baseAdjust).toEqual(baseAdjust);
+  });
+
   it("reads adjustment masks stored in the manifest itself", () => {
     const { manifest, tiles } = createManifest(10, 10, { kind: "imported", fileName: "a.png" }, [], 0, "2026-10-01T00:00:00.000Z");
     const baseAdjust = [{ id: "adj-1", kind: "brightness", value: 5, mask: "data:image/png;base64,inline" }];

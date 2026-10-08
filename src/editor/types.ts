@@ -72,6 +72,8 @@ export interface EditStep {
   layer?: string;
   layerMask?: string;
   maskHides?: boolean;
+  /** Masks with the same link id are linked copies: a change to one changes them all. */
+  maskLink?: string;
   hidden?: boolean;
   /** How the layer mixes with the layers below it; absent is Normal. */
   blend?: BlendMode;
@@ -95,13 +97,15 @@ export interface EditStep {
 /** The blend modes a layer can use besides Normal. */
 export type BlendMode = "screen" | "overlay";
 
-export type AdjustmentKind = "brightness" | "contrast" | "hueSaturation" | "opacity" | "blur";
+export type AdjustmentKind = "brightness" | "contrast" | "hueSaturation" | "opacity" | "blur" | "sharpen";
 
 /**
  * One adjustment of a layer. A layer can have several, even of the same kind;
  * they apply in order. Brightness uses `value` (-100 to 100); Hue/Saturation
  * uses `hue` (-180 to 180 degrees) and `saturation` (-100 to 100), and keeps
- * `value` at 0. Opacity uses `value` as a percent (0 to 100); 100 is no change.
+ * `value` at 0. With `colorize`, Hue/Saturation instead gives every pixel one
+ * color: `hue` is that hue (0 to 360 degrees) and `saturation` its strength
+ * (0 to 100), and each pixel keeps its lightness. Opacity uses `value` as a percent (0 to 100); 100 is no change.
  * Contrast uses `value` as its amount (-100 to 100), `pivot` as the middle
  * gray it pushes away from (0 to 100), `curve` as how much the change rolls off
  * near black and white instead of clipping (0 to 100), and `color` as how much
@@ -118,6 +122,16 @@ export interface Adjustment {
   value: number;
   hue?: number;
   saturation?: number;
+  colorize?: boolean;
+  /**
+   * Sharpen uses `value` as its amount in percent (0 to 500) and `radius` in
+   * tenths of an image pixel (1 to 3000). It sharpens brightness only, unless
+   * `colorSharpen` is set; then it sharpens each color.
+   */
+  radius?: number;
+  colorSharpen?: boolean;
+  /** A name the user gave the adjustment; its chip shows it in place of the numbers. */
+  label?: string;
   pivot?: number;
   curve?: number;
   color?: number;
@@ -127,6 +141,8 @@ export interface Adjustment {
   mask?: string;
   maskHides?: boolean;
   maskOff?: boolean;
+  /** Masks with the same link id are linked copies: a change to one changes them all. */
+  maskLink?: string;
 }
 
 /** A layer's adjustments, in the order they apply. */

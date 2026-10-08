@@ -1,4 +1,6 @@
+import { colorizeFilterIds, colorizeTables, parseColorizeFilterId } from "./colorize";
 import { contrastFilterIds, contrastTable, parseContrastFilterId } from "./contrast";
+import { parseSharpenFilterId, sharpenFilterIds } from "./sharpen";
 import { pathBetween } from "./history";
 import type { BlendMode, EditStep, Point, Rect } from "./types";
 
@@ -120,6 +122,66 @@ let filterHost: SVGSVGElement | null = null;
  * not hidden with display:none, which would turn its filters off.
  */
 export function ensureSvgFilters(filter: string) {
+  for (const id of sharpenFilterIds(filter)) {
+    if (window.document.getElementById(id)) continue;
+    const params = parseSharpenFilterId(id);
+    if (!params) continue;
+    if (!filterHost) {
+      filterHost = window.document.createElementNS(SVG_NS, "svg");
+      filterHost.setAttribute("aria-hidden", "true");
+      filterHost.setAttribute("style", "position:absolute;width:0;height:0;overflow:hidden;pointer-events:none");
+      window.document.body.appendChild(filterHost);
+    }
+    const amount = params.amount.toFixed(3);
+    /** The blur repeats the edge pixels, so the image border gets no light or dark rim. */
+    const blur = `<feGaussianBlur in="SourceGraphic" stdDeviation="${params.radius.toFixed(2)}" edgeMode="duplicate" result="blur"/>`;
+    const luminance = "0.2126 0.7152 0.0722 0 0  0.2126 0.7152 0.0722 0 0  0.2126 0.7152 0.0722 0 0  0 0 0 1 0";
+    const element = window.document.createElementNS(SVG_NS, "filter");
+    element.setAttribute("id", id);
+    element.setAttribute("color-interpolation-filters", "sRGB");
+    /**
+     * Each color: the image plus amount × (image − blur), in one step.
+     * Brightness only: amount × (brightness − blurred brightness), shifted by
+     * 0.5 because filter values cannot go below 0, is added to every color.
+     * The amount is applied before the shift, so rounding stays small at any
+     * amount, and the last step maps 254/255 back to fully opaque.
+     */
+    element.innerHTML = params.brightnessOnly
+      ? `${blur}
+        <feColorMatrix in="SourceGraphic" type="matrix" values="${luminance}" result="lum"/>
+        <feColorMatrix in="blur" type="matrix" values="${luminance}" result="blurLum"/>
+        <feComposite in="lum" in2="blurLum" operator="arithmetic" k1="0" k2="${amount}" k3="-${amount}" k4="0.5" result="detail"/>
+        <feComposite in="SourceGraphic" in2="detail" operator="arithmetic" k1="0" k2="1" k3="1" k4="-0.5" result="sharp"/>
+        <feComponentTransfer in="sharp"><feFuncA type="table" tableValues="${OPAQUE_FIX}"/></feComponentTransfer>`
+      : `${blur}
+        <feComposite in="SourceGraphic" in2="blur" operator="arithmetic" k1="0" k2="${(1 + params.amount).toFixed(3)}" k3="-${amount}" k4="0"/>`;
+    filterHost.appendChild(element);
+  }
+  for (const id of colorizeFilterIds(filter)) {
+    if (window.document.getElementById(id)) continue;
+    const params = parseColorizeFilterId(id);
+    if (!params) continue;
+    if (!filterHost) {
+      filterHost = window.document.createElementNS(SVG_NS, "svg");
+      filterHost.setAttribute("aria-hidden", "true");
+      filterHost.setAttribute("style", "position:absolute;width:0;height:0;overflow:hidden;pointer-events:none");
+      window.document.body.appendChild(filterHost);
+    }
+    /** Each pixel becomes its brightness, then each channel looks up the color at that lightness. */
+    const [red, green, blue] = colorizeTables(params).map((table) => table.map((value) => value.toFixed(4)).join(" "));
+    const element = window.document.createElementNS(SVG_NS, "filter");
+    element.setAttribute("id", id);
+    element.setAttribute("color-interpolation-filters", "sRGB");
+    element.innerHTML = `
+      <feColorMatrix in="SourceGraphic" type="matrix" result="lum"
+        values="0.2126 0.7152 0.0722 0 0  0.2126 0.7152 0.0722 0 0  0.2126 0.7152 0.0722 0 0  0 0 0 1 0"/>
+      <feComponentTransfer in="lum">
+        <feFuncR type="table" tableValues="${red}"/>
+        <feFuncG type="table" tableValues="${green}"/>
+        <feFuncB type="table" tableValues="${blue}"/>
+      </feComponentTransfer>`;
+    filterHost.appendChild(element);
+  }
   for (const id of contrastFilterIds(filter)) {
     if (window.document.getElementById(id)) continue;
     const params = parseContrastFilterId(id);

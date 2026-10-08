@@ -107,11 +107,24 @@ const parseAdjustment = (value: unknown, fallbackId: string): Adjustment | undef
     ...(value.off === true && value.offByAll === true ? { offByAll: true } : {}),
     ...(typeof value.mask === "string" && value.mask ? { mask: value.mask } : {}),
     ...(value.maskHides === true ? { maskHides: true } : {}),
-    ...(value.maskOff === true ? { maskOff: true } : {})
+    ...(value.maskOff === true ? { maskOff: true } : {}),
+    ...(typeof value.maskLink === "string" && value.maskLink ? { maskLink: value.maskLink } : {}),
+    ...(typeof value.label === "string" && value.label.trim() ? { label: value.label.trim() } : {})
   };
   if (value.kind === "opacity") {
     const percent = optionalAdjustNumber(value.value, 100);
     return { id, kind: "opacity", value: percent === undefined ? 100 : Math.max(0, percent), ...flags };
+  }
+  if (value.kind === "sharpen") {
+    const radius = optionalAdjustNumber(value.radius, 3000);
+    return {
+      id,
+      kind: "sharpen",
+      value: Math.max(0, optionalAdjustNumber(value.value, 500) ?? 0),
+      radius: radius === undefined ? 10 : Math.max(1, radius),
+      ...(value.colorSharpen === true ? { colorSharpen: true } : {}),
+      ...flags
+    };
   }
   if (value.kind === "blur") {
     return { id, kind: "blur", value: Math.max(0, optionalAdjustNumber(value.value, 100) ?? 0), ...flags };
@@ -130,6 +143,11 @@ const parseAdjustment = (value: unknown, fallbackId: string): Adjustment | undef
       color: percent(value.color, 100),
       ...flags
     };
+  }
+  if (value.kind === "hueSaturation" && value.colorize === true) {
+    const hue = typeof value.hue === "number" && Number.isFinite(value.hue) ? Math.max(0, Math.min(360, Math.round(value.hue))) : 0;
+    const saturation = optionalAdjustNumber(value.saturation, 100);
+    return { id, kind: "hueSaturation", value: 0, colorize: true, hue, saturation: saturation === undefined ? 25 : Math.max(0, saturation), ...flags };
   }
   if (value.kind === "hueSaturation") {
     return { id, kind: "hueSaturation", value: 0, hue: optionalAdjustNumber(value.hue, 180) ?? 0, saturation: optionalAdjustNumber(value.saturation, 100) ?? 0, ...flags };
@@ -211,6 +229,7 @@ const parseStep = (value: unknown): ManifestStep => {
     sent: parseSent(requiredRecord(value, "sent")),
     ...optionalStrings(value, ["before", "after", "layer", "layerMask"]),
     ...(value.maskHides === true ? { maskHides: true } : {}),
+    ...(typeof value.maskLink === "string" && value.maskLink ? { maskLink: value.maskLink } : {}),
     ...(value.hidden === true ? { hidden: true } : {}),
     ...(value.blend === "screen" || value.blend === "overlay" ? { blend: value.blend } : {}),
     ...(value.maskOff === true ? { maskOff: true } : {}),

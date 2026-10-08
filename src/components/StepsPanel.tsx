@@ -1,28 +1,30 @@
 import { Fragment, memo, useEffect, useLayoutEffect, useRef, useState, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import type { Adjustment, BlendMode, DocumentOrigin, EditStep, LayerAdjust, LayerPart } from "../editor/types";
-import { ADJUSTMENT_FIELDS, ADJUSTMENT_LABELS, adjustList, allAdjustmentsOff, adjustmentNumber, type AdjustmentField } from "../editor/layers";
+import { ADJUSTMENT_LABELS, adjustList, adjustmentFields, formatAdjustNumber, LOG_SLIDER_STEPS, logSliderPosition, logSliderValue, allAdjustmentsOff, adjustmentNumber, type AdjustmentField } from "../editor/layers";
 import {
   ArrowCounterClockwise,
+  Camera,
   CaretDoubleLeft,
   Check,
   Checkerboard,
-  CircleDashed,
-  Lasso,
+  LinkBreak,
+  MagicWand,
+  LinkSimple,
   CircleHalf,
   CircleHalfTilt,
   ClipboardText,
   CloudFog,
   Copy,
   CornersOut,
-  CursorClick,
   Drop,
   Eye,
   EyeSlash,
-  Gradient,
   MagnifyingGlass,
+  PencilSimple,
   Plus,
   Prohibit,
   SlidersHorizontal,
+  Sparkle,
   SpinnerGap,
   StopCircle,
   Sun,
@@ -44,6 +46,7 @@ export type PartAction =
   | "add-blur"
   | "add-hue-saturation"
   | "add-opacity"
+  | "add-sharpen"
   | "mask-add"
   | "mask-toggle"
   | "mask-invert"
@@ -58,6 +61,7 @@ export type PartAction =
   | "click-select"
   | "mask-copy"
   | "mask-paste"
+  | "mask-unlink"
   | "blend-normal"
   | "blend-screen"
   | "blend-overlay";
@@ -89,6 +93,8 @@ interface Props {
   onToggleVisible: (node: number, solo: boolean) => void;
   /** Shows (true) or hides (false) every layer; the original image always shows. */
   onShowAll: (visible: boolean) => void;
+  /** Adds a new top layer: a snapshot of all visible layers combined. */
+  onSnapshot: () => void;
   onDelete: (node: number) => void;
   /** Stops painting the selected mask (a press in the panel outside any mask). */
   onMaskDeselect: () => void;
@@ -100,6 +106,12 @@ interface Props {
   onPartAction: (node: number, part: LayerPart, action: PartAction) => void;
   /** Sets one number of one adjustment of a layer. */
   onAdjustValue: (node: number, id: string, field: AdjustmentField, value: number) => void;
+  /** Turns Colorize on or off for a Hue/Saturation adjustment. */
+  onAdjustColorize: (node: number, id: string, colorize: boolean) => void;
+  /** Sets whether a Sharpen adjustment sharpens brightness only, or each color. */
+  onSharpenBrightnessOnly: (node: number, id: string, brightnessOnly: boolean) => void;
+  /** Opens the Rename dialog of an adjustment, where it gets a label for its chip. */
+  onAdjustRename: (node: number, id: string) => void;
 }
 
 /** An AI edit that is still running: its status, prompt, a short note (time, what it replaces), and Cancel while possible. */
@@ -160,20 +172,21 @@ const signed = (value: number) => value > 0 ? `+${value}` : value < 0 ? `−${-v
 export const stepKey = (documentId: string, history: EditStep[], node: number) =>
   node === 0 ? `origin:${documentId}` : history[node - 1].id;
 
-/** A small view of a mask: white where it shows (or applies), black where it does not. */
-function MaskThumb({ src, hides, off }: { src: string; hides: boolean; off: boolean }) {
+/** A small view of a mask: white where it shows (or applies), black where it does not. A linked copy shows a chain. */
+function MaskThumb({ src, hides, off, linked = false }: { src: string; hides: boolean; off: boolean; linked?: boolean }) {
   return (
     <span className={`chip-mask ${hides ? "hides" : ""} ${off ? "off" : ""}`} aria-hidden="true">
       <img src={src} alt="" draggable={false} />
+      {linked && <span className="chip-mask-link"><LinkSimple size={9} weight="bold" /></span>}
     </span>
   );
 }
 
-/** The numbers of an adjustment as short text, such as "+20" or "+15° −30". Contrast shows its amount only. */
+/** The numbers of an adjustment as short text, such as "+20" or "+15° −30". Contrast shows its amount only; Colorize starts with a "C". */
 const adjustmentText = (adjustment: Adjustment) =>
-  ADJUSTMENT_FIELDS[adjustment.kind].filter(({ field }) => adjustment.kind !== "contrast" || field === "value").map(({ field, unit, signed: withSign }) => {
+  (adjustment.kind === "hueSaturation" && adjustment.colorize ? "C " : "") + adjustmentFields(adjustment).filter(({ field }) => adjustment.kind !== "contrast" || field === "value").map(({ field, unit, signed: withSign, decimals }) => {
     const number = adjustmentNumber(adjustment, field);
-    return `${withSign ? signed(number) : number}${unit}`;
+    return `${withSign ? signed(number) : formatAdjustNumber(number, decimals)}${unit}`;
   }).join(" ");
 
 /** The icon of a kind of adjustment. */
@@ -182,10 +195,11 @@ const AdjustmentIcon = ({ adjustment, size }: { adjustment: Pick<Adjustment, "ki
     : adjustment.kind === "contrast" ? <CircleHalfTilt size={size} weight="bold" />
     : adjustment.kind === "blur" ? <CloudFog size={size} weight="bold" />
     : adjustment.kind === "opacity" ? <Checkerboard size={size} weight="bold" />
+    : adjustment.kind === "sharpen" ? <Sparkle size={size} weight="bold" />
     : <Sun size={size} weight="bold" />;
 
 /** One slider row: the name on the left, the slider, and the number. */
-function AdjustmentRow({ id, label, min, max, unit, neutral, withSign, value, disabled, onChange }: { id: string; label: string; min: number; max: number; unit: string; neutral: number; withSign: boolean; value: number; disabled: boolean; onChange: (value: number) => void }) {
+function AdjustmentRow({ id, label, min, max, unit, neutral, withSign, decimals, log = false, value, disabled, onChange }: { id: string; label: string; min: number; max: number; unit: string; neutral: number; withSign: boolean; decimals?: number; log?: boolean; value: number; disabled: boolean; onChange: (value: number) => void }) {
   const [draft, setDraft] = useState<number | null>(null);
   const shown = draft ?? value;
   const change = (next: number) => {
@@ -195,21 +209,22 @@ function AdjustmentRow({ id, label, min, max, unit, neutral, withSign, value, di
   return (
     <div className="layer-adjust-row">
       <label htmlFor={id}>{label}</label>
+      {/* A log-scale slider moves through places 0 to LOG_SLIDER_STEPS; the value is worked out from the place. */}
       <input
         id={id}
         type="range"
-        min={min}
-        max={max}
+        min={log ? 0 : min}
+        max={log ? LOG_SLIDER_STEPS : max}
         step={1}
-        value={shown}
+        value={log ? logSliderPosition(shown, min, max) : shown}
         disabled={disabled}
-        onChange={(event) => change(Number(event.target.value))}
+        onChange={(event) => change(log ? logSliderValue(Number(event.target.value), min, max) : Number(event.target.value))}
         onDoubleClick={() => change(neutral)}
         onPointerUp={(event) => { setDraft(null); event.currentTarget.blur(); }}
         onKeyUp={() => setDraft(null)}
         onBlur={() => setDraft(null)}
       />
-      <output htmlFor={id}>{withSign ? signed(shown) : shown}{unit}</output>
+      <output htmlFor={id}>{withSign ? signed(shown) : formatAdjustNumber(shown, decimals)}{unit}</output>
     </div>
   );
 }
@@ -243,12 +258,25 @@ function SliderPopover({ children }: { children: ReactNode }) {
   return <div ref={ref} className="layer-adjust-popover" onPointerDown={(event) => event.stopPropagation()}>{children}</div>;
 }
 
-function AdjustmentSliders({ node, adjustment, disabled, onChange }: { node: number; adjustment: Adjustment; disabled: boolean; onChange: (node: number, id: string, field: AdjustmentField, value: number) => void }) {
+function AdjustmentSliders({ node, adjustment, disabled, onChange, onColorize, onBrightnessOnly }: { node: number; adjustment: Adjustment; disabled: boolean; onChange: (node: number, id: string, field: AdjustmentField, value: number) => void; onColorize: (node: number, id: string, colorize: boolean) => void; onBrightnessOnly: (node: number, id: string, brightnessOnly: boolean) => void }) {
   return (
     <div className="layer-adjust-sliders">
-      {ADJUSTMENT_FIELDS[adjustment.kind].map(({ field, label, min, max, unit, neutral, signed: withSign }) => (
+      {/* Colorize gives every pixel one hue; the sliders then set that hue and its strength. */}
+      {adjustment.kind === "hueSaturation" && (
+        <div className="layer-adjust-row layer-adjust-check" data-help="Colorize: give the layer one color and keep its light and dark">
+          <label htmlFor={`layer-adjust-${node}-${adjustment.id}-colorize`}>Colorize</label>
+          <input
+            id={`layer-adjust-${node}-${adjustment.id}-colorize`}
+            type="checkbox"
+            checked={Boolean(adjustment.colorize)}
+            disabled={disabled}
+            onChange={(event) => { onColorize(node, adjustment.id, event.target.checked); event.currentTarget.blur(); }}
+          />
+        </div>
+      )}
+      {adjustmentFields(adjustment).map(({ field, label, min, max, unit, neutral, signed: withSign, decimals, log }) => (
         <AdjustmentRow
-          key={field}
+          key={`${adjustment.colorize ? "colorize-" : ""}${field}`}
           id={`layer-adjust-${node}-${adjustment.id}-${field}`}
           label={label}
           min={min}
@@ -256,11 +284,26 @@ function AdjustmentSliders({ node, adjustment, disabled, onChange }: { node: num
           unit={unit}
           neutral={neutral}
           withSign={withSign}
+          decimals={decimals}
+          log={log}
           value={adjustmentNumber(adjustment, field)}
           disabled={disabled}
           onChange={(value) => onChange(node, adjustment.id, field, value)}
         />
       ))}
+      {/* Sharpen works on brightness only unless this is turned off; then it sharpens each color. */}
+      {adjustment.kind === "sharpen" && (
+        <div className="layer-adjust-row layer-adjust-check" data-help="Brightness only: sharpen light and dark, not color, so edges get no color fringes">
+          <label htmlFor={`layer-adjust-${node}-${adjustment.id}-brightness-only`}>Brightness only</label>
+          <input
+            id={`layer-adjust-${node}-${adjustment.id}-brightness-only`}
+            type="checkbox"
+            checked={!adjustment.colorSharpen}
+            disabled={disabled}
+            onChange={(event) => { onBrightnessOnly(node, adjustment.id, event.target.checked); event.currentTarget.blur(); }}
+          />
+        </div>
+      )}
     </div>
   );
 }
@@ -273,7 +316,7 @@ function AdjustmentSliders({ node, adjustment, disabled, onChange }: { node: num
  * adjustment; clicking a chip makes it the Mask tool's target, and its arrow
  * opens its options.
  */
-export const StepsPanel = memo(function StepsPanel({ documentId, hasBase, origin, baseAdjust, history, current, maskTarget, maskRedShown, canPasteMask, pending, thumbnails, disabled, onSelect, onToggleVisible, onShowAll, onDelete, onMaskDeselect, onRename, onMove, onPartAction, onAdjustValue }: Props) {
+export const StepsPanel = memo(function StepsPanel({ documentId, hasBase, origin, baseAdjust, history, current, maskTarget, maskRedShown, canPasteMask, pending, thumbnails, disabled, onSelect, onToggleVisible, onShowAll, onSnapshot, onDelete, onMaskDeselect, onRename, onMove, onPartAction, onAdjustValue, onAdjustColorize, onAdjustRename, onSharpenBrightnessOnly }: Props) {
   /** The top layer is listed first, like a stack; the original image is at the bottom. */
   const nodes = Array.from({ length: history.length + (hasBase ? 1 : 0) }, (_, node) => history.length - node);
   const layerCount = nodes.length;
@@ -494,6 +537,18 @@ export const StepsPanel = memo(function StepsPanel({ documentId, hasBase, origin
     setMenu({ node, x: Math.min(event.clientX, window.innerWidth - 230), y: Math.max(8, Math.min(event.clientY, window.innerHeight - 260)) });
   };
 
+  /** How many masks share each link id; a mask is a linked copy while another mask shares its id. */
+  const linkCounts = new Map<string, number>();
+  const countLink = (mask: string | undefined, link: string | undefined) => {
+    if (mask && link) linkCounts.set(link, (linkCounts.get(link) ?? 0) + 1);
+  };
+  for (const adjustment of adjustList(baseAdjust)) countLink(adjustment.mask, adjustment.maskLink);
+  for (const item of history) {
+    countLink(item.layerMask, item.maskLink);
+    for (const adjustment of adjustList(item.adjust)) countLink(adjustment.mask, adjustment.maskLink);
+  }
+  const isLinked = (link: string | undefined) => Boolean(link) && (linkCounts.get(link ?? "") ?? 0) > 1;
+
   /** The chips under one layer: its mask, then its adjustments in order, then the add button. */
   const renderStrip = (node: number) => {
     const step = node > 0 ? history[node - 1] : null;
@@ -508,7 +563,7 @@ export const StepsPanel = memo(function StepsPanel({ documentId, hasBase, origin
       const maskOff = isMask ? step?.maskOff === true : adjustment?.maskOff === true;
       const off = isMask ? maskOff : adjustment?.off === true;
       const name = adjustment ? ADJUSTMENT_LABELS[adjustment.kind] : "Mask";
-      const label = isMask || !adjustment ? "Layer mask" : `${name} ${adjustmentText(adjustment)}`;
+      const label = isMask || !adjustment ? "Layer mask" : adjustment.label ? `${adjustment.label} (${name} ${adjustmentText(adjustment)})` : `${name} ${adjustmentText(adjustment)}`;
       return (
         <div
           key={part}
@@ -529,7 +584,7 @@ export const StepsPanel = memo(function StepsPanel({ documentId, hasBase, origin
               data-help={`${label}${off ? " (turned off)" : ""}. Click to paint it with the Mask tool.${mask ? ` Ctrl+click to turn it ${off ? "on" : "off"}.` : ""} Right-click for options.`}
             >
               <MaskIcon inverted={hides} size={15} />
-              {mask && <MaskThumb src={mask} hides={hides} off={maskOff} />}
+              {mask && <MaskThumb src={mask} hides={hides} off={maskOff} linked={isLinked(step?.maskLink)} />}
             </button>
           ) : (
             <>
@@ -562,7 +617,7 @@ export const StepsPanel = memo(function StepsPanel({ documentId, hasBase, origin
                 data-help={`${label}${off ? " (turned off)" : ""}. Click to edit. Ctrl+click to turn it ${off ? "on" : "off"}. Right-click for options.`}
               >
                 {adjustment && <AdjustmentIcon adjustment={adjustment} size={14} />}
-                {adjustment && <span className="layer-chip-value">{adjustmentText(adjustment)}</span>}
+                {adjustment && <span className={`layer-chip-value ${adjustment.label ? "named" : ""}`}>{adjustment.label ?? adjustmentText(adjustment)}</span>}
               </button>
               {mask && (
                 <button
@@ -579,7 +634,7 @@ export const StepsPanel = memo(function StepsPanel({ documentId, hasBase, origin
                   }}
                   data-help={`The mask of ${name.toLowerCase()}. Click to paint it with the Mask tool; click again to stop. Right-click for the mask options.`}
                 >
-                  <MaskThumb src={mask} hides={hides} off={maskOff} />
+                  <MaskThumb src={mask} hides={hides} off={maskOff} linked={isLinked(adjustment?.maskLink)} />
                 </button>
               )}
             </>
@@ -640,7 +695,7 @@ export const StepsPanel = memo(function StepsPanel({ documentId, hasBase, origin
               {chip(part)}
               {sliderOf?.id === part && (
                 <SliderPopover>
-                  <AdjustmentSliders node={node} adjustment={sliderOf} disabled={disabled} onChange={onAdjustValue} />
+                  <AdjustmentSliders node={node} adjustment={sliderOf} disabled={disabled} onChange={onAdjustValue} onColorize={onAdjustColorize} onBrightnessOnly={onSharpenBrightnessOnly} />
                 </SliderPopover>
               )}
             </Fragment>
@@ -691,7 +746,7 @@ export const StepsPanel = memo(function StepsPanel({ documentId, hasBase, origin
             if (handled(event)) openPartMenu(event.currentTarget, node, "mask");
           }}
         >
-          <MaskThumb src={step.layerMask} hides={step.maskHides === true} off={step.maskOff === true} />
+          <MaskThumb src={step.layerMask} hides={step.maskHides === true} off={step.maskOff === true} linked={isLinked(step.maskLink)} />
         </span>
       </span>
     );
@@ -720,25 +775,28 @@ export const StepsPanel = memo(function StepsPanel({ documentId, hasBase, origin
         item("mask", "add-blur", <CloudFog size={15} />, "Blur"),
         item("mask", "add-hue-saturation", <Drop size={15} />, "Hue/Saturation"),
         item("mask", "add-opacity", <Checkerboard size={15} />, "Opacity"),
+        item("mask", "add-sharpen", <Sparkle size={15} />, "Sharpen"),
       ];
     }
     const part = open.part;
     const adjustment = part === "mask" ? undefined : adjustOf(node).find((entry) => entry.id === part);
     const hasMask = part === "mask" ? Boolean(step?.layerMask) : Boolean(adjustment?.mask);
     const maskOff = part === "mask" ? step?.maskOff === true : adjustment?.maskOff === true;
+    /**
+     * The menu head names the mask, so the items do not repeat "mask". The
+     * brush, lasso and gradients are in the toolbar while the mask is painted.
+     */
     const maskItems = [
-      /** Enable or Disable comes first in every mask menu; Add mask comes first while there is no mask. */
+      /** Enable or Disable comes first in every mask menu; Add comes first while there is no mask. */
       hasMask
-        ? item(part, "mask-toggle", <Prohibit size={15} />, maskOff ? "Enable mask" : "Disable mask")
-        : item(part, part === "mask" ? "add-mask" : "mask-add", <MaskIcon size={15} />, "Add mask", { note: "hides all" }),
-      item(part, "click-select", <CursorClick size={15} />, "Click to select…", { note: "click the image" }),
-      ...(hasMask ? [item(part, "mask-invert", <CircleHalf size={15} />, "Invert mask", { note: "Ctrl+I" })] : []),
-      ...(hasMask ? [item(part, "mask-copy", <Copy size={15} />, "Copy mask")] : []),
-      ...(canPasteMask ? [item(part, "mask-paste", <ClipboardText size={15} />, "Paste mask", { note: hasMask ? "replaces this one" : undefined })] : []),
-      item(part, "linear", <Gradient size={15} />, "Linear gradient", { note: "drag on image" }),
-      item(part, "radial", <CircleDashed size={15} />, "Radial gradient", { note: "drag on image" }),
-      item(part, "lasso", <Lasso size={15} />, "Polygon lasso", { note: "L · click points" }),
-      ...(hasMask ? [item(part, "mask-delete", <Trash size={15} />, "Delete mask", { danger: true })] : [])
+        ? item(part, "mask-toggle", <Prohibit size={15} />, maskOff ? "Enable" : "Disable")
+        : item(part, part === "mask" ? "add-mask" : "mask-add", <MaskIcon size={15} />, "Add", { note: "hides all" }),
+      item(part, "click-select", <MagicWand size={15} />, "Magic…", { note: "click the image" }),
+      ...(hasMask ? [item(part, "mask-invert", <CircleHalf size={15} />, "Invert", { note: "Ctrl+I" })] : []),
+      ...(hasMask && isLinked(part === "mask" ? step?.maskLink : adjustment?.maskLink) ? [item(part, "mask-unlink", <LinkBreak size={15} />, "Unlink", { note: "from its copies" })] : []),
+      ...(hasMask ? [item(part, "mask-copy", <Copy size={15} />, "Copy")] : []),
+      ...(canPasteMask ? [item(part, "mask-paste", <ClipboardText size={15} />, "Paste", { note: hasMask ? "replaces this one" : undefined })] : []),
+      ...(hasMask ? [item(part, "mask-delete", <Trash size={15} />, "Delete", { danger: true })] : [])
     ];
     if (part === "mask" || !adjustment) return [<div key="head" className="steps-menu-head">Layer mask</div>, ...maskItems];
     const name = ADJUSTMENT_LABELS[adjustment.kind];
@@ -748,7 +806,10 @@ export const StepsPanel = memo(function StepsPanel({ documentId, hasBase, origin
       <div key="head" className="steps-menu-head">{name}</div>,
       item(part, "toggle", <Prohibit size={15} />, adjustment.off ? `Enable ${name.toLowerCase()}` : `Disable ${name.toLowerCase()}`),
       item(part, "reset", <ArrowCounterClockwise size={15} />, "Reset to 0"),
-      ...(hasMask ? [] : [<div key="sep-1" className="steps-menu-divider" />, ...maskItems]),
+      <button key={`${part}-rename`} role="menuitem" onClick={() => { setPartMenu(null); setMenu(null); onAdjustRename(node, part); }}>
+        <PencilSimple size={15} /> <span className="steps-menu-label">Rename…</span>
+      </button>,
+      ...(hasMask ? [] : [<div key="sep-1" className="steps-menu-divider" />, <div key="mask-head" className="steps-menu-head">Mask</div>, ...maskItems]),
       <div key="sep-2" className="steps-menu-divider" />,
       item(part, "delete", <Trash size={15} />, `Delete ${name.toLowerCase()}`, { danger: true })
     ];
@@ -856,6 +917,15 @@ Click to show its progress on the image.`}>
             </button>
           </div>
         </div>
+        <button
+          className="steps-snapshot"
+          disabled={disabled}
+          onClick={onSnapshot}
+          aria-label="Snapshot visible layers"
+          data-help="Snapshot: a new top layer of all visible layers combined (Ctrl+Alt+S)"
+        >
+          <Camera size={15} />
+        </button>
         <button className="steps-collapse" onClick={() => changeCollapsed(true)} aria-label="Close the layers panel" data-help="Close the layers panel">
           <X size={12} weight="bold" />
         </button>
