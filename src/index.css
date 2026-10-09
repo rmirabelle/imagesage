@@ -54,6 +54,34 @@ select {
 }
 select:hover { border-color: #626879; background-color: #2b2f3a; }
 select option { padding: 8px 12px; color: #d4d7df; background: #252832; }
+/* Checkboxes: a dark box with a light border; checked, the accent blue with a white check. */
+input[type="checkbox"] {
+  width: 14px;
+  height: 14px;
+  flex: 0 0 auto;
+  display: inline-grid;
+  place-content: center;
+  margin: 0;
+  border: 1px solid #5a6072;
+  border-radius: 3px;
+  background: #1d2029;
+  appearance: none;
+  -webkit-appearance: none;
+  cursor: pointer;
+}
+input[type="checkbox"]::before {
+  content: "";
+  width: 8px;
+  height: 8px;
+  background: #ffffff;
+  clip-path: polygon(14% 44%, 0 65%, 50% 100%, 100% 16%, 80% 0%, 43% 62%);
+  transform: scale(0);
+}
+input[type="checkbox"]:hover:not(:disabled) { border-color: #7f8595; }
+input[type="checkbox"]:checked { border-color: var(--accent); background: var(--accent); }
+input[type="checkbox"]:checked::before { transform: scale(1); }
+input[type="checkbox"]:disabled { opacity: .5; cursor: default; }
+input[type="checkbox"]:focus-visible { outline: 2px solid var(--accent-hover); outline-offset: 1px; }
 select option:checked { color: #10202a; background: var(--secondary); }
 select option:disabled { color: #777d8e; }
 
@@ -189,6 +217,8 @@ select option:disabled { color: #777d8e; }
   transition: opacity .12s ease, transform .12s ease;
 }
 .tooltip.shown { opacity: 1; transform: none; }
+/* Above its element, a tooltip casts only a faint shadow, so the shadow does not fall over the element. */
+.tooltip.above { box-shadow: 0 -2px 8px rgba(0, 0, 0, .18); }
 .tooltip p { margin: 0; }
 .tooltip kbd {
   display: inline-block;
@@ -388,6 +418,23 @@ select option:disabled { color: #777d8e; }
   background: #292d38;
 }
 .tool-group { display: flex; gap: 4px; }
+/* The settings of the tool in use: a panel that drops down from the middle of the toolbar, over the image area. */
+.editor-toolbar { position: relative; }
+.tool-settings {
+  position: absolute;
+  z-index: 50;
+  top: 100%;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  padding: 4px 6px;
+  border: 1px solid var(--border);
+  border-top: 0;
+  border-radius: 0 0 8px 8px;
+  background: #292d38;
+  box-shadow: 0 6px 16px rgba(0,0,0,.35);
+}
 .toolbar-side, .toolbar-center { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .toolbar-side.right { justify-content: flex-start; }
 .toolbar-center > .tool-section + .tool-section { margin-left: 20px; }
@@ -466,19 +513,28 @@ select option:disabled { color: #777d8e; }
   cursor: pointer;
 }
 .steps-collapse:hover { color: #f4f4f5; background: rgba(255,255,255,.08); }
-.steps-snapshot {
-  width: 24px;
+/* The row of layer tools below the header: tool buttons on the left, Show All | None on the right. */
+.steps-toolbar { display: flex; align-items: center; gap: 5px; padding: 5px; border-bottom: 1px solid #343845; background: #1f222a; }
+.steps-toolbar .steps-show { margin-left: auto; }
+.steps-tool {
   height: 24px;
   flex: 0 0 auto;
-  display: grid;
-  place-items: center;
-  border-radius: 5px;
-  color: #9aa1b0;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 0 7px 0 5px;
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+  border: 1px dashed #454b5b;
+  border-radius: 6px;
+  color: #8c91a1;
   background: transparent;
   cursor: pointer;
 }
-.steps-snapshot:hover:not(:disabled) { color: #f4f4f5; background: rgba(255,255,255,.08); }
-.steps-snapshot:disabled { color: #626879; cursor: default; }
+/* Like the + Adjustment button: dashed, solid on hover. */
+.steps-tool:hover:not(:disabled) { border-style: solid; color: #ffffff; background: var(--panel-raised); }
+.steps-tool:disabled { cursor: default; opacity: .6; }
 /* Collapsed, the panel is a thin strip; a click anywhere on it expands the panel. */
 .steps-panel.collapsed { width: 30px; }
 .steps-expand {
@@ -541,6 +597,9 @@ select option:disabled { color: #777d8e; }
 .steps-row { display: flex; align-items: flex-start; gap: 2px; padding: 4px 8px; }
 /* The selected layer: the whole card, the full width of the panel. */
 .steps-row.active { background: #333a52; }
+/* The other layers selected together with the selected one: a lighter shade of the same blue. */
+.steps-row.grouped:not(.active) { background: #2a3044; }
+.steps-card.grouped .steps-item { color: #edf0f5; }
 /* An AI edit that is still running, at the top of the list. */
 .pending-row, .pending-row .steps-item { cursor: pointer; }
 .pending-thumb { display: grid; place-items: center; color: var(--accent-hover); }
@@ -609,10 +668,17 @@ select option:disabled { color: #777d8e; }
 .layer-chip button.layer-chip-mask { padding: 0 6px 0 4px; }
 .layer-chip button.layer-chip-mask:hover:not(:disabled) { background: transparent; }
 .layer-chip button:hover:not(:disabled) { color: #ffffff; background: var(--panel-raised); }
+/* Without a mask, a dashed + box takes the place of the mask thumbnail. */
+.layer-chip button.layer-chip-mask-add { width: 27px; margin: 4px 6px 4px 0; padding: 0; justify-content: center; border: 1px dashed #8c91a1; border-radius: 2px; }
+.layer-chip button.layer-chip-mask-add:hover:not(:disabled) { border-style: solid; border-color: var(--accent-hover); }
 /* The mask the Mask tool paints gets a blue border, or a red one while the red view is on. */
 .layer-chip.target .chip-mask, .thumb-mask.target .chip-mask { outline: 2px solid #4f8bff; }
 .layer-chip.target.red .chip-mask { outline: 2px solid #ff3366; }
 /* The layer mask, over the bottom-left corner of the layer thumbnail. */
+/* A layer without a mask: a + button in the same place opens the layer mask menu. */
+.thumb-mask-add { position: absolute; left: 3px; bottom: 3px; width: 27px; height: 18px; display: grid; place-items: center; padding: 0; border: 1px dashed #8c91a1; border-radius: 2px; color: #edf0f5; background: rgba(20,22,29,.75); box-shadow: 0 1px 4px rgba(0,0,0,.6); cursor: pointer; }
+.thumb-mask-add:hover:not(.disabled) { border-style: solid; border-color: var(--accent-hover); background: rgba(20,22,29,.9); }
+.thumb-mask-add.disabled { cursor: default; opacity: .5; }
 .thumb-mask { cursor: pointer; position: absolute; left: 3px; bottom: 3px; display: flex; box-shadow: 0 1px 4px rgba(0,0,0,.6); }
 .thumb-mask .chip-mask { outline: 1px solid #4a5062; }
 .thumb-mask.red .chip-mask { outline: 2px solid #ff3366; }
@@ -630,7 +696,7 @@ select option:disabled { color: #777d8e; }
 .chip-mask.hides img { filter: brightness(0); }
 /* A mask that is turned off: faded, with a diagonal line through it. */
 .chip-mask.off img { opacity: .35; }
-/* A linked copy: a small chain in the lower-right corner of the mask thumbnail. */
+/* A linked copy: a small chain in the lower-right corner of the mask thumbnail, in mid gray with no box, so it shows on black and on white. */
 .chip-mask-link {
   position: absolute;
   z-index: 1;
@@ -638,11 +704,9 @@ select option:disabled { color: #777d8e; }
   bottom: 0;
   display: grid;
   place-items: center;
-  width: 11px;
-  height: 11px;
-  border-top-left-radius: 3px;
-  color: #ffffff;
-  background: var(--accent);
+  width: 13px;
+  height: 13px;
+  color: #808080;
 }
 .chip-mask.off::after { content: ""; position: absolute; inset: 0; background: linear-gradient(to top right, transparent calc(50% - 1px), #ff3366 calc(50% - 1px), #ff3366 calc(50% + 1px), transparent calc(50% + 1px)); }
 .layer-strip-add { height: 28px; min-width: 28px; display: flex; align-items: center; justify-content: center; gap: 5px; padding: 0 7px; border: 1px dashed #454b5b; border-radius: 6px; color: #8c91a1; background: transparent; font-size: 11px; cursor: pointer; }
@@ -662,10 +726,12 @@ select option:disabled { color: #777d8e; }
   box-shadow: 0 10px 28px rgba(0,0,0,.55);
 }
 .layer-adjust-popover .layer-adjust-sliders { padding: 14px 16px; }
+.layer-adjust-title { padding: 10px 16px 0; color: #777d8e; font-size: 11px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; }
+.layer-adjust-title + .layer-adjust-sliders { padding-top: 10px; }
 .layer-adjust-row { display: contents; }
 .layer-adjust-row label { color: #8c91a1; font-size: 11px; font-weight: 600; }
 .layer-adjust-row input[type="range"] { width: 100%; accent-color: var(--accent); }
-.layer-adjust-check input[type="checkbox"] { grid-column: span 2; justify-self: start; margin: 0; accent-color: var(--accent); }
+.layer-adjust-check input[type="checkbox"] { grid-column: span 2; justify-self: start; }
 .layer-adjust-row output { color: #ffffff; font-size: 11px; font-variant-numeric: tabular-nums; text-align: right; }
 .steps-menu {
   position: fixed;
@@ -701,14 +767,17 @@ select option:disabled { color: #777d8e; }
 .layer-pick-box {
   position: absolute;
   box-sizing: border-box;
-  border: 3px solid var(--secondary);
-  box-shadow: 0 0 0 1px rgba(0, 0, 0, .8), 0 0 0 9999px rgba(0, 0, 0, .5), inset 0 0 0 1px rgba(0, 0, 0, .8);
+  border: 1px solid #808080;
+  box-shadow: 0 0 0 9999px rgba(0, 0, 0, .5);
 }
 .steps-menu-label { flex: 1; }
 .steps-menu button small { color: #8c91a1; font-size: 10px; }
 .steps-menu-check { width: 14px; display: grid; place-items: center; color: var(--secondary); }
 .blend-tag { margin-left: 6px; padding: 0 5px; border: 1px solid rgba(169,221,248,.45); border-radius: 4px; color: var(--secondary); font-size: 9px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; cursor: pointer; }
 .blend-tag:hover { background: rgba(169,221,248,.12); }
+/* The blend mode has its own line under the layer name. */
+.steps-blend { display: block; line-height: 1; }
+.steps-blend .blend-tag { display: inline-block; margin-left: 0; padding: 2px 5px; }
 /* Normal blend mode: the same quiet gray as the model name. */
 .blend-tag.normal { border-color: rgba(127,133,149,.45); color: #7f8595; }
 .blend-tag.normal:hover { background: rgba(255,255,255,.06); }
@@ -1627,24 +1696,15 @@ select option:disabled { color: #777d8e; }
 .transform-actions .transform-apply:hover { color: #000000; background: var(--secondary-hover); }
 .editor-workspace.transforming:not(.pan-ready):not(.panning):not(.zoom-in-ready):not(.zoom-out-ready) * { cursor: inherit !important; }
 .selection-mask { position: absolute; z-index: 4; inset: 0; overflow: hidden; pointer-events: none; }
-.selection-margin {
-  position: absolute;
-  border: 1px dashed rgba(255,255,255,.22);
-  pointer-events: none;
-}
 .selection-frame {
   position: absolute;
   border: 2px solid var(--accent);
   box-shadow: 0 0 0 100000px rgba(10,12,16,.5), 0 0 0 1px rgba(0,0,0,.5) inset;
 }
-/* A running edit does not darken the image, so work can go on around it. */
+/* A running edit does not darken the image, so work can go on around it; the moving band of light around the image marks it, so the frame has no line. */
 .selection-frame.working {
-  border-style: dashed;
-  box-shadow: 0 0 0 1px rgba(0,0,0,.5) inset;
-  animation: selection-pulse 1.6s ease-in-out infinite;
-}
-@keyframes selection-pulse {
-  50% { border-color: var(--accent-hover); }
+  border-color: transparent;
+  box-shadow: none;
 }
 .selection-frame .selection-progress {
   position: absolute;
@@ -1910,27 +1970,102 @@ select option:disabled { color: #777d8e; }
 .brush-cursor.erasing { border-style: dashed; }
 /* While Space is held or the image is panned, the hand cursor shows instead of the brush ring. */
 .brush-cursor.pan-hidden { visibility: hidden; }
-/* The mask brush size, centered in the toolbar while the mask brush is on. */
-.brush-size-group .brush-size-inline { padding-left: 0; }
-.tool-section > .tool-group.brush-size-group { padding: 1px 3px; }
-.tool-group.brush-size-group button { width: 26px; min-height: 26px; padding: 0; justify-content: center; }
-/* The brush opacity box, after the brush size, with a line between them. */
-.brush-opacity { display: flex; align-items: center; gap: 4px; margin-left: 4px; padding: 0 4px 0 9px; border-left: 1px solid var(--border); color: #8c91a1; font-size: 11px; cursor: text; }
-.brush-opacity input { width: 34px; height: 22px; padding: 0 4px; border: 1px solid #454b5b; border-radius: 4px; color: #edf0f5; background: #1d2029; font-size: 11px; text-align: right; font-variant-numeric: tabular-nums; user-select: text; }
-.brush-opacity input:focus { border-color: var(--accent-hover); outline: none; }
-.brush-opacity b { color: #8c91a1; font-weight: 400; }
-/* A quiet X at the end of the Brush section; it turns off the Mask tool, like Esc. */
-/* The Mask tool picker: four icon buttons, one active, then the tool's settings. */
-.tool-section > .tool-group.mask-tool-picker { padding: 1px 3px; gap: 2px; }
-.tool-group.mask-tool-picker button { width: 30px; min-height: 26px; }
-/* The lasso and gradients have only the opacity box: it needs no line before it. */
-.brush-size-group.opacity-only .brush-opacity { margin-left: 0; padding-left: 5px; border-left: 0; }
-.tool-group.brush-size-group button.brush-close { width: 22px; margin-left: 2px; color: #6f7585; }
-.tool-group.brush-size-group button.brush-close:hover { color: #edf0f5; }
-.brush-size-inline { display: flex; align-items: center; gap: 2px; padding-left: 4px; }
-/* The size buttons are fixed squares; the Precise button fits its label. */
-.tool-group.brush-size-group button.brush-precise { width: auto; margin-left: 4px; padding: 0 8px; font-size: 11px; white-space: nowrap; }
-.brush-size-inline > span { min-width: 52px; color: #d4d7df; font-size: 11px; text-align: center; font-variant-numeric: tabular-nums; }
+/* The brush settings below the toolbar, in one row: each label before its control, with extra space before each setting after the first. */
+.brush-settings { display: flex; align-items: center; gap: 8px; padding: 2px 4px; }
+.brush-setting-label { color: #8c91a1; font-size: 11px; font-weight: 600; white-space: nowrap; }
+.brush-setting-label:not(:first-child) { margin-left: 10px; }
+/* The brush size and opacity: a hand over the value; drag up or down to change it. */
+.brush-size-value { min-width: 48px; padding: 3px 4px; border: 1px solid #454b5b; border-radius: 4px; color: #d4d7df; font-size: 11px; text-align: center; font-variant-numeric: tabular-nums; cursor: grab; touch-action: none; user-select: none; }
+.brush-size-value:hover { background: rgba(255,255,255,.06); }
+.brush-size-value:active { cursor: grabbing; }
+/* Soft | Precise: two joined buttons; the one in use is filled dark, the other is not filled. */
+.split-button.brush-tip button { color: #8c91a1; background: transparent; }
+.split-button.brush-tip button.active { color: #ffffff; background: #1d2029; }
+/* The polygon lasso icon: its picture is a mask filled with the text color. */
+.polygon-lasso-icon {
+  display: inline-block;
+  flex: 0 0 auto;
+  background-color: currentColor;
+  -webkit-mask: url("/lasso-poly.png") center / contain no-repeat;
+  mask: url("/lasso-poly.png") center / contain no-repeat;
+}
+/* The Paint tools at the left of the toolbar: brush and lasso, then the paint color. */
+/* The tool pickers: separate framed buttons instead of one framed group. */
+.tool-section > .tool-group.mask-tool-picker,
+.tool-section > .tool-group.paint-tool-picker { gap: 6px; padding: 0; border: 0; background: transparent; }
+.tool-group.mask-tool-picker button,
+.tool-group.paint-tool-picker button { width: 32px; min-height: 32px; border: 1px solid var(--border); border-radius: 7px; background: rgba(255,255,255,.025); }
+.tool-group.mask-tool-picker button:hover:not(:disabled),
+.tool-group.paint-tool-picker button:hover:not(:disabled) { background: rgba(255,255,255,.07); }
+.tool-group.mask-tool-picker button.active,
+.tool-group.paint-tool-picker button.active { border-color: transparent; color: #ffffff; background: var(--accent); }
+.color-picker-anchor { position: relative; display: flex; margin-left: 8px; }
+.paint-swatch { width: 28px; height: 28px; border: 2px solid #1d2029; border-radius: 6px; box-shadow: 0 0 0 1px #5a6072; cursor: pointer; }
+.paint-swatch:hover, .paint-swatch.open { box-shadow: 0 0 0 1px var(--accent-hover); }
+/* The color picker opens below the swatch: the wheel on the left, the HSB sliders on the right. */
+.color-picker {
+  position: absolute;
+  z-index: 130;
+  top: calc(100% + 8px);
+  left: 0;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  /* Room at the bottom for the OK button in the corner. */
+  padding: 14px 14px 46px;
+  border: 1px solid #454b5b;
+  border-radius: 10px;
+  background: var(--panel-raised);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, .5);
+}
+/* The wheel casts a strong black glow onto the panel. */
+.color-wheel { position: relative; flex: 0 0 auto; line-height: 0; }
+.color-wheel canvas { border-radius: 50%; box-shadow: 0 0 14px 4px rgba(0, 0, 0, .95), 0 0 4px 1px #000000; cursor: crosshair; touch-action: none; }
+.color-wheel-marker { position: absolute; width: 14px; height: 14px; margin: -7px 0 0 -7px; border: 2px solid #ffffff; border-radius: 50%; box-shadow: 0 0 0 1px rgba(0,0,0,.7); pointer-events: none; }
+/* The wheel's section fills the left of the panel from top to bottom (over the panel padding), a little darker, with a line on its right. */
+.color-wheel-section {
+  align-self: stretch;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin: -14px 0 -46px -14px;
+  padding: 0 22px;
+  border-right: 1px solid #454b5b;
+  border-radius: 9px 0 0 9px;
+  background: #292c37;
+}
+.color-fields { width: 210px; display: grid; grid-template-columns: 30px 1fr auto; align-items: center; gap: 10px 8px; }
+.color-field { display: contents; }
+.color-field label { color: #8c91a1; font-size: 11px; font-weight: 700; }
+.color-field input[type="range"] { width: 100%; height: 10px; margin: 0; border-radius: 5px; appearance: none; -webkit-appearance: none; cursor: pointer; }
+.color-field input[type="range"]::-webkit-slider-thumb { width: 14px; height: 14px; border: 2px solid #ffffff; border-radius: 50%; background: transparent; box-shadow: 0 0 0 1px rgba(0,0,0,.7); -webkit-appearance: none; }
+.color-field input[type="text"] { width: 40px; height: 22px; padding: 0 5px; border: 1px solid #454b5b; border-radius: 4px; color: #edf0f5; background: #1d2029; font-size: 11px; text-align: right; font-variant-numeric: tabular-nums; user-select: text; }
+.color-field input[type="text"]:focus { border-color: var(--accent-hover); outline: none; }
+.color-field input.color-hex { width: 100%; text-align: left; font-family: ui-monospace, Consolas, monospace; text-transform: uppercase; }
+/* OK sits in the panel's bottom-right corner: flush with both edges, its outer corner rounded with the panel. */
+.color-ok {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  min-width: 72px;
+  padding: 7px 18px 8px;
+  border-top: 1px solid #454b5b;
+  border-left: 1px solid #454b5b;
+  border-radius: 9px 0 9px 0;
+  color: #edf0f5;
+  /* The blue of the selected layer. */
+  background: #333a52;
+  /* An inner shadow inside the top and left edges, so the button looks pressed into the corner. */
+  box-shadow: inset 2px 2px 5px rgba(0, 0, 0, .45);
+  font-size: 12px;
+  font-weight: 800;
+  cursor: pointer;
+}
+.color-ok:hover { color: #ffffff; background: #3d4562; }
+/* While the color picker is open, a circle beside the eyedropper shows the color under the pointer. */
+.color-probe { position: absolute; z-index: 8; left: 0; top: 0; width: 44px; height: 44px; border: 1px solid #808080; border-radius: 50%; box-shadow: 0 2px 6px rgba(0,0,0,.45); pointer-events: none; will-change: transform; }
+/* No layer shows under the pointer: an empty, dashed circle. */
+.color-probe.empty { border-style: dashed; background: transparent; }
 .gradient-line { position: absolute; z-index: 6; inset: 0; overflow: visible; pointer-events: none; }
 .gradient-line-shadow { stroke: rgba(0,0,0,.6); stroke-width: 3.5; }
 .gradient-line-main { stroke: #ffffff; stroke-width: 1.5; }
@@ -2038,29 +2173,13 @@ select option:disabled { color: #777d8e; }
 .click-select-point { position: absolute; width: 10px; height: 10px; margin: -5px 0 0 -5px; border: 2px solid #ffffff; border-radius: 50%; box-shadow: 0 0 0 1px rgba(0,0,0,.6); }
 .click-select-point.include { background: #22c55e; }
 .click-select-point.exclude { background: #ef4444; }
-.click-select-bar {
-  position: absolute;
-  z-index: 21;
-  top: 12px;
-  left: 50%;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 6px 6px 6px 12px;
-  border: 1px solid #4f8bff;
-  border-radius: 8px;
-  color: #dbe5ff;
-  background: rgba(31,34,43,.96);
-  box-shadow: 0 10px 28px rgba(0,0,0,.5);
-  font-size: 12px;
-  white-space: nowrap;
-  transform: translateX(-50%);
-}
-.click-select-bar button { display: flex; align-items: center; gap: 5px; padding: 5px 10px; border: 1px solid #454b5b; border-radius: 6px; color: #d9dce3; background: #242832; font-size: 12px; cursor: pointer; }
-.click-select-bar button:hover:not(:disabled) { color: #ffffff; background: #30353f; }
-.click-select-bar button:disabled { opacity: .5; cursor: default; }
-.click-select-bar .click-select-apply { border-color: transparent; color: #ffffff; background: var(--accent); }
-.click-select-bar .click-select-apply:hover:not(:disabled) { background: var(--accent); filter: brightness(1.1); }
+/* Magic, in the tool settings panel: its keys, then Apply and Cancel. */
+.click-select-settings { display: flex; align-items: center; gap: 8px; padding: 2px 0 2px 6px; color: #dbe5ff; font-size: 12px; white-space: nowrap; }
+.click-select-settings button { display: flex; align-items: center; gap: 5px; padding: 5px 10px; border: 1px solid #454b5b; border-radius: 6px; color: #d9dce3; background: #242832; font-size: 12px; cursor: pointer; }
+.click-select-settings button:hover:not(:disabled) { color: #ffffff; background: #30353f; }
+.click-select-settings button:disabled { opacity: .5; cursor: default; }
+.click-select-settings .click-select-apply { border-color: transparent; color: #ffffff; background: var(--accent); }
+.click-select-settings .click-select-apply:hover:not(:disabled) { background: var(--accent); filter: brightness(1.1); }
 
 
 /* The video slideshow dialog: one setting per row, labels on the left. */
@@ -2068,6 +2187,10 @@ select option:disabled { color: #777d8e; }
 .slideshow-body { display: flex; flex-direction: column; gap: 12px; padding: 18px 22px; }
 .slideshow-body .settings-input:disabled { opacity: .5; }
 .slideshow-note { margin: 0 0 0 98px; color: #7f8595; font-size: 11px; }
+/* The seconds per layer box, with the video length it gives beside it. */
+.slideshow-seconds { display: flex; align-items: center; gap: 12px; }
+.slideshow-seconds .settings-input { width: 80px; }
+.slideshow-length { color: #9ca1af; font-size: 12px; font-variant-numeric: tabular-nums; }
 /* Shown instead of a blank window when the app crashes. */
 .crash-screen { display: flex; flex-direction: column; align-items: flex-start; gap: 14px; height: 100vh; padding: 32px; overflow: auto; color: #e6e9f2; background: #15171d; }
 .crash-screen h1 { margin: 0; font-size: 18px; }

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { adjustmentFilter, adjustmentOpacity, adjustSignature, LOG_SLIDER_STEPS, logSliderPosition, logSliderValue, resetAdjustment, allAdjustmentsOff, findAdjustment, hasAdjustments, moveLayer, replaceAdjustment, toggleAllAdjustments } from "./layers";
+import { adjustmentFilter, adjustmentOpacity, adjustSignature, LOG_SLIDER_STEPS, logSliderPosition, logSliderValue, resetAdjustment, allAdjustmentsOff, findAdjustment, hasAdjustments, moveLayer, moveLayers, replaceAdjustment, toggleAllAdjustments } from "./layers";
 import type { Adjustment } from "./types";
 
 /** Nodes 1, 2, 3 are A, B, C from the bottom up; node 0 is the original image. */
@@ -21,6 +21,24 @@ describe("moveLayer", () => {
   it("ignores moves onto itself and moves of the original image", () => {
     expect(moveLayer(stack, 2, 2, true).history).toBe(stack);
     expect(moveLayer(stack, 0, 2, true).history).toBe(stack);
+  });
+});
+
+describe("moveLayers", () => {
+  const five = ["A", "B", "C", "D", "E"];
+  it("moves several layers together, in their own order, above or below another", () => {
+    expect(moveLayers(five, [1, 3], 5, true)).toEqual({ history: ["B", "D", "E", "A", "C"], nodes: [4, 5] });
+    expect(moveLayers(five, [5, 2], 1, false)).toEqual({ history: ["B", "E", "A", "C", "D"], nodes: [2, 1] });
+    expect(moveLayers(five, [4, 5], 2, true)).toEqual({ history: ["A", "B", "D", "E", "C"], nodes: [3, 4] });
+  });
+
+  it("puts them at the bottom when dropped on the original image", () => {
+    expect(moveLayers(five, [3, 4], 0, true)).toEqual({ history: ["C", "D", "A", "B", "E"], nodes: [1, 2] });
+  });
+
+  it("changes nothing when dropped on one of them or where they already are", () => {
+    expect(moveLayers(five, [2, 4], 4, true).history).toBe(five);
+    expect(moveLayers(five, [2, 3], 1, true).history).toBe(five);
   });
 });
 
@@ -56,6 +74,10 @@ describe("layer adjustments", () => {
     expect(adjustmentFilter(hue({ hue: 30, saturation: -50 }))).toBe("hue-rotate(30deg) saturate(0.5)");
     expect(adjustmentFilter(hue({ saturation: 100 }))).toBe("saturate(2)");
     expect(adjustmentFilter(hue({ hue: 0, saturation: 0 }))).toBeNull();
+    expect(adjustmentFilter(hue({ lightness: -40 }))).toBe("brightness(0.6)");
+    expect(adjustmentFilter(hue({ lightness: 25 }))).toBe("invert(1) brightness(0.75) invert(1)");
+    expect(adjustmentFilter(hue({ hue: 10, lightness: 0 }))).toBe("hue-rotate(10deg)");
+    expect(adjustmentFilter(hue({ colorize: true, hue: 200, saturation: 80, lightness: -50 }))).toBe("brightness(0.5) url(#clz_200_80)");
   });
 
   it("turns opacity into a canvas filter and a fraction", () => {

@@ -42,7 +42,7 @@ type OpenedImageFile = {
   historyTiles: HistoryTile[];
 };
 
-type NewDocument = Pick<ImageDocument, "name" | "path" | "suggestedPath" | "createdAt" | "origin" | "surface" | "base" | "baseAdjust" | "history" | "historyIndex" | "startGeneration"> & {
+type NewDocument = Pick<ImageDocument, "name" | "path" | "suggestedPath" | "sourcePath" | "createdAt" | "origin" | "surface" | "base" | "baseAdjust" | "history" | "historyIndex" | "startGeneration"> & {
   /** Generated images cost money, so they start unsaved; imported files start clean. */
   startsDirty: boolean;
   /** Keeps a recovered document's id, so its recovery file is reused. */
@@ -50,6 +50,8 @@ type NewDocument = Pick<ImageDocument, "name" | "path" | "suggestedPath" | "crea
 };
 
 const fileName = (path: string) => path.split(/[\\/]/).pop() || path;
+/** Windows paths ignore case and accept both slashes, so two spellings of one file compare equal. */
+const samePath = (a: string | null | undefined, b: string) => Boolean(a) && a!.replace(/\//g, "\\").toLowerCase() === b.replace(/\//g, "\\").toLowerCase();
 
 /** An opened image too large for GPT Image, waiting for the user to choose whether to scale it down. */
 type PendingImport = { path: string; surface: HTMLCanvasElement; target: { width: number; height: number } };
@@ -169,6 +171,20 @@ export default function App() {
   const pendingCloseDocument = documents.find((document) => document.id === pendingCloseDocumentId) ?? null;
 
   const showNotice = useCallback((next: Notice) => setNotice(next), []);
+  /**
+   * Each editor's messages belong to its image: they show only while it is
+   * selected and close with it. One stable function per image, because the
+   * editor's effects depend on it.
+   */
+  const documentNoticesRef = useRef(new Map<string, (next: Notice) => void>());
+  const noticeFor = (documentId: string) => {
+    let show = documentNoticesRef.current.get(documentId);
+    if (!show) {
+      show = (next: Notice) => setNotice(next && !next.documentId ? { ...next, documentId } : next);
+      documentNoticesRef.current.set(documentId, show);
+    }
+    return show;
+  };
   /** Labels of the file reads and writes now running; the loader shows the newest. */
   const [fileTasks, setFileTasks] = useState<{ id: number; label: string }[]>([]);
   const fileTaskIdRef = useRef(0);
@@ -230,6 +246,7 @@ export default function App() {
     mutateDocuments((items) => items.filter((document) => document.id !== id));
     setActiveDocumentId((activeId) => activeId === id ? nextActiveId : activeId);
     recoveryWrittenRef.current.delete(id);
+    documentNoticesRef.current.delete(id);
     if (isTauri()) void removeRecovery(id).catch(() => {});
   }, [mutateDocuments]);
 
@@ -319,6 +336,7 @@ export default function App() {
       name: documentNameFor(path),
       path: null,
       suggestedPath: path.replace(/[^\\/]*$/, documentNameFor(path)),
+      sourcePath: path,
       createdAt: new Date().toISOString(),
       origin: { kind: "imported", fileName: fileName(path) },
       surface,
@@ -336,6 +354,13 @@ export default function App() {
   }, [addImportedImage, pendingImport]);
 
   const openPath = useCallback(async (path: string) => {
+    /** A file that is already open is selected, not opened a second time. */
+    const alreadyOpen = documentsRef.current.find((document) => samePath(document.path, path) || samePath(document.sourcePath, path));
+    if (alreadyOpen) {
+      setActiveDocumentId(alreadyOpen.id);
+      await restoreMainWindow();
+      return;
+    }
     setOpening(true);
     try {
       const { opened, surface } = await runFileTask(`Opening ${fileName(path)}…`, async () => {
@@ -842,7 +867,7 @@ export default function App() {
             onSave={saveDocument}
             onExport={exportImage}
             onExportVideo={exportVideo}
-            onNotice={showNotice}
+            onNotice={noticeFor(document.id)}
             onFileTask={runFileTask}
             command={editorCommand?.documentId === document.id ? editorCommand : null}
           />

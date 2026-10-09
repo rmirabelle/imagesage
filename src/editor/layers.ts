@@ -20,6 +20,26 @@ export function moveLayer<T>(history: T[], from: number, to: number, above: bool
 }
 
 /**
+ * Moves the layers at `nodes` together, in their own order, so they sit
+ * directly above (or below) the layer at node `to`; layers between them close
+ * up. A drop on one of the moved layers, or on node 0 below, changes nothing
+ * or puts them at the bottom. Returns the new history and the moved layers'
+ * new nodes, in the order of `nodes`.
+ */
+export function moveLayers<T>(history: T[], nodes: number[], to: number, above: boolean): { history: T[]; nodes: number[] } {
+  const moving = [...new Set(nodes)].filter((node) => node >= 1 && node <= history.length).sort((a, b) => a - b);
+  if (!moving.length || moving.includes(to) || to < 0 || to > history.length) return { history, nodes };
+  const rest = history.map((_, index) => index).filter((index) => !moving.includes(index + 1));
+  const at = to === 0 ? 0 : rest.indexOf(to - 1) + (above ? 1 : 0);
+  const order = [...rest.slice(0, at), ...moving.map((node) => node - 1), ...rest.slice(at)];
+  if (order.every((index, position) => index === position)) return { history, nodes };
+  return {
+    history: order.map((index) => history[index]),
+    nodes: nodes.map((node) => order.indexOf(node - 1) + 1)
+  };
+}
+
+/**
  * The adjustments as a list. Documents that were open before adjustments
  * became a list can still hold the older single-brightness object; it counts as none.
  */
@@ -29,7 +49,7 @@ export const adjustList = (adjust: LayerAdjust | undefined): LayerAdjust => Arra
 export const ADJUSTMENT_LABELS: Record<AdjustmentKind, string> = { brightness: "Brightness", contrast: "Contrast", hueSaturation: "Hue/Saturation", opacity: "Opacity", blur: "Blur", sharpen: "Sharpen" };
 
 /** A number an adjustment keeps. */
-export type AdjustmentField = "value" | "hue" | "saturation" | "pivot" | "curve" | "color" | "radius";
+export type AdjustmentField = "value" | "hue" | "saturation" | "lightness" | "pivot" | "curve" | "color" | "radius";
 
 /**
  * The sliders of each kind of adjustment: which number, its name, its range,
@@ -49,7 +69,8 @@ export const ADJUSTMENT_FIELDS: Record<AdjustmentKind, { field: AdjustmentField;
   ],
   hueSaturation: [
     { field: "hue", label: "Hue", min: -180, max: 180, unit: "°", neutral: 0, signed: true },
-    { field: "saturation", label: "Saturation", min: -100, max: 100, unit: "", neutral: 0, signed: true }
+    { field: "saturation", label: "Saturation", min: -100, max: 100, unit: "", neutral: 0, signed: true },
+    { field: "lightness", label: "Lightness", min: -100, max: 100, unit: "", neutral: 0, signed: true }
   ],
   opacity: [{ field: "value", label: "Opacity", min: 0, max: 100, unit: "%", neutral: 100, signed: false }],
   blur: [{ field: "value", label: "Radius", min: 0, max: 100, unit: " px", neutral: 0, signed: false }],
@@ -74,7 +95,8 @@ export const formatAdjustNumber = (value: number, decimals = 0) => decimals ? (v
 /** Hue/Saturation with Colorize on: one hue for every pixel, at a strength (Photoshop starts at 0° and 25). */
 export const COLORIZE_FIELDS: typeof ADJUSTMENT_FIELDS[AdjustmentKind] = [
   { field: "hue", label: "Hue", min: 0, max: 360, unit: "°", neutral: 0, signed: false },
-  { field: "saturation", label: "Saturation", min: 0, max: 100, unit: "", neutral: 25, signed: false }
+  { field: "saturation", label: "Saturation", min: 0, max: 100, unit: "", neutral: 25, signed: false },
+  { field: "lightness", label: "Lightness", min: -100, max: 100, unit: "", neutral: 0, signed: true }
 ];
 
 /** The sliders of one adjustment; Colorize changes the ranges of Hue/Saturation. */
@@ -93,8 +115,11 @@ export const contrastParams = (adjustment: Adjustment): ContrastParams => ({
   color: adjustmentNumber(adjustment, "color") / 100
 });
 
-/** A new adjustment of a kind, with no change yet. */
-export const newAdjustment = (kind: AdjustmentKind): Adjustment => resetAdjustment({ id: newAdjustmentId(), kind, value: 0 });
+/** A new adjustment of a kind, with no change yet; a new blur starts at 5 px, so it shows at once. */
+export const newAdjustment = (kind: AdjustmentKind): Adjustment => {
+  const added = resetAdjustment({ id: newAdjustmentId(), kind, value: 0 });
+  return kind === "blur" ? { ...added, value: 5 } : added;
+};
 
 /** The adjustment with every number back at the value that changes nothing. */
 export const resetAdjustment = (adjustment: Adjustment): Adjustment => {
@@ -121,6 +146,16 @@ export function adjustmentOpacity(adjustment?: Adjustment): number | null {
 /** A new adjustment id; it never equals "mask", the layer mask's part name. */
 export const newAdjustmentId = () => `adj-${crypto.randomUUID().slice(0, 8)}`;
 
+/**
+ * The canvas filter for Hue/Saturation's Lightness, as in Photoshop: below 0
+ * it moves each color toward black, above 0 toward white (inverted, darkened,
+ * inverted back). Empty at 0.
+ */
+export const lightnessFilter = (lightness: number) =>
+  lightness < 0 ? `brightness(${(100 + lightness) / 100})`
+    : lightness > 0 ? `invert(1) brightness(${(100 - lightness) / 100}) invert(1)`
+    : "";
+
 /** The canvas filter for an adjustment, or null when it changes nothing (absent, off, or 0). */
 export function adjustmentFilter(adjustment?: Adjustment): string | null {
   if (!adjustment || adjustment.off) return null;
@@ -130,12 +165,15 @@ export function adjustmentFilter(adjustment?: Adjustment): string | null {
   }
   /** Colorize always changes the image: at saturation 0 it makes the layer gray. */
   if (adjustment.kind === "hueSaturation" && adjustment.colorize) {
-    return colorizeFilterUrl({ hue: adjustmentNumber(adjustment, "hue"), saturation: adjustmentNumber(adjustment, "saturation") / 100 });
+    const colorize = colorizeFilterUrl({ hue: adjustmentNumber(adjustment, "hue"), saturation: adjustmentNumber(adjustment, "saturation") / 100 });
+    /** As in Photoshop, Lightness comes first: white lowered to a middle gray takes the full color. */
+    return [lightnessFilter(adjustmentNumber(adjustment, "lightness")), colorize].filter(Boolean).join(" ");
   }
   if (adjustment.kind === "hueSaturation") {
     const parts = [
       adjustment.hue ? `hue-rotate(${adjustment.hue}deg)` : "",
-      adjustment.saturation ? `saturate(${(100 + adjustment.saturation) / 100})` : ""
+      adjustment.saturation ? `saturate(${(100 + adjustment.saturation) / 100})` : "",
+      lightnessFilter(adjustment.lightness ?? 0)
     ].filter(Boolean);
     return parts.length ? parts.join(" ") : null;
   }

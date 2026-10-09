@@ -13,6 +13,10 @@ import {
   LABEL_PAUSE,
   LAYER_FADE,
   LAYER_STEP,
+  MAX_LAYER_SECONDS,
+  MAX_VIDEO_SECONDS,
+  MIN_LAYER_SECONDS,
+  defaultLayerSeconds,
   MUSIC_FADE_IN,
   OPEN_PAUSE,
   OPEN_HOLD,
@@ -39,6 +43,22 @@ describe("slideshow", () => {
     expect(slideshowDuration(slideshowSegments(1, false))).toBe(FINAL_HOLD + FADE_OUT);
     expect(slideshowDuration(slideshowSegments(4, false))).toBeCloseTo(STEP + LAYER_STEP * 3 + RETURN_STEP + FINAL_HOLD + FADE_OUT);
     expect(slideshowDuration(slideshowSegments(4, true))).toBeCloseTo(OPEN_PAUSE + OPEN_HOLD + OPEN_REST + STEP + LAYER_STEP * 3 + RETURN_STEP + FINAL_HOLD + FADE_OUT);
+  });
+
+  it("by default shortens each layer, to a tenth of a second, so many layers fit in the longest video, but not below the shortest layer time", () => {
+    expect(defaultLayerSeconds(4, true)).toBeCloseTo(LAYER_STEP);
+    expect(defaultLayerSeconds(37, true)).toBe(1.3);
+    const many = slideshowDuration(slideshowSegments(37, true));
+    expect(many).toBeLessThanOrEqual(MAX_VIDEO_SECONDS);
+    expect(many).toBeGreaterThan(MAX_VIDEO_SECONDS - 36 * 0.1);
+    expect(defaultLayerSeconds(500, true)).toBe(MIN_LAYER_SECONDS);
+  });
+
+  it("shows each layer for the chosen seconds, with its name lead and fade changed by the same factor", () => {
+    const layer = slideshowSegments(4, false, 2).find((segment) => segment.picture === 2)!;
+    expect(layer.duration).toBe(2);
+    expect(layer.labelLead / LABEL_LEAD).toBeCloseTo(layer.fade / LAYER_FADE);
+    expect(slideshowDuration(slideshowSegments(4, false, MAX_LAYER_SECONDS))).toBeCloseTo(STEP + MAX_LAYER_SECONDS * 3 + RETURN_STEP + FINAL_HOLD + FADE_OUT);
   });
 
   it("starts with the original image, named, without an intro", () => {

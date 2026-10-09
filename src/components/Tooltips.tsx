@@ -6,11 +6,11 @@ const GAP = 8;
 const EDGE = 8;
 
 /**
- * `side` "left" places the tooltip left of its element; it comes from the
- * nearest `data-help-side`. `oneLine` (from `data-help-one-line`) keeps the
+ * `side` "left" places the tooltip left of its element, and "above" above
+ * it; it comes from the nearest `data-help-side`. `oneLine` (from `data-help-one-line`) keeps the
  * text on one line instead of one line per sentence.
  */
-type Tip = { text: string; anchor: DOMRect; side: "left" | "below"; oneLine: boolean };
+type Tip = { text: string; anchor: DOMRect; side: "left" | "above" | "below"; oneLine: boolean };
 
 /** A line that ends in a short key name in parentheses, such as "Smaller brush ([)", shows the key as a key cap. */
 const KEY_AT_END = /^(.*?)\s*\(([^()]{1,16})\)\s*$/;
@@ -29,6 +29,24 @@ const tipLines = (text: string) => text
   .filter(Boolean)
   .map((line) => line[0].toUpperCase() + line.slice(1));
 
+/**
+ * Keys named inside a line: a modifier combination such as "Ctrl+click" or
+ * "Ctrl+Alt+S", or Esc, Space or Backspace on their own.
+ */
+const INLINE_KEYS = /\b((?:Ctrl|Alt|Shift)(?:\s*\+\s*(?:Ctrl|Alt|Shift|Enter|Backspace|Esc|Space|Del|[Cc]lick|[A-Z0-9])\b)+|Esc|Space|Backspace)\b/;
+
+/** A key combination such as "Ctrl+Alt+S" as one key cap per key; other key text, such as "+ / −", as one key cap. */
+function Keys({ keys }: { keys: string }) {
+  const parts = /^[A-Za-z0-9]+(?:\s*\+\s*[A-Za-z0-9]+)+$/.test(keys) ? keys.split(/\s*\+\s*/) : [keys];
+  return <>{parts.map((part, index) => <span key={index}>{index > 0 && " + "}<kbd>{part}</kbd></span>)}</>;
+}
+
+/** A line of text with each key it names shown as key caps. */
+function WithKeys({ text }: { text: string }) {
+  const pieces = text.split(new RegExp(INLINE_KEYS.source, "g"));
+  return <>{pieces.map((piece, index) => index % 2 ? <Keys key={index} keys={piece} /> : piece)}</>;
+}
+
 function TipText({ text, oneLine }: { text: string; oneLine: boolean }) {
   return (
     <>
@@ -36,7 +54,7 @@ function TipText({ text, oneLine }: { text: string; oneLine: boolean }) {
         const match = KEY_AT_END.exec(line);
         return (
           <p key={index}>
-            {match ? <>{match[1]} <kbd>{match[2]}</kbd></> : line}
+            {match ? <><WithKeys text={match[1]} /> <Keys keys={match[2]} /></> : <WithKeys text={line} />}
           </p>
         );
       })}
@@ -51,7 +69,7 @@ function TipText({ text, oneLine }: { text: string; oneLine: boolean }) {
  */
 export function Tooltips() {
   const [tip, setTip] = useState<Tip | null>(null);
-  const [position, setPosition] = useState<{ left: number; top: number } | null>(null);
+  const [position, setPosition] = useState<{ left: number; top: number; above?: boolean } | null>(null);
   const boxRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -69,7 +87,8 @@ export function Tooltips() {
     const show = () => {
       const text = target?.isConnected ? target.dataset.help : undefined;
       if (!target || !text) return;
-      const side = target.closest<HTMLElement>("[data-help-side]")?.dataset.helpSide === "left" ? "left" : "below";
+      const wanted = target.closest<HTMLElement>("[data-help-side]")?.dataset.helpSide;
+      const side = wanted === "left" || wanted === "above" ? wanted : "below";
       setTip({ text, anchor: target.getBoundingClientRect(), side, oneLine: target.dataset.helpOneLine !== undefined });
     };
     const update = () => {
@@ -120,8 +139,9 @@ export function Tooltips() {
 
   /**
    * The tooltip sits below its element, or above it when there is no room
-   * below, and stays inside the window. With side "left" it sits left of its
-   * element, centered on it, when there is room there.
+   * below, and stays inside the window. With side "above" it prefers above,
+   * and with side "left" it sits left of its element, centered on it, when
+   * there is room there.
    */
   useLayoutEffect(() => {
     const box = boxRef.current;
@@ -137,18 +157,20 @@ export function Tooltips() {
       return;
     }
     const below = anchor.bottom + GAP;
-    const top = below + height <= window.innerHeight - EDGE ? below : Math.max(EDGE, anchor.top - GAP - height);
+    const above = anchor.top - GAP - height;
+    const fitsBelow = below + height <= window.innerHeight - EDGE;
+    const top = tip.side === "above" && above >= EDGE ? above : fitsBelow ? below : Math.max(EDGE, above);
     const left = Math.min(Math.max(EDGE, anchor.left + anchor.width / 2 - width / 2), window.innerWidth - EDGE - width);
-    setPosition({ left, top });
+    setPosition({ left, top, above: top < anchor.top });
   }, [tip]);
 
   if (!tip) return null;
   return (
     <div
       ref={boxRef}
-      className={`tooltip ${position ? "shown" : ""}`}
+      className={`tooltip ${position ? "shown" : ""} ${position?.above ? "above" : ""}`}
       role="tooltip"
-      style={position ?? { left: 0, top: 0 }}
+      style={position ? { left: position.left, top: position.top } : { left: 0, top: 0 }}
     >
       <TipText text={tip.text} oneLine={tip.oneLine} />
     </div>

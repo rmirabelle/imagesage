@@ -5,6 +5,7 @@ import { cancelAiRequest } from "../lib/ai";
 import { formatMegabytes } from "../lib/models";
 import { AUDIO_FILE_EXTENSIONS, decodeAudioFile, decodeTrack, downloadTrack, listTracks, type TrackInfo } from "../lib/music";
 import type { SlideshowOptions } from "../lib/slideshowVideo";
+import { defaultLayerSeconds, MAX_LAYER_SECONDS, MIN_LAYER_SECONDS, slideshowDuration, slideshowSegments } from "../editor/slideshow";
 import { MusicPicker } from "./MusicPicker";
 
 /** The music picked last in any image: the choice for an image that has no video yet. */
@@ -19,6 +20,11 @@ const FILE_PREFIX = "file:";
 /** The list item that opens the file picker; it is never the chosen music itself. */
 const CHOOSE_FILE = "choose-file";
 const fileNameOf = (path: string) => path.split(/[\\/]/).pop() ?? path;
+/** Seconds as minutes and seconds, such as "1:28". */
+const formatLength = (seconds: number) => {
+  const whole = Math.round(seconds);
+  return `${Math.floor(whole / 60)}:${String(whole % 60).padStart(2, "0")}`;
+};
 
 const readStored = (key: string) => {
   try {
@@ -51,8 +57,8 @@ const storeImageMusic = (keys: string[], music: ImageMusic) => {
 interface Props {
   /** The default title: the image's name. */
   defaultTitle: string;
-  /** How long the video runs, in seconds: the music box is this long. */
-  videoSeconds: number;
+  /** The pictures in the video: the original image plus each visible layer. */
+  stages: number;
   /** The image's keys (its file path, its document id), most lasting first: its last video's music is stored under them. */
   imageKeys: string[];
   onCancel: () => void;
@@ -63,8 +69,22 @@ interface Props {
 type TrackLoad = { id: string; progress: number | null; requestId: string };
 
 /** Settings for the video slideshow: the title in its title box, and the music. */
-export function SlideshowDialog({ defaultTitle, videoSeconds, imageKeys, onCancel, onExport }: Props) {
+export function SlideshowDialog({ defaultTitle, stages, imageKeys, onCancel, onExport }: Props) {
   const [title, setTitle] = useState(defaultTitle);
+  /** Seconds each layer shows; by default the video fits in 90 seconds. */
+  const [layerSeconds, setLayerSeconds] = useState(() => defaultLayerSeconds(stages, true));
+  /** The seconds box's text while the user types in it; null shows `layerSeconds`. */
+  const [secondsDraft, setSecondsDraft] = useState<string | null>(null);
+  /** How long the video runs, in seconds: the music box is this long. */
+  const videoSeconds = slideshowDuration(slideshowSegments(stages, true, layerSeconds));
+  /** Typed text that is a number goes into the range at one decimal; other text keeps the old value. */
+  const commitSecondsDraft = () => {
+    const typed = Number(secondsDraft);
+    if (secondsDraft !== null && secondsDraft.trim() && Number.isFinite(typed)) {
+      setLayerSeconds(Math.round(Math.min(MAX_LAYER_SECONDS, Math.max(MIN_LAYER_SECONDS, typed)) * 10) / 10);
+    }
+    setSecondsDraft(null);
+  };
   const [tracks, setTracks] = useState<TrackInfo[]>([]);
   const [trackId, setTrackId] = useState("");
   const [load, setLoad] = useState<TrackLoad | null>(null);
@@ -180,7 +200,7 @@ export function SlideshowDialog({ defaultTitle, videoSeconds, imageKeys, onCance
   const submit = () => {
     if (busy || (trackId && !music)) return;
     storeImageMusic(imageKeys, { track: music ? trackId : "", start: music ? start : 0 });
-    onExport({ title, music: music ? { buffer: music.buffer, start } : null });
+    onExport({ title, music: music ? { buffer: music.buffer, start } : null, layerSeconds });
   };
 
   return (
@@ -200,6 +220,28 @@ export function SlideshowDialog({ defaultTitle, videoSeconds, imageKeys, onCance
           <label className="form-row">
             <span className="form-row-label">Title</span>
             <input className="settings-input" value={title} autoFocus onChange={(event) => setTitle(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") submit(); }} spellCheck={false} />
+          </label>
+          <label className="form-row" data-help={`Seconds each layer shows, ${MIN_LAYER_SECONDS} to ${MAX_LAYER_SECONDS}. The first value fits the video in 90 seconds.`}>
+            <span className="form-row-label">Seconds per layer</span>
+            <span className="slideshow-seconds">
+              <input
+                className="settings-input"
+                type="number"
+                min={MIN_LAYER_SECONDS}
+                max={MAX_LAYER_SECONDS}
+                step={0.1}
+                value={secondsDraft ?? layerSeconds.toFixed(1)}
+                onChange={(event) => {
+                  setSecondsDraft(event.target.value);
+                  /** The spinner arrows give a whole value at once, so the video length follows them. */
+                  const typed = Number(event.target.value);
+                  if (event.target.value.trim() && typed >= MIN_LAYER_SECONDS && typed <= MAX_LAYER_SECONDS) setLayerSeconds(Math.round(typed * 10) / 10);
+                }}
+                onBlur={commitSecondsDraft}
+                onKeyDown={(event) => { if (event.key === "Enter") event.currentTarget.blur(); }}
+              />
+              <span className="slideshow-length">Video {formatLength(videoSeconds)}</span>
+            </span>
           </label>
           <label className="form-row">
             <span className="form-row-label">Music</span>
@@ -229,7 +271,7 @@ export function SlideshowDialog({ defaultTitle, videoSeconds, imageKeys, onCance
               </div>
             </div>
           )}
-          <p className="slideshow-note">The title box also says "Made with Image Sage™" with the app icon, and the app version.</p>
+          <p className="slideshow-note">The title box also says "made with Image Sage™" with the app icon, and the app version.</p>
         </div>
         <footer className="save-dialog-actions">
           <button className="button secondary" onClick={onCancel}>Cancel</button>

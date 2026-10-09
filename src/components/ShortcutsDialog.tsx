@@ -51,6 +51,20 @@ const SECTIONS: { title: string; shortcuts: Shortcut[] }[] = [
     ]
   },
   {
+    title: "Paint tool",
+    shortcuts: [
+      { keys: [["B"]], action: "Paint brush: paint the selected layer with the paint color" },
+      { keys: [["L"]], action: "Paint lasso: fill a closed shape with the paint color; in the Paint tool, switch between brush and lasso" },
+      { keys: [["Alt", "Backspace"]], action: "Fill the closed lasso shape, or else the whole selected layer, with the paint color" },
+      { keys: [["Alt", "Click"]], action: "Paint brush: pick the color under the pointer" },
+      { keys: [["["], ["]"]], action: "Smaller / larger brush" },
+      { keys: [["1–9"], ["0"]], action: "Paint opacity 10% to 90% / 100%" },
+      { keys: [["P"]], action: "Switch the paint brush between soft and precise" },
+      { keys: [["Ctrl", "Z"]], action: "Undo paint" },
+      { keys: [["Esc"]], action: "Turn off the Paint tool" }
+    ]
+  },
+  {
     title: "Click to select",
     shortcuts: [
       { keys: [["Alt", "Click"]], action: "Remove the area under the pointer" },

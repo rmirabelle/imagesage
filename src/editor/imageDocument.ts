@@ -10,6 +10,8 @@ export interface ImageDocument {
   path: string | null;
   /** Where the save dialog starts for a document never saved: beside the image it was imported from. */
   suggestedPath?: string;
+  /** The image file this document was imported from; opening that file again selects this document. */
+  sourcePath?: string;
   createdAt: string;
   origin: DocumentOrigin;
   surface: HTMLCanvasElement;

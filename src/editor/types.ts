@@ -102,10 +102,12 @@ export type AdjustmentKind = "brightness" | "contrast" | "hueSaturation" | "opac
 /**
  * One adjustment of a layer. A layer can have several, even of the same kind;
  * they apply in order. Brightness uses `value` (-100 to 100); Hue/Saturation
- * uses `hue` (-180 to 180 degrees) and `saturation` (-100 to 100), and keeps
+ * uses `hue` (-180 to 180 degrees), `saturation` (-100 to 100) and
+ * `lightness` (-100 to 100: toward black, or toward white), and keeps
  * `value` at 0. With `colorize`, Hue/Saturation instead gives every pixel one
  * color: `hue` is that hue (0 to 360 degrees) and `saturation` its strength
- * (0 to 100), and each pixel keeps its lightness. Opacity uses `value` as a percent (0 to 100); 100 is no change.
+ * (0 to 100), and each pixel keeps its lightness; `lightness` changes that
+ * lightness first, so white lowered toward a middle gray takes the full color. Opacity uses `value` as a percent (0 to 100); 100 is no change.
  * Contrast uses `value` as its amount (-100 to 100), `pivot` as the middle
  * gray it pushes away from (0 to 100), `curve` as how much the change rolls off
  * near black and white instead of clipping (0 to 100), and `color` as how much
@@ -122,6 +124,7 @@ export interface Adjustment {
   value: number;
   hue?: number;
   saturation?: number;
+  lightness?: number;
   colorize?: boolean;
   /**
    * Sharpen uses `value` as its amount in percent (0 to 500) and `radius` in

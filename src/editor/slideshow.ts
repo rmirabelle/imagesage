@@ -12,7 +12,8 @@
  * credits) fades in over it, and it holds for OPEN_HOLD more seconds. After the
  * overlay fades out, the final image stays OPEN_REST seconds more. Then the
  * build-up: the original image named "Original image" for STEP seconds, then
- * each layer for LAYER_STEP seconds, the top layer too. A layer's name at the
+ * each layer for LAYER_STEP seconds (less with many layers, see
+ * MAX_VIDEO_SECONDS), the top layer too. A layer's name at the
  * top center fades in over LABEL_FADE seconds first and shows alone for
  * LABEL_PAUSE seconds; then the layer flashes FLASHES times (FLASH seconds on,
  * FLASH seconds off) and fades in over LAYER_FADE seconds. Then the top layer
@@ -38,6 +39,14 @@ export const LAYER_FADE = 0.5;
 /** Seconds the layer shows fully, after its flashes and fade. */
 export const LAYER_HOLD = 1.5;
 export const LAYER_STEP = LABEL_LEAD + FLASH * 2 * FLASHES + LAYER_FADE + LAYER_HOLD;
+/**
+ * The longest video by default, in seconds. With many layers, each layer gets
+ * less time by default (see defaultLayerSeconds), so the whole video fits.
+ */
+export const MAX_VIDEO_SECONDS = 90;
+/** The seconds per layer the user can choose in the video dialog. */
+export const MIN_LAYER_SECONDS = 1;
+export const MAX_LAYER_SECONDS = 4;
 /** Half of it fades the top layer to black, half fades the original image in again. */
 export const RETURN_FADE = 3;
 /** Seconds the original image shows again, after it is in, before the final image fades in over it. */
@@ -107,8 +116,31 @@ export function videoSize(width: number, height: number) {
   return { width: even(width), height: even(height) };
 }
 
-/** The segments for `stages` pictures (the original image plus each visible layer), with or without the intro. */
-export function slideshowSegments(stages: number, intro: boolean): Segment[] {
+/**
+ * One layer's segment, `seconds` long. Its name lead, fade and hold change
+ * together by the same factor; the flash keeps its length.
+ */
+function layerSegment(picture: number, seconds: number): Segment {
+  const flashing = FLASH * 2 * FLASHES;
+  const scale = (seconds - flashing) / (LAYER_STEP - flashing);
+  return { picture, duration: seconds, fade: LAYER_FADE * scale, throughBlack: false, labelLead: LABEL_LEAD * scale, flashes: FLASHES, label: picture, labelFor: seconds, overlay: null };
+}
+
+/**
+ * The seconds each layer shows unless the user chooses: LAYER_STEP, or less
+ * so the video fits in MAX_VIDEO_SECONDS, but not below MIN_LAYER_SECONDS.
+ * It is rounded down to a tenth of a second, as the video dialog shows it.
+ */
+export function defaultLayerSeconds(stages: number, intro: boolean) {
+  const top = Math.max(0, stages - 1);
+  /** With 0 seconds per layer, the duration is everything but the layers. */
+  const others = slideshowDuration(slideshowSegments(stages, intro, 0));
+  const fit = top > 0 ? (MAX_VIDEO_SECONDS - others) / top : LAYER_STEP;
+  return Math.floor(Math.min(LAYER_STEP, Math.max(MIN_LAYER_SECONDS, fit)) * 10 + 1e-6) / 10;
+}
+
+/** The segments for `stages` pictures (the original image plus each visible layer), with or without the intro; each layer shows `layerSeconds`. */
+export function slideshowSegments(stages: number, intro: boolean, layerSeconds = defaultLayerSeconds(stages, intro)): Segment[] {
   const top = Math.max(0, stages - 1);
   /** The last segment: the final image fading in over the original image, a long rest, then the overlay again until the end. */
   const final = (picture: number, label: SlideLabel, fade: number): Segment => ({
@@ -132,9 +164,7 @@ export function slideshowSegments(stages: number, intro: boolean): Segment[] {
     segments.push({ picture: top, duration: overlayEnd + OPEN_REST, fade: 0, throughBlack: false, labelLead: 0, flashes: 0, label: null, labelFor: 0, overlay: { from: OPEN_PAUSE, to: overlayEnd } });
   }
   segments.push({ picture: 0, duration: STEP, fade: intro ? INTRO_FADE : 0, throughBlack: false, labelLead: 0, flashes: 0, label: 0, labelFor: STEP, overlay: null });
-  for (let picture = 1; picture <= top; picture++) {
-    segments.push({ picture, duration: LAYER_STEP, fade: LAYER_FADE, throughBlack: false, labelLead: LABEL_LEAD, flashes: FLASHES, label: picture, labelFor: LAYER_STEP, overlay: null });
-  }
+  for (let picture = 1; picture <= top; picture++) segments.push(layerSegment(picture, layerSeconds));
   /** The original image again, through black; its name is gone before the final image fades in. */
   segments.push({ picture: 0, duration: RETURN_STEP, fade: RETURN_FADE, throughBlack: true, labelLead: 0, flashes: 0, label: 0, labelFor: RETURN_STEP - FADE_IN, overlay: null });
   segments.push(final(top, "final", FINAL_FADE));
@@ -186,7 +216,8 @@ export function slideshowFrame(segments: Segment[], time: number): SlideFrame {
   /** While the previous picture fades to black, its name goes down with it. */
   const keepsPrevious = segment.throughBlack && index > 0 && mix === 0;
   const label = keepsPrevious ? segments[index - 1].label : segment.label;
-  const labelIn = segment.labelLead > 0 ? clamp01(since / LABEL_FADE) : mix;
+  /** A shortened layer shortens its name's fade in by the same factor as its lead. */
+  const labelIn = segment.labelLead > 0 ? clamp01(since / (LABEL_FADE * segment.labelLead / LABEL_LEAD)) : mix;
   const labelAlpha = label === null ? 0 : keepsPrevious ? 1 : Math.min(labelIn, clamp01((segment.labelFor + FADE_IN - since) / FADE_IN));
   const overlay = segment.overlay
     ? Math.min(clamp01((since - segment.overlay.from) / OVERLAY_FADE), clamp01((segment.overlay.to - since) / OVERLAY_FADE))

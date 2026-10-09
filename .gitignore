@@ -12,6 +12,7 @@ src-tauri/gen
 Thumbs.db
 *.log
 icon-pack.zip
+lasso-poly.zip
 
 # Documents and images saved in the project folder while testing
 *.imagesage

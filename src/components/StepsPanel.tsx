@@ -8,7 +8,6 @@ import {
   Check,
   Checkerboard,
   LinkBreak,
-  MagicWand,
   LinkSimple,
   CircleHalf,
   CircleHalfTilt,
@@ -87,7 +86,11 @@ interface Props {
   /** Preview images by node key (see `stepKey`). */
   thumbnails: Record<string, string>;
   disabled: boolean;
+  /** The ids of the layers selected together (Ctrl+click, Shift+click); empty when only one layer is selected. */
+  groupIds: string[];
   onSelect: (node: number) => void;
+  /** Ctrl+click ("toggle") adds or removes one layer; Shift+click ("range") selects from the selected layer to this one. */
+  onSelectMany: (node: number, mode: "toggle" | "range") => void;
   /** Shows or hides a whole layer (not the original image). */
   /** `solo` (Ctrl+click) shows only this layer, or brings back the visibility from before. */
   onToggleVisible: (node: number, solo: boolean) => void;
@@ -95,6 +98,8 @@ interface Props {
   onShowAll: (visible: boolean) => void;
   /** Adds a new top layer: a snapshot of all visible layers combined. */
   onSnapshot: () => void;
+  /** Adds an empty, transparent layer above the selected layer. */
+  onNewLayer: () => void;
   onDelete: (node: number) => void;
   /** Stops painting the selected mask (a press in the panel outside any mask). */
   onMaskDeselect: () => void;
@@ -177,7 +182,7 @@ function MaskThumb({ src, hides, off, linked = false }: { src: string; hides: bo
   return (
     <span className={`chip-mask ${hides ? "hides" : ""} ${off ? "off" : ""}`} aria-hidden="true">
       <img src={src} alt="" draggable={false} />
-      {linked && <span className="chip-mask-link"><LinkSimple size={9} weight="bold" /></span>}
+      {linked && <span className="chip-mask-link"><LinkSimple size={11} weight="bold" /></span>}
     </span>
   );
 }
@@ -261,19 +266,6 @@ function SliderPopover({ children }: { children: ReactNode }) {
 function AdjustmentSliders({ node, adjustment, disabled, onChange, onColorize, onBrightnessOnly }: { node: number; adjustment: Adjustment; disabled: boolean; onChange: (node: number, id: string, field: AdjustmentField, value: number) => void; onColorize: (node: number, id: string, colorize: boolean) => void; onBrightnessOnly: (node: number, id: string, brightnessOnly: boolean) => void }) {
   return (
     <div className="layer-adjust-sliders">
-      {/* Colorize gives every pixel one hue; the sliders then set that hue and its strength. */}
-      {adjustment.kind === "hueSaturation" && (
-        <div className="layer-adjust-row layer-adjust-check" data-help="Colorize: give the layer one color and keep its light and dark">
-          <label htmlFor={`layer-adjust-${node}-${adjustment.id}-colorize`}>Colorize</label>
-          <input
-            id={`layer-adjust-${node}-${adjustment.id}-colorize`}
-            type="checkbox"
-            checked={Boolean(adjustment.colorize)}
-            disabled={disabled}
-            onChange={(event) => { onColorize(node, adjustment.id, event.target.checked); event.currentTarget.blur(); }}
-          />
-        </div>
-      )}
       {adjustmentFields(adjustment).map(({ field, label, min, max, unit, neutral, signed: withSign, decimals, log }) => (
         <AdjustmentRow
           key={`${adjustment.colorize ? "colorize-" : ""}${field}`}
@@ -291,6 +283,19 @@ function AdjustmentSliders({ node, adjustment, disabled, onChange, onColorize, o
           onChange={(value) => onChange(node, adjustment.id, field, value)}
         />
       ))}
+      {/* Colorize gives every pixel one hue; the sliders then set that hue and its strength. */}
+      {adjustment.kind === "hueSaturation" && (
+        <div className="layer-adjust-row layer-adjust-check" data-help="Colorize: give the layer one color and keep its light and dark">
+          <label htmlFor={`layer-adjust-${node}-${adjustment.id}-colorize`}>Colorize</label>
+          <input
+            id={`layer-adjust-${node}-${adjustment.id}-colorize`}
+            type="checkbox"
+            checked={Boolean(adjustment.colorize)}
+            disabled={disabled}
+            onChange={(event) => { onColorize(node, adjustment.id, event.target.checked); event.currentTarget.blur(); }}
+          />
+        </div>
+      )}
       {/* Sharpen works on brightness only unless this is turned off; then it sharpens each color. */}
       {adjustment.kind === "sharpen" && (
         <div className="layer-adjust-row layer-adjust-check" data-help="Brightness only: sharpen light and dark, not color, so edges get no color fringes">
@@ -316,7 +321,7 @@ function AdjustmentSliders({ node, adjustment, disabled, onChange, onColorize, o
  * adjustment; clicking a chip makes it the Mask tool's target, and its arrow
  * opens its options.
  */
-export const StepsPanel = memo(function StepsPanel({ documentId, hasBase, origin, baseAdjust, history, current, maskTarget, maskRedShown, canPasteMask, pending, thumbnails, disabled, onSelect, onToggleVisible, onShowAll, onSnapshot, onDelete, onMaskDeselect, onRename, onMove, onPartAction, onAdjustValue, onAdjustColorize, onAdjustRename, onSharpenBrightnessOnly }: Props) {
+export const StepsPanel = memo(function StepsPanel({ documentId, hasBase, origin, baseAdjust, history, current, maskTarget, maskRedShown, canPasteMask, pending, thumbnails, disabled, groupIds, onSelect, onSelectMany, onToggleVisible, onShowAll, onSnapshot, onNewLayer, onDelete, onMaskDeselect, onRename, onMove, onPartAction, onAdjustValue, onAdjustColorize, onAdjustRename, onSharpenBrightnessOnly }: Props) {
   /** The top layer is listed first, like a stack; the original image is at the bottom. */
   const nodes = Array.from({ length: history.length + (hasBase ? 1 : 0) }, (_, node) => history.length - node);
   const layerCount = nodes.length;
@@ -528,11 +533,14 @@ export const StepsPanel = memo(function StepsPanel({ documentId, hasBase, origin
   /** The adjustments of a node; the original image keeps its own on the document. */
   const adjustOf = (node: number) => adjustList(node > 0 ? history[node - 1].adjust : baseAdjust);
 
-  /** Selects a layer and opens its menu at the pointer. */
+  /** True when the layer at `node` is one of several layers selected together. */
+  const inGroup = (node: number) => node > 0 && groupIds.includes(history[node - 1]?.id ?? "");
+
+  /** Selects a layer and opens its menu at the pointer; a layer of the group keeps the group. */
   const openLayerMenu = (event: ReactMouseEvent, node: number) => {
     event.preventDefault();
     if (disabled) return;
-    onSelect(node);
+    if (!inGroup(node)) onSelect(node);
     setPartMenu(null);
     setMenu({ node, x: Math.min(event.clientX, window.innerWidth - 230), y: Math.max(8, Math.min(event.clientY, window.innerHeight - 260)) });
   };
@@ -637,6 +645,25 @@ export const StepsPanel = memo(function StepsPanel({ documentId, hasBase, origin
                   <MaskThumb src={mask} hides={hides} off={maskOff} linked={isLinked(adjustment?.maskLink)} />
                 </button>
               )}
+              {/* Without a mask, a + button where the mask will show opens the mask menu (Add, Magic, Paste). */}
+              {!mask && (
+                <button
+                  type="button"
+                  className="layer-chip-mask-add"
+                  disabled={disabled}
+                  aria-haspopup="menu"
+                  aria-label={`Add a mask to ${name.toLowerCase()}`}
+                  onClick={(event) => {
+                    if (!selected) onSelect(node);
+                    const anchor = event.currentTarget;
+                    if (partMenu?.node === node && partMenu.part === part && partMenu.section === "mask") setPartMenu(null);
+                    else openPartMenu(anchor, node, part, "mask");
+                  }}
+                  data-help={`Add a mask to ${name.toLowerCase()}: it then applies only where you paint`}
+                >
+                  <Plus size={11} weight="bold" />
+                </button>
+              )}
             </>
           )}
         </div>
@@ -658,20 +685,6 @@ export const StepsPanel = memo(function StepsPanel({ documentId, hasBase, origin
             if (event.target === event.currentTarget) openLayerMenu(event, node);
           }}
         >
-          {/* A layer without a mask offers the layer mask menu here, always first, so it needs no right-click. */}
-          {step && !step.layerMask && (
-            <button
-              className="layer-strip-add"
-              disabled={disabled}
-              aria-haspopup="menu"
-              data-help="Add a layer mask to this layer"
-              onPointerDown={(event) => event.stopPropagation()}
-              onClick={(event) => partMenu?.node === node && partMenu.part === "mask" ? setPartMenu(null) : openPartMenu(event.currentTarget, node, "mask")}
-            >
-              <Plus size={12} weight="bold" />
-              <span>Mask</span>
-            </button>
-          )}
           {parts.length > 0 && (
             /** In the eye column, left of the first chip: shows or hides all adjustments of this layer. */
             <button
@@ -695,7 +708,15 @@ export const StepsPanel = memo(function StepsPanel({ documentId, hasBase, origin
               {chip(part)}
               {sliderOf?.id === part && (
                 <SliderPopover>
-                  <AdjustmentSliders node={node} adjustment={sliderOf} disabled={disabled} onChange={onAdjustValue} onColorize={onAdjustColorize} onBrightnessOnly={onSharpenBrightnessOnly} />
+                  <div className="layer-adjust-title">{ADJUSTMENT_LABELS[sliderOf.kind]}</div>
+                  <AdjustmentSliders
+                    node={node}
+                    adjustment={sliderOf}
+                    disabled={disabled}
+                    onChange={onAdjustValue}
+                    onColorize={onAdjustColorize}
+                    onBrightnessOnly={onSharpenBrightnessOnly}
+                  />
                 </SliderPopover>
               )}
             </Fragment>
@@ -724,8 +745,6 @@ export const StepsPanel = memo(function StepsPanel({ documentId, hasBase, origin
   const renderThumb = (node: number, thumbnail: string | undefined) => {
     const step = node > 0 ? history[node - 1] : null;
     const image = thumbnail ? <img src={thumbnail} alt="" /> : null;
-    if (!step?.layerMask) return <span className="steps-thumb">{image}</span>;
-    const targeted = node === current && maskTarget === "mask";
     /** A click here must not also select the layer through the row, and not right after a layer drag. */
     const handled = (event: { stopPropagation: () => void }) => {
       event.stopPropagation();
@@ -734,6 +753,33 @@ export const StepsPanel = memo(function StepsPanel({ documentId, hasBase, origin
       if (node !== current) onSelect(node);
       return true;
     };
+    if (!step) return <span className="steps-thumb">{image}</span>;
+    /** A layer without a mask: a + button where the mask will show selects the layer and opens the layer mask menu (Add, Magic, Paste). */
+    if (!step.layerMask) {
+      return (
+        <span className="steps-thumb">
+          {image}
+          {/* A span, not a button: the layer row around it is already a button. */}
+          <span
+            role="button"
+            className={`thumb-mask-add ${disabled ? "disabled" : ""}`}
+            aria-haspopup="menu"
+            aria-label="Add a layer mask"
+            aria-disabled={disabled}
+            data-help="Click to add a layer mask"
+            onClick={(event) => {
+              if (!handled(event)) return;
+              const anchor = event.currentTarget;
+              if (partMenu?.node === node && partMenu.part === "mask") setPartMenu(null);
+              else openPartMenu(anchor, node, "mask");
+            }}
+          >
+            <Plus size={12} weight="bold" />
+          </span>
+        </span>
+      );
+    }
+    const targeted = node === current && maskTarget === "mask";
     return (
       <span className="steps-thumb">
         {image}
@@ -769,7 +815,7 @@ export const StepsPanel = memo(function StepsPanel({ documentId, hasBase, origin
     }
     if (open.part === null) {
       return [
-        <div key="head" className="steps-menu-head">Adjust {node > 0 ? step?.name || defaultLayerName(node) : "Original"}</div>,
+        <div key="head" className="steps-menu-head">Add Layer Adjustment</div>,
         item("mask", "add-brightness", <Sun size={15} />, "Brightness"),
         item("mask", "add-contrast", <CircleHalfTilt size={15} />, "Contrast"),
         item("mask", "add-blur", <CloudFog size={15} />, "Blur"),
@@ -789,9 +835,8 @@ export const StepsPanel = memo(function StepsPanel({ documentId, hasBase, origin
     const maskItems = [
       /** Enable or Disable comes first in every mask menu; Add comes first while there is no mask. */
       hasMask
-        ? item(part, "mask-toggle", <Prohibit size={15} />, maskOff ? "Enable" : "Disable")
+        ? item(part, "mask-toggle", <Prohibit size={15} />, maskOff ? "Enable" : "Disable", { note: part === "mask" ? "Ctrl+click" : undefined })
         : item(part, part === "mask" ? "add-mask" : "mask-add", <MaskIcon size={15} />, "Add", { note: "hides all" }),
-      item(part, "click-select", <MagicWand size={15} />, "Magic…", { note: "click the image" }),
       ...(hasMask ? [item(part, "mask-invert", <CircleHalf size={15} />, "Invert", { note: "Ctrl+I" })] : []),
       ...(hasMask && isLinked(part === "mask" ? step?.maskLink : adjustment?.maskLink) ? [item(part, "mask-unlink", <LinkBreak size={15} />, "Unlink", { note: "from its copies" })] : []),
       ...(hasMask ? [item(part, "mask-copy", <Copy size={15} />, "Copy")] : []),
@@ -800,8 +845,8 @@ export const StepsPanel = memo(function StepsPanel({ documentId, hasBase, origin
     ];
     if (part === "mask" || !adjustment) return [<div key="head" className="steps-menu-head">Layer mask</div>, ...maskItems];
     const name = ADJUSTMENT_LABELS[adjustment.kind];
-    /** The mask thumbnail has its own menu; the adjustment's menu offers only ways to add a mask, while it has none. */
-    if (open.section === "mask" && hasMask) return [<div key="head" className="steps-menu-head">{name} mask</div>, ...maskItems];
+    /** The mask thumbnail, or the + button while there is no mask, has its own menu. */
+    if (open.section === "mask") return [<div key="head" className="steps-menu-head">{name} mask</div>, ...maskItems];
     return [
       <div key="head" className="steps-menu-head">{name}</div>,
       item(part, "toggle", <Prohibit size={15} />, adjustment.off ? `Enable ${name.toLowerCase()}` : `Disable ${name.toLowerCase()}`),
@@ -809,7 +854,8 @@ export const StepsPanel = memo(function StepsPanel({ documentId, hasBase, origin
       <button key={`${part}-rename`} role="menuitem" onClick={() => { setPartMenu(null); setMenu(null); onAdjustRename(node, part); }}>
         <PencilSimple size={15} /> <span className="steps-menu-label">Rename…</span>
       </button>,
-      ...(hasMask ? [] : [<div key="sep-1" className="steps-menu-divider" />, <div key="mask-head" className="steps-menu-head">Mask</div>, ...maskItems]),
+      /** Adding a mask and Magic are on the chip's + button; Paste stays here too, for an adjustment without a mask. */
+      ...(hasMask || !canPasteMask ? [] : [<div key="sep-1" className="steps-menu-divider" />, item(part, "mask-paste", <ClipboardText size={15} />, "Paste mask")]),
       <div key="sep-2" className="steps-menu-divider" />,
       item(part, "delete", <Trash size={15} />, `Delete ${name.toLowerCase()}`, { danger: true })
     ];
@@ -898,6 +944,29 @@ Click to show its progress on the image.`}>
             </button>
           )}
         </label>
+        <button className="steps-collapse" onClick={() => changeCollapsed(true)} aria-label="Close the layers panel" data-help="Close the layers panel">
+          <X size={12} weight="bold" />
+        </button>
+      </div>
+      <div className="steps-toolbar" role="toolbar" aria-label="Layer tools">
+        <button
+          className="steps-tool"
+          disabled={disabled}
+          onClick={onNewLayer}
+          data-help="New layer: an empty, transparent layer above the selected layer"
+        >
+          <Plus size={12} weight="bold" />
+          New Layer
+        </button>
+        <button
+          className="steps-tool"
+          disabled={disabled}
+          onClick={onSnapshot}
+          data-help="Snapshot: a new top layer of all visible layers combined (Ctrl+Alt+S)"
+        >
+          <Camera size={15} />
+          Snapshot
+        </button>
         <div className="steps-show" role="group" aria-label="Show layers">
           <span className="steps-show-label">Show</span>
           <div className="split-button">
@@ -917,18 +986,6 @@ Click to show its progress on the image.`}>
             </button>
           </div>
         </div>
-        <button
-          className="steps-snapshot"
-          disabled={disabled}
-          onClick={onSnapshot}
-          aria-label="Snapshot visible layers"
-          data-help="Snapshot: a new top layer of all visible layers combined (Ctrl+Alt+S)"
-        >
-          <Camera size={15} />
-        </button>
-        <button className="steps-collapse" onClick={() => changeCollapsed(true)} aria-label="Close the layers panel" data-help="Close the layers panel">
-          <X size={12} weight="bold" />
-        </button>
       </div>
       <ol className="steps-list" ref={listRef}>
         {/* New edits wait at the top; a regenerate waits in the place of the layer it replaces. */}
@@ -944,12 +1001,15 @@ Click to show its progress on the image.`}>
             : origin.kind === "generated" ? origin.prompt : origin.fileName || "Opened image";
           const name = step ? step.name || defaultLayerName(node) : "Original";
           const thumbnail = thumbnails[stepKey(documentId, history, node)];
-          const dropClass = drag?.moved && drag.to === node && drag.from !== node ? (drag.above ? "drop-above" : "drop-below") : "";
+          /** Dragging a layer of the group drags the whole group; a drop on one of its own layers does nothing. */
+          const draggingGroup = drag?.moved && inGroup(drag.from);
+          const dragged = Boolean(drag?.moved && (drag.from === node || (draggingGroup && inGroup(node))));
+          const dropClass = drag?.moved && drag.to === node && !dragged ? (drag.above ? "drop-above" : "drop-below") : "";
           return (
             <li
               key={step?.id ?? "origin"}
               data-node={node}
-              className={`steps-row ${node === current && !pending.some((item) => item.selected) ? "active" : ""} ${step?.hidden ? "hidden-layer" : ""} ${dropClass} ${drag?.moved && drag.from === node ? "dragging" : ""}`}
+              className={`steps-row ${node === current && !pending.some((item) => item.selected) ? "active" : ""} ${inGroup(node) ? "grouped" : ""} ${step?.hidden ? "hidden-layer" : ""} ${dropClass} ${dragged ? "dragging" : ""}`}
             >
               {step ? (
                 <button
@@ -963,7 +1023,7 @@ Click to show its progress on the image.`}>
                   {step.hidden ? <EyeSlash size={15} /> : <Eye size={15} />}
                 </button>
               ) : <span className="steps-eye-spacer" aria-hidden="true" />}
-              <div className={`steps-card ${node === current ? "active" : ""}`}>
+              <div className={`steps-card ${node === current ? "active" : ""} ${inGroup(node) ? "grouped" : ""}`}>
                 {renaming?.node === node ? (
                   /** While renaming, the row is not a button, so the name field gets normal focus and keys. */
                   <div className="steps-item editing">
@@ -992,9 +1052,11 @@ Click to show its progress on the image.`}>
                     className="steps-item"
                     disabled={disabled}
                     aria-current={node === current ? "step" : undefined}
-                    onClick={() => {
+                    onClick={(event) => {
                       if (clickEndsDrag()) return;
-                      onSelect(node);
+                      /** Ctrl+click and Shift+click select several layers; the original image cannot join them. */
+                      if (step && (event.ctrlKey || event.shiftKey)) onSelectMany(node, event.shiftKey ? "range" : "toggle");
+                      else onSelect(node);
                     }}
                     onDoubleClick={() => step && setRenaming({ node, value: step.name ?? "" })}
                     onContextMenu={(event) => openLayerMenu(event, node)}
@@ -1002,15 +1064,13 @@ Click to show its progress on the image.`}>
                     onPointerMove={moveLayerDrag}
                     onPointerUp={endLayerDrag}
                     onPointerCancel={endLayerDrag}
-                    data-help={step ? "Double-click to rename layer. Right-click for layer options. Drag up/down to sort." : "The original image. Right-click to duplicate it."}
                   >
                     {renderThumb(node, thumbnail)}
                     <span className="steps-text">
                       <strong className="steps-name">{name}</strong>
-                      {!step?.name && <span className="steps-prompt">{prompt}</span>}
-                      <small>
-                        {step ? modelLabel(step.model) : origin.kind === "generated" ? modelLabel(origin.model) : "Original"}
-                        {step && (
+                      {/* The layer blend mode, on its own line under the name. A span, not a button: the layer row around it is already a button. */}
+                      {step && (
+                        <span className="steps-blend">
                           <span
                             className={`blend-tag ${step.blend ? "" : "normal"}`}
                             role="button"
@@ -1028,8 +1088,9 @@ Click to show its progress on the image.`}>
                           >
                             {step.blend ? BLEND_LABELS[step.blend] : "Normal"}
                           </span>
-                        )}
-                      </small>
+                        </span>
+                      )}
+                      {!step?.name && <span className="steps-prompt">{prompt}</span>}
                     </span>
                   </button>
                 )}
@@ -1061,6 +1122,15 @@ Click to show its progress on the image.`}>
           </button>
         );
         const step = history[menu.node - 1];
+        /** For a layer of the group, the menu acts on the whole group, so it offers only Delete. */
+        if (inGroup(menu.node)) {
+          return (
+            <div className="steps-menu layer-menu" role="menu" style={{ left: menu.x, top: menu.y }} onPointerDown={(event) => event.stopPropagation()}>
+              <div className="steps-menu-head">{groupIds.length} layers</div>
+              {plain(<Trash size={15} />, <>Delete {groupIds.length} layers <small>Del</small></>, () => onDelete(menu.node), true)}
+            </div>
+          );
+        }
         return (
           <div className="steps-menu layer-menu" role="menu" style={{ left: menu.x, top: menu.y }} onPointerDown={(event) => event.stopPropagation()}>
             <div className="steps-menu-head">{step ? "Edit layer" : "Original image"}</div>

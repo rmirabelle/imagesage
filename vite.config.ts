@@ -10,8 +10,20 @@ const DEV_PORT = 14410;
 const HMR_PORT = 14411;
 const PREVIEW_PORT = 14412;
 
+/**
+ * Prints what the dev app window reports (hot updates it applied, failed
+ * updates, console errors) to the dev server output, so the dev log shows
+ * whether an edit really reached the window. See src/main.tsx.
+ */
+const clientLog = {
+  name: "imagesage-client-log",
+  configureServer(server: import("vite").ViteDevServer) {
+    server.ws.on("imagesage:log", (data: { message?: string }) => console.log(`[client] ${String(data?.message ?? "").slice(0, 4000)}`));
+  }
+};
+
 export default defineConfig({
-  plugins: [react(), tailwindcss()],
+  plugins: [react(), tailwindcss(), clientLog],
   resolve: { alias: { "@": path.resolve(__dirname, "./src") } },
   clearScreen: false,
   server: {

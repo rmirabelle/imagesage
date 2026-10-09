@@ -22,6 +22,37 @@ const logError = (message: string) => {
 window.addEventListener("error", (event) => logError(`${event.message}\n${event.error?.stack ?? ""}`));
 window.addEventListener("unhandledrejection", (event) => logError(`Unhandled rejection: ${event.reason?.stack ?? String(event.reason)}`));
 
+/** True after the crash screen took over; a later good hot update then reloads the window. */
+let crashed = false;
+
+/**
+ * Dev only: the window reports each hot update it applied, each failed one,
+ * and its console errors and warnings to the dev log (as "[client] ..."), so
+ * an edit can be confirmed as live. A failed hot update prints only to the
+ * window's console otherwise, where nobody sees it.
+ */
+if (import.meta.hot) {
+  const hot = import.meta.hot;
+  const report = (message: string) => hot.send("imagesage:log", { message });
+  hot.on("vite:afterUpdate", (payload) => {
+    report(`hot update applied: ${payload.updates.map((update) => update.path).join(", ")}`);
+    if (crashed) {
+      report("reloading after the crash screen");
+      window.location.reload();
+    }
+  });
+  hot.on("vite:error", (payload) => report(`hot update error: ${payload.err.message}`));
+  hot.on("vite:ws:disconnect", () => report("hot update connection lost"));
+  for (const level of ["error", "warn"] as const) {
+    const original = console[level].bind(console);
+    console[level] = (...args: unknown[]) => {
+      original(...args);
+      report(`console.${level}: ${args.map((arg) => arg instanceof Error ? arg.stack ?? arg.message : String(arg)).join(" ")}`);
+    };
+  }
+  report("window loaded");
+}
+
 /** A crash shows its error and a Reload button instead of a blank window, and goes to the dev log. */
 class CrashScreen extends Component<{ children: ReactNode }, { error: Error | null }> {
   state = { error: null as Error | null };
@@ -31,6 +62,7 @@ class CrashScreen extends Component<{ children: ReactNode }, { error: Error | nu
   }
 
   componentDidCatch(error: Error, info: { componentStack?: string | null }) {
+    crashed = true;
     logError(`${error.stack ?? error.message}\nComponent stack:${info.componentStack ?? ""}`);
   }
 

@@ -144,13 +144,16 @@ const parseAdjustment = (value: unknown, fallbackId: string): Adjustment | undef
       ...flags
     };
   }
+  /** Lightness is kept only when it changes something, so older files read the same. */
+  const lightness = value.kind === "hueSaturation" ? optionalAdjustNumber(value.lightness, 100) : undefined;
+  const withLightness = lightness ? { lightness } : {};
   if (value.kind === "hueSaturation" && value.colorize === true) {
     const hue = typeof value.hue === "number" && Number.isFinite(value.hue) ? Math.max(0, Math.min(360, Math.round(value.hue))) : 0;
     const saturation = optionalAdjustNumber(value.saturation, 100);
-    return { id, kind: "hueSaturation", value: 0, colorize: true, hue, saturation: saturation === undefined ? 25 : Math.max(0, saturation), ...flags };
+    return { id, kind: "hueSaturation", value: 0, colorize: true, hue, saturation: saturation === undefined ? 25 : Math.max(0, saturation), ...withLightness, ...flags };
   }
   if (value.kind === "hueSaturation") {
-    return { id, kind: "hueSaturation", value: 0, hue: optionalAdjustNumber(value.hue, 180) ?? 0, saturation: optionalAdjustNumber(value.saturation, 100) ?? 0, ...flags };
+    return { id, kind: "hueSaturation", value: 0, hue: optionalAdjustNumber(value.hue, 180) ?? 0, saturation: optionalAdjustNumber(value.saturation, 100) ?? 0, ...withLightness, ...flags };
   }
   if (typeof value.value !== "number" || !Number.isFinite(value.value)) return undefined;
   if (value.kind !== undefined && value.kind !== "brightness") return undefined;

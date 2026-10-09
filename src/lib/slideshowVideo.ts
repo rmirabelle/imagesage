@@ -9,10 +9,11 @@ export interface SlideshowMusic {
   start: number;
 }
 
-/** The video's settings: the title in the intro overlay (left out when empty), and the music, if any. */
+/** The video's settings: the title in the intro overlay (left out when empty), the music, if any, and the seconds each layer shows. */
 export interface SlideshowOptions {
   title: string;
   music: SlideshowMusic | null;
+  layerSeconds: number;
 }
 
 /**
@@ -162,8 +163,8 @@ function wrapLines(context: CanvasRenderingContext2D, text: string, maxWidth: nu
  * The overlay at the start and the end of the video: a dark rounded box in
  * the middle with the title, which wraps onto more lines when it is long, and
  * under it a bordered credit box. The credit box has the app icon in a left
- * column and two lines in a right column: "Made with Image Sage™" (the name
- * in bright blue, the ™ small) and a small "Image Sage v0.3 by Robert Mirabelle". The credit lines never wrap or
+ * column and two lines in a right column: "made with Image Sage™" (the name
+ * in bright blue, the ™ small) and a small "Image Sage v0.3 - Robert Mirabelle". The credit lines never wrap or
  * shrink. The rest of the canvas stays clear, so the image shows around it.
  * Sizes are in hundredths of the video height.
  */
@@ -177,7 +178,7 @@ async function introOverlay(width: number, height: number, title: string) {
   /** The version as major.minor ("0.3"), or nothing when the app cannot tell. */
   const version = await getAppVersion().then((full) => full.split(".").slice(0, 2).join(".")).catch(() => "");
   const icon = await loadIcon();
-  const credit = `Image Sage${version ? ` v${version}` : ""} by Robert Mirabelle`;
+  const credit = `Image Sage${version ? ` v${version}` : ""} - Robert Mirabelle`;
   const TITLE = 6, MADE = 2.2, CREDIT = 1.25, ICON = 5.6, LINE = 1.3;
   /** The trademark sign is this much smaller than its line, and raised. */
   const TM_SCALE = 0.5;
@@ -185,9 +186,9 @@ async function introOverlay(width: number, height: number, title: string) {
     context.font = font(size, weight);
     return context.measureText(text).width;
   };
-  /** "Made with Image Sage™" in three runs: plain, the name in bright blue, and a small raised ™. */
+  /** "made with Image Sage™" in three runs: plain, the name in bright blue, and a small raised ™. */
   const madeRuns = [
-    { text: "Made with ", size: MADE, color: "#c3d0fc", raise: 0 },
+    { text: "made with ", size: MADE, color: "#c3d0fc", raise: 0 },
     { text: "Image Sage", size: MADE, color: "#a9ddf8", raise: 0 },
     { text: "™", size: MADE * TM_SCALE, color: "#a9ddf8", raise: MADE * 0.32 }
   ];
@@ -239,9 +240,10 @@ async function introOverlay(width: number, height: number, title: string) {
 
   const creditLeft = center - creditWidth / 2;
   context.strokeStyle = "rgba(195, 208, 252, 0.45)";
-  context.lineWidth = Math.max(1, 0.18 * unit);
+  /** A one-pixel line on the half pixel covers exactly one pixel row, so it stays sharp. */
+  context.lineWidth = 1;
   context.beginPath();
-  context.roundRect(creditLeft, y, creditWidth, creditHeight, 1.2 * unit);
+  context.roundRect(Math.round(creditLeft) + 0.5, Math.round(y) + 0.5, Math.round(creditWidth), Math.round(creditHeight), 1.2 * unit);
   context.stroke();
   const middle = y + creditHeight / 2;
   if (icon) context.drawImage(icon, creditLeft + creditPadLeft, middle - iconSize / 2, iconWidth, iconSize);
@@ -271,7 +273,7 @@ export async function encodeSlideshow(
   const { width, height } = stages[0];
   const pictures = stages;
   const overlay = await introOverlay(width, height, options.title);
-  const segments = slideshowSegments(stages.length, true);
+  const segments = slideshowSegments(stages.length, true, options.layerSeconds);
   const config = await pickCodec(width, height);
   const audioConfig = options.music ? await pickAudioConfig() : null;
   const muxer = new Muxer({
