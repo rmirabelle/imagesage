@@ -1824,6 +1824,17 @@ select option:disabled { color: #777d8e; }
 
 /* Settings and new-image dialogs */
 .new-image-dialog { width: min(600px, 100%); }
+/* Canvas Size and Image Size. */
+.canvas-size-dialog { width: min(520px, 100%); }
+.canvas-size-field { display: flex; align-items: center; gap: 10px; }
+.canvas-size-result { color: #c4c8d2; font-size: 12px; font-variant-numeric: tabular-nums; }
+.anchor-row { display: flex; align-items: center; gap: 14px; }
+.anchor-note { color: #8c91a1; font-size: 11.5px; line-height: 1.45; }
+/* Nine squares; the picked one is where the old image stays. */
+.anchor-grid { display: grid; grid-template-columns: repeat(3, 22px); gap: 3px; flex: 0 0 auto; }
+.anchor-grid button { width: 22px; height: 22px; padding: 0; border: 1px solid #454b5b; border-radius: 4px; background: #1d2029; cursor: pointer; }
+.anchor-grid button:hover { border-color: #626a7e; }
+.anchor-grid button.active { border-color: var(--accent); background: var(--accent); }
 .new-image-layout { min-height: 0; }
 .new-image-pane { gap: 14px; }
 /* The shape of the new image; its longest side is always the same length. */

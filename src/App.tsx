@@ -3,7 +3,7 @@ import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { save } from "@tauri-apps/plugin-dialog";
-import { ArrowClockwise, ArrowCounterClockwise, Camera, CheckCircle, DownloadSimple, FilePlus, FilmStrip, FloppyDisk, FolderOpen, GearSix, ImageSquare, Info, Keyboard, SpinnerGap, Warning, WarningCircle, X } from "@phosphor-icons/react";
+import { ArrowClockwise, ArrowCounterClockwise, ArrowsOut, Camera, CheckCircle, CornersOut, DownloadSimple, FilePlus, FilmStrip, FloppyDisk, FolderOpen, GearSix, ImageSquare, Info, Keyboard, SpinnerGap, Warning, WarningCircle, X } from "@phosphor-icons/react";
 import { AboutDialog } from "./components/AboutDialog";
 import { ShortcutsDialog } from "./components/ShortcutsDialog";
 import { ConnectDialog, type SettingsSection } from "./components/ConnectDialog";
@@ -320,7 +320,7 @@ export default function App() {
   }, [documents]);
 
   /** `markDirty` false keeps the document clean, for changes that are not edits (such as picking a layer). */
-  const commitHistory = useCallback((id: string, patch: Partial<Pick<ImageDocument, "base" | "baseAdjust" | "history" | "historyIndex">>, markDirty = true) => {
+  const commitHistory = useCallback((id: string, patch: Partial<Pick<ImageDocument, "base" | "baseAdjust" | "history" | "historyIndex" | "surface">>, markDirty = true) => {
     mutateDocuments((current) => current.map((document) => document.id === id
       ? { ...document, ...patch, revision: document.revision + (markDirty ? 1 : 0) }
       : document));
@@ -749,7 +749,10 @@ export default function App() {
         { label: "Undo", icon: <ArrowCounterClockwise size={15} />, shortcut: "Ctrl+Z", disabled: !activeDocument, run: () => sendCommand("undo") },
         { label: "Redo", icon: <ArrowClockwise size={15} />, shortcut: "Ctrl+Y", disabled: !activeDocument, run: () => sendCommand("redo") },
         "separator",
-        { label: "Snapshot Visible Layers", icon: <Camera size={15} />, shortcut: "Ctrl+Alt+S", disabled: !activeDocument, run: () => sendCommand("snapshot") }
+        { label: "Snapshot Visible Layers", icon: <Camera size={15} />, shortcut: "Ctrl+Alt+S", disabled: !activeDocument, run: () => sendCommand("snapshot") },
+        "separator",
+        { label: "Image Size…", icon: <ArrowsOut size={15} />, disabled: !activeDocument, run: () => sendCommand("image-size") },
+        { label: "Canvas Size…", icon: <CornersOut size={15} />, disabled: !activeDocument, run: () => sendCommand("canvas-size") }
       ]
     },
     {

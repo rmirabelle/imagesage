@@ -91,6 +91,8 @@ import { encodeSlideshow, type SlideshowOptions } from "../lib/slideshowVideo";
 import { SlideshowDialog } from "./SlideshowDialog";
 import { SaveDialog, type SaveFormat, type SaveSettings } from "./SaveDialog";
 import { ColorPicker } from "./ColorPicker";
+import { CanvasSizeDialog, type CanvasChange } from "./CanvasSizeDialog";
+import { sharpenPixels } from "../editor/resample";
 import { confirms, setConfirms } from "../lib/confirmations";
 import { LinearGradientIcon } from "./LinearGradientIcon";
 import { RadialGradientIcon } from "./RadialGradientIcon";
@@ -203,8 +205,11 @@ type LayerChange = { kind: "layer"; before: EditStep; after: EditStep };
 type DeleteChange = { kind: "delete-layers"; removed: { step: EditStep; node: number }[] };
 /** Layers added (new layer, paste, duplicate, Snapshot), each with its node after it was added. */
 type AddChange = { kind: "add-layers"; added: { step: EditStep; node: number }[] };
+/** The document before and after a new canvas size: its surface (of the size), its layers, and the selected layer. */
+type CanvasState = { surface: HTMLCanvasElement; history: EditStep[]; historyIndex: number; base?: string; baseAdjust?: LayerAdjust };
+type CanvasSizeChange = { kind: "canvas"; before: CanvasState; after: CanvasState };
 /** One step for Ctrl+Z and Ctrl+Y. */
-type UndoEntry = MaskChange | AdjustChange | PixelsChange | SelectionChange | PixelsManyChange | LayerChange | DeleteChange | AddChange;
+type UndoEntry = MaskChange | AdjustChange | PixelsChange | SelectionChange | PixelsManyChange | LayerChange | DeleteChange | AddChange | CanvasSizeChange;
 /** One adjustment of a prepared layer: its filter (null when it changes nothing), its opacity (for opacity adjustments), and its mask. */
 type PrepAdjustment = { id: string; filter: string | null; opacity: number | null; mask: HTMLCanvasElement | null; hides: boolean };
 /**
@@ -599,7 +604,7 @@ interface Props {
   openaiConnected: boolean;
   onRequestOpenAiSettings: () => void;
   onSettingsChange: (settings: AiSettings) => void;
-  onCommit: (id: string, patch: Partial<Pick<ImageDocument, "base" | "baseAdjust" | "history" | "historyIndex">>, markDirty?: boolean) => void;
+  onCommit: (id: string, patch: Partial<Pick<ImageDocument, "base" | "baseAdjust" | "history" | "historyIndex" | "surface">>, markDirty?: boolean) => void;
   onBusyChange: (id: string, busy: boolean) => void;
   /** Saves to the document's file; `saveAs` asks for a file first. */
   onSave: (id: string, saveAs?: boolean) => Promise<boolean>;
@@ -618,7 +623,7 @@ interface Props {
  * `documentId`. `nonce` changes each time, so the same command can run again,
  * and an editor runs each nonce only once.
  */
-export type EditorCommand = { name: "export-image" | "export-video" | "import-image" | "undo" | "redo" | "snapshot"; documentId: string; nonce: number };
+export type EditorCommand = { name: "export-image" | "export-video" | "import-image" | "undo" | "redo" | "snapshot" | "canvas-size" | "image-size"; documentId: string; nonce: number };
 
 /** Ctrl+wheel zoom: the scale changes by exp(-deltaY × this); one wheel notch (100) is about 5%. */
 const WHEEL_ZOOM_RATE = 0.0005;
@@ -744,6 +749,8 @@ export function Editor({
   const [maxHeightInput, setMaxHeightInput] = useState(() => readStored(SAVE_MAX_HEIGHT_KEY) ?? "");
   const [exporting, setExporting] = useState(false);
   const [exportDialogOpen, setExportDialogOpen] = useState(false);
+  /** The Canvas Size or Image Size dialog that is open, or null. */
+  const [canvasDialog, setCanvasDialog] = useState<"canvas" | "image" | null>(null);
   /** The layer waiting for the user to confirm Delete. */
   const [confirmDelete, setConfirmDelete] = useState<number[] | null>(null);
   /**
@@ -1289,6 +1296,11 @@ export function Editor({
 
   /** Puts back one side of a change; false when its layer (or adjustment) is gone. */
   const applyUndoEntry = useCallback((entry: UndoEntry, side: "before" | "after") => {
+    if ("kind" in entry && entry.kind === "canvas") {
+      const state = entry[side];
+      onCommit(documentRef.current.id, { surface: state.surface, history: state.history, historyIndex: state.historyIndex, base: state.base, baseAdjust: state.baseAdjust });
+      return true;
+    }
     if ("kind" in entry && entry.kind === "selection") {
       setSelection(entry[side]);
       /** The Magic Wand's last click no longer made this selection, so a new Tolerance leaves it alone. */
@@ -1490,7 +1502,7 @@ export function Editor({
     const step = node > 0 ? doc.history[node - 1] : null;
     const ownerKey = step ? step.id : `base:${doc.id}`;
     const adjust = adjustOf(doc, node) ?? [];
-    const key = [doc.id, maskSignature(doc.base), node, node > 0 ? adjustSignature(doc.baseAdjust) : "", ...doc.history.map((item, index) => index === node - 1
+    const key = [doc.id, doc.surface.width, doc.surface.height, maskSignature(doc.base), node, node > 0 ? adjustSignature(doc.baseAdjust) : "", ...doc.history.map((item, index) => index === node - 1
       ? item.id
       : [item.id, item.layer?.length, item.hidden, item.blend, item.maskOff, item.maskHides, maskSignature(item.layerMask), adjustSignature(item.adjust)].join(":"))].join("|");
     /** The target mask is used even while it is turned off; painting turns it on again. */
@@ -1619,7 +1631,7 @@ export function Editor({
     } finally {
       endJob(current.id, requestId);
     }
-  }, [appendStep, endJob, onNotice, onRequestOpenAiSettings, openaiConnected, settings, startJob, undoReplace, updateJob]);
+  }, [appendStep, endJob, onCommit, onNotice, onRequestOpenAiSettings, openaiConnected, settings, startJob, undoReplace, updateJob]);
 
   /** A new image from a prompt: generate it once, as the first layer, when the tab opens. */
   const startedGenerationRef = useRef(false);
@@ -2500,6 +2512,23 @@ export function Editor({
         onCommit(current.id, { history: current.history.map((item) => item.id === step.id ? next : item) });
         return;
       }
+      case "adjust-duplicate": {
+        /**
+         * A copy of the adjustment, with its values and its own copy of the
+         * mask (not linked), goes right after it on the same layer. Ctrl+Z
+         * removes it.
+         */
+        if (!adjustment) return;
+        const { maskLink: _link, ...rest } = adjustment;
+        const copy: Adjustment = { ...rest, id: newAdjustmentId(), ...(adjustment.label ? { label: `${adjustment.label} copy` } : {}) };
+        const list = adjustList(adjust);
+        const at = list.findIndex((item) => item.id === adjustment.id);
+        const after = [...list.slice(0, at + 1), copy, ...list.slice(at + 1)];
+        maskUndoRef.current.push({ kind: "adjust", owner, before: adjust, after });
+        maskRedoRef.current = [];
+        commitAdjust(current, node, after);
+        return;
+      }
       case "delete":
         if (!adjustment) return;
         if (node === current.historyIndex && maskPart === part) setMaskPart("mask");
@@ -3039,10 +3068,14 @@ export function Editor({
         else if (marquee && isMaskTool) setMarquee(null);
         else if (isMaskTool || isPaintTool) setTool("whole");
       }
-      /** Without a selection, Alt+Backspace fills the whole selected layer with the paint color, as in Photoshop. Masks are not filled. */
+      /** Without a selection, Alt+Backspace fills the whole selected layer with the paint color, as in Photoshop, or the whole mask in the Mask tool. */
       if (event.altKey && !event.ctrlKey && event.key === "Backspace" && !typing) {
         event.preventDefault();
-        if (!isMaskTool && !event.repeat) void fillWithColor(null);
+        /** In the Mask tool it fills the whole mask: white (shows all) or black (hides all), as the brush paints. */
+        if (!event.repeat) {
+          if (isMaskTool) fillMaskSelection(null);
+          else void fillWithColor(null);
+        }
       }
       if (event.key === "Enter" && !typing && gradientRef.current?.editing) {
         event.preventDefault();
@@ -3696,6 +3729,92 @@ export function Editor({
     commitPixels(step.id, Promise.resolve(before), image);
   };
 
+  /**
+   * A new canvas size (Canvas Size, Image Size): every layer, mask,
+   * adjustment mask and transform source is drawn again on a canvas of the
+   * new size, with the old top left at (`x`, `y`); space outside the old
+   * image is transparent, and what falls outside the new canvas is cut off.
+   * With `scaleX` and `scaleY`, the image is also resized by those factors
+   * (smooth resampling); with `sharpen`, layer images are then lightly
+   * sharpened. A transform source survives only an even scale; an uneven
+   * one makes the layer's pixels final.
+   * The edits' recorded areas move with it. One Ctrl+Z puts it all back.
+   * Returns the new surface, or null when it could not start.
+   */
+  const resizeCanvas = async (change: CanvasChange & { scaleX?: number; scaleY?: number; sharpen?: boolean }): Promise<HTMLCanvasElement | null> => {
+    if (applyingRef.current || resizeRef.current || gradientRef.current || clickSelectRef.current || paintStrokeRef.current) return null;
+    await pixelsChainRef.current;
+    await composeRef.current;
+    const current = documentRef.current;
+    const { x: dx, y: dy } = change;
+    const scaleX = change.scaleX ?? 1;
+    const scaleY = change.scaleY ?? 1;
+    /** A point of the old image on the new canvas. */
+    const moveX = (x: number) => x * scaleX + dx;
+    const moveY = (y: number) => y * scaleY + dy;
+    /**
+     * An image (by decode key and data) on the new canvas, moved by the
+     * offset and enlarged by the scale; with `still`, as it is (a transform
+     * source keeps its own place and size). `sharp` sharpens it after.
+     */
+    const redraw = async (key: string, src: string, still = false, sharp = false) => {
+      const image = await decodeLayer(key, src);
+      const canvas = createCanvas(change.width, change.height);
+      const context = canvas.getContext("2d")!;
+      context.imageSmoothingEnabled = true;
+      context.imageSmoothingQuality = "high";
+      if (still) context.drawImage(image, 0, 0);
+      else context.drawImage(image, dx, dy, image.width * scaleX, image.height * scaleY);
+      if (sharp && change.sharpen) {
+        const pixels = context.getImageData(0, 0, canvas.width, canvas.height);
+        sharpenPixels(pixels.data, canvas.width, canvas.height, 0.5);
+        context.putImageData(pixels, 0, 0);
+      }
+      return canvasToDataUrl(canvas);
+    };
+    const moveAdjust = async (ownerKey: string, adjust: LayerAdjust | undefined) => adjust
+      ? Promise.all(adjustList(adjust).map(async (item) => item.mask ? { ...item, mask: await redraw(adjustMaskKey(ownerKey, item.id), item.mask) } : item))
+      : undefined;
+    const history = await Promise.all(current.history.map(async (step): Promise<EditStep> => {
+      const next: EditStep = {
+        ...step,
+        selection: { ...step.selection, x: moveX(step.selection.x), y: moveY(step.selection.y), size: step.selection.size * scaleX },
+        sent: { ...step.sent, x: moveX(step.sent.x), y: moveY(step.sent.y), width: step.sent.width * scaleX, height: step.sent.height * scaleY },
+        ...(step.area ? { area: { x: moveX(step.area.x), y: moveY(step.area.y), width: step.area.width * scaleX, height: step.area.height * scaleY } } : {}),
+        ...(step.target ? { target: { ...step.target, x: moveX(step.target.x), y: moveY(step.target.y), size: step.target.size * scaleX } } : {})
+      };
+      if (step.layer) next.layer = await redraw(`${step.id}:image`, step.layer, false, true);
+      if (step.layerMask) next.layerMask = await redraw(`${step.id}:mask`, step.layerMask);
+      if (step.adjust) next.adjust = await moveAdjust(step.id, step.adjust);
+      /** A transform source keeps its pixels in place; its transform moves with the canvas. */
+      const source = step.transformSource;
+      if (source && scaleX !== scaleY) delete next.transformSource;
+      if (source && scaleX === scaleY) {
+        const sourceKey = `${step.id}:source`;
+        next.transformSource = {
+          layer: await redraw(`${sourceKey}:image`, source.layer, true),
+          ...(source.layerMask ? { layerMask: await redraw(`${sourceKey}:mask`, source.layerMask, true) } : {}),
+          ...(source.adjustMasks
+            ? { adjustMasks: Object.fromEntries(await Promise.all(Object.entries(source.adjustMasks).map(async ([id, mask]) => [id, await redraw(adjustMaskKey(sourceKey, id), mask, true)] as const))) }
+            : {}),
+          transform: { a: source.transform.a * scaleX, b: source.transform.b * scaleX, x: moveX(source.transform.x), y: moveY(source.transform.y) },
+          made: ""
+        };
+        next.transformSource.made = transformMade(next);
+      }
+      return next;
+    }));
+    const base = current.base ? await redraw(`base:${current.id}`, current.base, false, true) : current.base;
+    const baseAdjust = await moveAdjust(`base:${current.id}`, current.baseAdjust);
+    const surfaceNext = createCanvas(change.width, change.height);
+    const before: CanvasState = { surface: current.surface, history: current.history, historyIndex: current.historyIndex, base: current.base, baseAdjust: current.baseAdjust };
+    const after: CanvasState = { surface: surfaceNext, history, historyIndex: current.historyIndex, base, baseAdjust };
+    maskUndoRef.current.push({ kind: "canvas", before, after });
+    maskRedoRef.current = [];
+    onCommit(current.id, { surface: surfaceNext, history, base, baseAdjust });
+    return surfaceNext;
+  };
+
   /** Makes the color of the visible image at `point` the paint color (the eyedropper). */
   const colorAt = (point: Point) => {
     const x = Math.min(width - 1, Math.floor(point.x));
@@ -3916,7 +4035,7 @@ export function Editor({
    * Fills the selection in the target mask, like one brush stroke: it shows
    * or hides (as the brush does) at the brush opacity (Alt+Backspace).
    */
-  const fillMaskSelection = (chosen: PixelSelection) => {
+  const fillMaskSelection = (chosen: PixelSelection | null) => {
     const prep = maskPrepRef.current;
     const doc = documentRef.current;
     const node = doc.historyIndex;
@@ -3924,8 +4043,11 @@ export function Editor({
     const before = partMaskState(doc, node, targetPart);
     let { mask, hides } = prepTarget(prep);
     let shows = maskShows;
-    /** As with the brush, a mask that shows (or hides) everything can only be changed the other way. */
-    const forced = forcedMaskMode(prep);
+    /**
+     * As with the brush, a mask that shows (or hides) everything can only be
+     * changed the other way. A fill of the whole mask keeps the mode asked for.
+     */
+    const forced = chosen ? forcedMaskMode(prep) : null;
     if (forced !== null && forced !== shows) {
       shows = forced;
       setMaskShows(forced);
@@ -3935,10 +4057,16 @@ export function Editor({
       hides = !shows;
       setPrepTarget(prep, mask, hides);
     }
+    /** The area to fill: the selection, or with none, the whole mask (white to show all, black to hide all). */
     const shape = createCanvas(width, height);
     const context = shape.getContext("2d")!;
-    context.imageSmoothingEnabled = true;
-    context.drawImage(chosen.canvas, 0, 0, width, height);
+    if (chosen) {
+      context.imageSmoothingEnabled = true;
+      context.drawImage(chosen.canvas, 0, 0, width, height);
+    } else {
+      context.fillStyle = "#fff";
+      context.fillRect(0, 0, width, height);
+    }
     applyMaskStroke(mask, drawingCopy(mask), shape, maskOpacity / 100, shows !== hides);
     redrawPrepared(prep);
     const filled = mask;
@@ -4427,6 +4555,12 @@ export function Editor({
       if (!clickSelectRef.current) redoMask();
     } else if (command.name === "snapshot") {
       void snapshotVisible();
+    } else if (command.name === "canvas-size" || command.name === "image-size") {
+      if (resizeRef.current || clickSelectRef.current || gradientRef.current) {
+        onNotice({ tone: "error", message: "Apply or cancel the current tool (Enter or Esc) first." });
+        return;
+      }
+      setCanvasDialog(command.name === "image-size" ? "image" : "canvas");
     } else if (command.name === "export-image" || command.name === "export-video") {
       if (exporting) return;
       /** A new export first removes the message of the one before. */
@@ -5014,6 +5148,7 @@ export function Editor({
                       <span className={`shortcut-card-status ${brushHides ? "hiding" : "showing"}`}>Painting <strong>{brushHides ? "HIDES" : "SHOWS"}</strong> current {targetPart === "mask" ? "layer" : "adjustment"}</span>                    </div>
                     <ul>
                       <li><kbd>x</kbd> Paint to {brushHides ? "show" : "hide"} current {targetPart === "mask" ? "layer" : "adjustment"}</li>
+                      {!selection && <li><kbd>alt</kbd> + <kbd>backspace</kbd> fill with {brushHides ? "black (hide all)" : "white (show all)"}</li>}
                       <li><kbd>esc</kbd> Exit mask</li>
                       <li className={maskOverlay ? "red-on" : ""}>Red mask: <strong>{maskOverlay ? "ON" : "OFF"}</strong> <kbd>r</kbd> {maskOverlay ? "Off" : "On"}</li>
                     </ul>
@@ -5751,6 +5886,22 @@ export function Editor({
           imageKeys={imageDocument.path ? [`path:${imageDocument.path}`, `id:${imageDocument.id}`] : [`id:${imageDocument.id}`]}
           onCancel={() => setSlideshowDialogOpen(false)}
           onExport={(options) => void exportSlideshow(options)}
+        />
+      )}
+      {canvasDialog && (
+        <CanvasSizeDialog
+          mode={canvasDialog}
+          width={width}
+          height={height}
+          onCancel={() => setCanvasDialog(null)}
+          onApply={(change) => {
+            const resample = canvasDialog === "image";
+            setCanvasDialog(null);
+            /** Image Size resamples every layer; a larger image is then lightly sharpened, as bicubic sharper does. */
+            void resizeCanvas(resample
+              ? { width: change.width, height: change.height, x: 0, y: 0, scaleX: change.width / width, scaleY: change.height / height, sharpen: change.width * change.height > width * height }
+              : change);
+          }}
         />
       )}
       {importLayerOpen && <OpenDialog title="Import image as layer" onCancel={() => setImportLayerOpen(false)} onOpen={(path) => void importLayer(path)} />}

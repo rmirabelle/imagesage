@@ -54,6 +54,7 @@ export type PartAction =
   | "toggle-all"
   | "delete-all"
   | "reset"
+  | "adjust-duplicate"
   | "delete"
   | "resize"
   | "duplicate"
@@ -869,6 +870,7 @@ export const StepsPanel = memo(function StepsPanel({ documentId, hasBase, origin
       <button key={`${part}-rename`} role="menuitem" onClick={() => { setPartMenu(null); setMenu(null); onAdjustRename(node, part); }}>
         <PencilSimple size={15} /> <span className="steps-menu-label">Rename…</span>
       </button>,
+      item(part, "adjust-duplicate", <Copy size={15} />, "Duplicate"),
       /** Adding a mask and Magic are on the chip's + button; Paste stays here too, for an adjustment without a mask. */
       ...(hasMask || !canPasteMask ? [] : [<div key="sep-1" className="steps-menu-divider" />, item(part, "mask-paste", <ClipboardText size={15} />, "Paste mask")]),
       <div key="sep-2" className="steps-menu-divider" />,
