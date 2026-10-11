@@ -1,5 +1,5 @@
 import { ArrayBufferTarget, Muxer } from "mp4-muxer";
-import { musicGain, SLIDESHOW_FPS, slideshowDuration, slideshowFrame, slideshowFrameCount, slideshowSegments } from "../editor/slideshow";
+import { musicGain, SLIDESHOW_FPS, slideshowDuration, slideshowFrame, slideshowFrameCount, slideshowSegments, VERTICAL_VIDEO } from "../editor/slideshow";
 import { MUSIC_SAMPLE_RATE } from "./music";
 import { getAppVersion } from "./updater";
 
@@ -9,11 +9,17 @@ export interface SlideshowMusic {
   start: number;
 }
 
-/** The video's settings: the title in the intro overlay (left out when empty), the music, if any, and the seconds each layer shows. */
+/**
+ * The video's settings: the title in the intro overlay (left out when empty),
+ * the music, if any, the seconds each layer shows, and the shape. A vertical
+ * video is 9:16 for phone feeds: the whole image in the middle, over a
+ * blurred, enlarged copy of it that fills the rest.
+ */
 export interface SlideshowOptions {
   title: string;
   music: SlideshowMusic | null;
   layerSeconds: number;
+  vertical: boolean;
 }
 
 /**
@@ -22,7 +28,8 @@ export interface SlideshowOptions {
  * `stages` are the pictures at video size: the original image, then the
  * image after each visible layer; `names` label them. The video opens and
  * closes on the final image with the intro overlay over it. Music, when
- * chosen, is encoded first as AAC audio.
+ * chosen, is encoded first as AAC audio. A vertical video puts each picture
+ * in the middle of a 1080 by 1920 frame, over its blurred background.
  */
 const BITRATE = 10_000_000;
 const AUDIO_BITRATE = 192_000;
@@ -93,12 +100,23 @@ async function encodeMusic(muxer: Muxer<ArrayBufferTarget>, music: SlideshowMusi
   if (failure) throw failure;
 }
 
-/** Draws a stage name in a dark rounded box at the top center, one margin below the top edge. */
-function drawLabel(context: CanvasRenderingContext2D, name: string, alpha: number, width: number, height: number) {
+/**
+ * The top of the vertical video that phone apps cover with their own
+ * buttons and text; labels stay below it.
+ */
+const VERTICAL_SAFE_TOP = 260;
+
+/**
+ * Draws a stage name in a dark rounded box at the top center, one margin
+ * below the top edge. Sizes follow `scale`, the video height of a normal
+ * video. `above`, in a vertical video, is the top of the picture: the box
+ * then sits just above the picture, but not in the covered top.
+ */
+function drawLabel(context: CanvasRenderingContext2D, name: string, alpha: number, width: number, scale: number, above?: number) {
   if (alpha <= 0 || !name) return;
-  const size = Math.max(14, Math.round(height * 0.034));
+  const size = Math.max(14, Math.round(scale * 0.034));
   const pad = Math.round(size * 0.55);
-  const margin = Math.round(height * 0.04);
+  const margin = Math.round(scale * 0.04);
   context.save();
   context.globalAlpha = alpha;
   context.font = `600 ${size}px "Segoe UI", system-ui, sans-serif`;
@@ -108,7 +126,7 @@ function drawLabel(context: CanvasRenderingContext2D, name: string, alpha: numbe
   const boxHeight = size + pad * 1.4;
   const boxWidth = textWidth + pad * 2;
   const left = (width - boxWidth) / 2;
-  const top = margin;
+  const top = above === undefined ? margin : Math.max(VERTICAL_SAFE_TOP, above - margin - boxHeight);
   context.fillStyle = "rgba(10, 12, 18, 0.62)";
   context.beginPath();
   context.roundRect(left, top, boxWidth, boxHeight, Math.round(size * 0.35));
@@ -166,14 +184,14 @@ function wrapLines(context: CanvasRenderingContext2D, text: string, maxWidth: nu
  * column and two lines in a right column: "made with Image Sage™" (the name
  * in bright blue, the ™ small) and a small "Image Sage v0.3 - Robert Mirabelle". The credit lines never wrap or
  * shrink. The rest of the canvas stays clear, so the image shows around it.
- * Sizes are in hundredths of the video height.
+ * Sizes are in hundredths of `scale`, the video height of a normal video.
  */
-async function introOverlay(width: number, height: number, title: string) {
+async function introOverlay(width: number, height: number, title: string, scale: number) {
   const card = document.createElement("canvas");
   card.width = width;
   card.height = height;
   const context = card.getContext("2d")!;
-  const unit = height / 100;
+  const unit = scale / 100;
   const font = (size: number, weight: number) => `${weight} ${Math.round(size * unit)}px "Segoe UI", system-ui, sans-serif`;
   /** The version as major.minor ("0.3"), or nothing when the app cannot tell. */
   const version = await getAppVersion().then((full) => full.split(".").slice(0, 2).join(".")).catch(() => "");
@@ -264,15 +282,66 @@ async function introOverlay(width: number, height: number, title: string) {
   return card;
 }
 
+/** Blur of the vertical video's background, in pixels of the small background canvas. */
+const BACKGROUND_BLUR = 14;
+/** The background is made at this fraction of the video size, then drawn enlarged; the blur hides the low detail. */
+const BACKGROUND_SCALE = 0.25;
+/** The background is this dark, so the sharp picture stands out from it. */
+const BACKGROUND_DIM = 0.3;
+
+/**
+ * The blurred background of a vertical video's picture: the picture enlarged
+ * to cover the whole frame, blurred and dimmed, at a small size. It is drawn
+ * past the edges, so the blur does not fade out at the sides.
+ */
+function blurredBackground(picture: HTMLCanvasElement, width: number, height: number) {
+  const small = document.createElement("canvas");
+  small.width = Math.round(width * BACKGROUND_SCALE);
+  small.height = Math.round(height * BACKGROUND_SCALE);
+  const context = small.getContext("2d")!;
+  const over = BACKGROUND_BLUR * 3;
+  const cover = Math.max((small.width + over * 2) / picture.width, (small.height + over * 2) / picture.height);
+  const drawWidth = picture.width * cover;
+  const drawHeight = picture.height * cover;
+  context.fillStyle = "#000";
+  context.fillRect(0, 0, small.width, small.height);
+  context.filter = `blur(${BACKGROUND_BLUR}px)`;
+  context.drawImage(picture, (small.width - drawWidth) / 2, (small.height - drawHeight) / 2, drawWidth, drawHeight);
+  context.filter = "none";
+  context.fillStyle = `rgba(0, 0, 0, ${BACKGROUND_DIM})`;
+  context.fillRect(0, 0, small.width, small.height);
+  return small;
+}
+
+/**
+ * Draws one whole picture into the frame. A normal video shows the picture
+ * as it is. A vertical video shows the blurred background, enlarged to fill
+ * the frame, and the picture centered over it.
+ */
+function drawPicture(context: CanvasRenderingContext2D, picture: HTMLCanvasElement, background: HTMLCanvasElement | null, width: number, height: number) {
+  if (!background) {
+    context.drawImage(picture, 0, 0);
+    return;
+  }
+  context.imageSmoothingQuality = "high";
+  context.drawImage(background, 0, 0, width, height);
+  context.drawImage(picture, Math.round((width - picture.width) / 2), Math.round((height - picture.height) / 2));
+}
+
 export async function encodeSlideshow(
   stages: HTMLCanvasElement[],
   names: (string | null)[],
   options: SlideshowOptions,
   onProgress: (fraction: number) => void
 ): Promise<Blob> {
-  const { width, height } = stages[0];
+  const { width, height } = options.vertical ? VERTICAL_VIDEO : stages[0];
   const pictures = stages;
-  const overlay = await introOverlay(width, height, options.title);
+  /** A vertical video sizes its text like a normal video as tall as it is wide. */
+  const scale = options.vertical ? width : height;
+  const backgrounds = options.vertical ? stages.map((stage) => blurredBackground(stage, width, height)) : null;
+  /** The top of the picture in a vertical video, where its name sits above it. */
+  const pictureTop = options.vertical ? Math.round((height - stages[0].height) / 2) : undefined;
+  const overlay = await introOverlay(width, height, options.title, scale);
   const segments = slideshowSegments(stages.length, true, options.layerSeconds);
   const config = await pickCodec(width, height);
   const audioConfig = options.music ? await pickAudioConfig() : null;
@@ -294,19 +363,33 @@ export async function encodeSlideshow(
   frame.width = width;
   frame.height = height;
   const context = frame.getContext("2d")!;
+  /** A vertical video mixes two pictures as whole frames, so each is first drawn whole here. */
+  const mixFrame = backgrounds ? document.createElement("canvas") : null;
+  if (mixFrame) {
+    mixFrame.width = width;
+    mixFrame.height = height;
+  }
+  const mixContext = mixFrame?.getContext("2d") ?? null;
   const total = slideshowFrameCount(segments);
   const microseconds = 1_000_000 / SLIDESHOW_FPS;
   for (let index = 0; index < total; index++) {
     if (failure) throw failure;
     const shot = slideshowFrame(segments, index / SLIDESHOW_FPS);
     context.globalAlpha = 1;
-    context.drawImage(pictures[shot.mix >= 1 ? shot.to : shot.from], 0, 0);
+    const first = shot.mix >= 1 ? shot.to : shot.from;
+    drawPicture(context, pictures[first], backgrounds?.[first] ?? null, width, height);
     if (shot.mix > 0 && shot.mix < 1 && shot.to !== shot.from) {
-      context.globalAlpha = shot.mix;
-      context.drawImage(pictures[shot.to], 0, 0);
+      if (mixFrame && mixContext && backgrounds) {
+        drawPicture(mixContext, pictures[shot.to], backgrounds[shot.to], width, height);
+        context.globalAlpha = shot.mix;
+        context.drawImage(mixFrame, 0, 0);
+      } else {
+        context.globalAlpha = shot.mix;
+        context.drawImage(pictures[shot.to], 0, 0);
+      }
       context.globalAlpha = 1;
     }
-    if (shot.label !== null) drawLabel(context, shot.label === "final" ? "Final image" : names[shot.label] ?? "", shot.labelAlpha, width, height);
+    if (shot.label !== null) drawLabel(context, shot.label === "final" ? "Final image" : names[shot.label] ?? "", shot.labelAlpha, width, scale, pictureTop);
     if (shot.overlay > 0) {
       context.globalAlpha = shot.overlay;
       context.drawImage(overlay, 0, 0);

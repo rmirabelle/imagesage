@@ -3,12 +3,12 @@ import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { save } from "@tauri-apps/plugin-dialog";
-import { ArrowClockwise, ArrowCounterClockwise, Camera, CheckCircle, DownloadSimple, FilmStrip, FloppyDisk, FolderOpen, GearSix, ImageSquare, Info, Keyboard, MagicWand, SpinnerGap, Warning, WarningCircle, X } from "@phosphor-icons/react";
+import { ArrowClockwise, ArrowCounterClockwise, Camera, CheckCircle, DownloadSimple, FilePlus, FilmStrip, FloppyDisk, FolderOpen, GearSix, ImageSquare, Info, Keyboard, SpinnerGap, Warning, WarningCircle, X } from "@phosphor-icons/react";
 import { AboutDialog } from "./components/AboutDialog";
 import { ShortcutsDialog } from "./components/ShortcutsDialog";
 import { ConnectDialog, type SettingsSection } from "./components/ConnectDialog";
 import { Editor, type EditorCommand, type Notice } from "./components/Editor";
-import { NewImageDialog, type NewImageRequest } from "./components/NewImageDialog";
+import { NewImageDialog } from "./components/NewImageDialog";
 import { OpenDialog } from "./components/OpenDialog";
 import { Tooltips } from "./components/Tooltips";
 import type { SaveFormat } from "./components/SaveDialog";
@@ -90,6 +90,9 @@ const DocumentPanel = memo(function DocumentPanel(props: DocumentPanelProps) {
   );
 });
 
+/** How long a message takes to slide in or out, in milliseconds (matches `.notice.corner` in the CSS). */
+const NOTICE_SLIDE_MS = 420;
+
 export default function App() {
   const [documents, setDocuments] = useState<ImageDocument[]>([]);
   const documentsRef = useRef(documents);
@@ -107,16 +110,31 @@ export default function App() {
   const [storedNotice, setNotice] = useState<Notice>(null);
   /** A message about one image shows only while that image is selected; it waits, without closing, while another is. */
   const notice = storedNotice && (!storedNotice.documentId || storedNotice.documentId === activeDocumentId) ? storedNotice : null;
+  /**
+   * The message on screen. When `notice` ends, the last message stays a
+   * moment with `noticeLeaving`, so it can slide out.
+   */
+  const [shownNotice, setShownNotice] = useState<Notice>(null);
+  const [noticeLeaving, setNoticeLeaving] = useState(false);
+  useLayoutEffect(() => {
+    if (notice) {
+      setShownNotice(notice);
+      setNoticeLeaving(false);
+      return;
+    }
+    setNoticeLeaving(true);
+    const timer = window.setTimeout(() => {
+      setShownNotice(null);
+      setNoticeLeaving(false);
+    }, NOTICE_SLIDE_MS);
+    return () => window.clearTimeout(timer);
+  }, [notice]);
   /** A message about an image that was closed is dropped. */
   useEffect(() => {
     if (storedNotice?.documentId && !documents.some((document) => document.id === storedNotice.documentId)) setNotice(null);
   }, [documents, storedNotice]);
-  /**
-   * Where messages show: centered across the image, about 30px below its top
-   * (or below the top of the work area when the image is scrolled up past it).
-   * Null centers them in the window.
-   */
-  const [noticeCenter, setNoticeCenter] = useState<{ left: number; top: number; transform: string } | null>(null);
+  /** Where a message sits with an image open: the top-right corner of the work area around the image. Null centers it in the window. */
+  const [noticePlace, setNoticePlace] = useState<{ top: number; left: number; width: number; height: number } | null>(null);
   useLayoutEffect(() => {
     if (!notice) return;
     const observer = new ResizeObserver(() => place());
@@ -126,11 +144,9 @@ export default function App() {
     function place() {
       const panel = activeDocumentId ? window.document.querySelector<HTMLElement>(`#image-panel-${CSS.escape(activeDocumentId)}`) : null;
       const areaElement = panel?.querySelector<HTMLElement>(".editor-workspace");
-      const imageElement = panel?.querySelector<HTMLElement>(".canvas-stage");
       const area = areaElement?.getBoundingClientRect();
-      const image = imageElement?.getBoundingClientRect();
-      if (!areaElement || !imageElement || !area || !image || area.width === 0 || area.height === 0 || image.width === 0) {
-        setNoticeCenter(null);
+      if (!areaElement || !area || area.width === 0 || area.height === 0) {
+        setNoticePlace(null);
         /**
          * A newly opened image is not laid out yet when its notice appears.
          * Try again on the next frames until its panel has a size.
@@ -138,13 +154,12 @@ export default function App() {
         if (activeDocumentId && tries++ < 60) frame = requestAnimationFrame(place);
         return;
       }
-      if (observed[0] !== areaElement || observed[1] !== imageElement) {
+      if (observed[0] !== areaElement) {
         observer.disconnect();
-        observed = [areaElement, imageElement];
-        observed.forEach((element) => observer.observe(element));
+        observed = [areaElement];
+        observer.observe(areaElement);
       }
-      const left = (Math.max(area.left, image.left) + Math.min(area.right, image.right)) / 2;
-      setNoticeCenter({ left, top: Math.max(area.top, image.top) + 30, transform: "translateX(-50%)" });
+      setNoticePlace({ top: area.top, left: area.left, width: area.width, height: area.height });
     }
     place();
     window.addEventListener("resize", place);
@@ -483,19 +498,11 @@ export default function App() {
   }, []);
 
   /**
-   * Opens a new tab with an empty canvas of the chosen size. The editor then
-   * generates the image there as the first layer, with the same previews,
-   * Capture and Cancel as an edit.
+   * Opens a new tab with a blank canvas of the chosen size. The user starts
+   * with a prompt, which generates the first layer, or adds a layer and paints.
    */
-  const startGenerated = useCallback((request: NewImageRequest) => {
-    const [width, height] = request.size.split("x").map(Number);
-    const origin: DocumentOrigin = {
-      kind: "generated",
-      prompt: request.prompt,
-      model: request.model,
-      quality: request.quality,
-      size: request.size
-    };
+  const createBlank = useCallback((width: number, height: number) => {
+    const origin: DocumentOrigin = { kind: "generated", prompt: "Blank image", model: "", quality: "", size: `${width}x${height}` };
     addDocument({
       name: "Untitled.imagesage",
       path: null,
@@ -504,8 +511,7 @@ export default function App() {
       surface: createCanvas(width, height),
       history: [],
       historyIndex: 0,
-      startGeneration: { prompt: request.prompt, model: request.model, quality: request.quality },
-      startsDirty: true
+      startsDirty: false
     });
     setNewImageOpen(false);
   }, [addDocument]);
@@ -723,7 +729,7 @@ export default function App() {
       id: "file",
       label: "File",
       items: [
-        { label: "New from prompt…", icon: <MagicWand size={15} />, run: () => setNewImageOpen(true) },
+        { label: "New Image…", icon: <FilePlus size={15} />, run: () => setNewImageOpen(true) },
         { label: "Open…", icon: <FolderOpen size={15} />, disabled: opening, run: () => void openFile() },
         "separator",
         { label: "Save", icon: <FloppyDisk size={15} />, shortcut: "Ctrl+S", disabled: !activeDocument || activeDocument.saving, run: () => activeDocument && void saveDocument(activeDocument.id) },
@@ -836,10 +842,14 @@ export default function App() {
             </div>
             <h1>Prompt. Refine. Repeat.</h1>
             <div className="empty-below">
-              <p className="empty-copy">Open or generate images in layers. Edit using professional-grade tools. Export images and slideshows.</p>
+              <p className="empty-copy">
+                Open or generate images in layers.<br />
+                Edit using professional-grade tools.<br />
+                Export images and slideshows.
+              </p>
               <div className="empty-actions">
                 <button className="button primary large" onClick={() => setNewImageOpen(true)}>
-                  <MagicWand size={19} weight="bold" /> New from prompt
+                  <FilePlus size={19} weight="bold" /> New Image
                 </button>
                 <button className="button secondary large" onClick={openFile}>
                   <FolderOpen size={19} weight="bold" /> Open image
@@ -874,50 +884,54 @@ export default function App() {
         ))}
       </div>
 
-      {notice && (
-        <div className={`notice ${notice.tone}`} style={noticeCenter ?? undefined} onPointerEnter={() => setNoticeHovered(true)} onPointerLeave={() => setNoticeHovered(false)}>
-          {notice.tone === "success" ? <CheckCircle size={19} weight="fill" /> : notice.tone === "warning" ? <Warning size={19} weight="fill" /> : <WarningCircle size={19} weight="fill" />}
-          <span>
-            {notice.message}
-            {notice.file && (
-              <>
-                {" "}
-                <button
-                  className="notice-file"
-                  onClick={() => void invoke("reveal_file", { path: notice.file }).catch((error) => showNotice({ tone: "error", message: String(error) }))}
-                  data-help="Open the folder in File Explorer"
-                >
-                  {notice.file}
-                </button>
-              </>
+      {/* With an image open, the message sits in a frame the size of the work area, so it slides in and out at the work area's right edge. */}
+      {shownNotice && (() => {
+        const message = (
+          <div key={shownNotice.message} className={`notice ${shownNotice.tone} ${noticePlace ? "corner" : ""} ${noticeLeaving ? "leaving" : ""}`} onPointerEnter={() => setNoticeHovered(true)} onPointerLeave={() => setNoticeHovered(false)}>
+            {shownNotice.tone === "success" ? <CheckCircle size={19} weight="fill" /> : shownNotice.tone === "warning" ? <Warning size={19} weight="fill" /> : <WarningCircle size={19} weight="fill" />}
+            <span>
+              {shownNotice.message}
+              {shownNotice.file && (
+                <>
+                  {" "}
+                  <button
+                    className="notice-file"
+                    onClick={() => void invoke("reveal_file", { path: shownNotice.file }).catch((error) => showNotice({ tone: "error", message: String(error) }))}
+                    data-help="Open the folder in File Explorer"
+                  >
+                    {shownNotice.file}
+                  </button>
+                </>
+              )}
+            </span>
+            {shownNotice.actions?.map((item) => (
+              <button
+                key={item.label}
+                className="notice-action"
+                onClick={() => {
+                  item.run();
+                  if (!item.keepOpen) setNotice(null);
+                }}
+              >
+                {item.label}
+              </button>
+            ))}
+            {shownNotice.action && (
+              <button
+                className="notice-action"
+                onClick={() => {
+                  shownNotice.action!.run();
+                  setNotice(null);
+                }}
+              >
+                {shownNotice.action.label}
+              </button>
             )}
-          </span>
-          {notice.actions?.map((item) => (
-            <button
-              key={item.label}
-              className="notice-action"
-              onClick={() => {
-                item.run();
-                if (!item.keepOpen) setNotice(null);
-              }}
-            >
-              {item.label}
-            </button>
-          ))}
-          {notice.action && (
-            <button
-              className="notice-action"
-              onClick={() => {
-                notice.action!.run();
-                setNotice(null);
-              }}
-            >
-              {notice.action.label}
-            </button>
-          )}
-          <button onClick={() => setNotice(null)} aria-label="Dismiss" data-help="Close">×</button>
-        </div>
-      )}
+            <button onClick={() => setNotice(null)} aria-label="Dismiss" data-help="Close">×</button>
+          </div>
+        );
+        return noticePlace ? <div className="notice-frame" style={noticePlace}>{message}</div> : message;
+      })()}
 
       {fileTasks.length > 0 && (
         <div className="file-task-overlay" role="status" aria-live="polite">
@@ -1003,14 +1017,7 @@ export default function App() {
       )}
 
       {newImageOpen && (
-        <NewImageDialog
-          settings={settings}
-          connected={openaiReady}
-          onRequestConnect={openConnect}
-          onSettingsChange={setSettings}
-          onCancel={() => setNewImageOpen(false)}
-          onStart={startGenerated}
-        />
+        <NewImageDialog onCancel={() => setNewImageOpen(false)} onCreate={createBlank} />
       )}
       {connectSection && (
         <ConnectDialog

@@ -41,6 +41,29 @@ describe("Image Sage manifest", () => {
     expect(restored.history[0]).toEqual(layered);
   });
 
+  it("round-trips a transform source as tiles", () => {
+    const { before: _before, after: _after, ...plain } = step(1);
+    const layered: EditStep = {
+      ...plain,
+      layer: "data:image/png;base64,layer1",
+      transformSource: {
+        layer: "data:image/png;base64,source1",
+        layerMask: "data:image/png;base64,sourcemask1",
+        adjustMasks: { "adj-1": "data:image/png;base64,sourceadjust1" },
+        transform: { a: 0.5, b: 0.1, x: 12, y: -4 },
+        made: "fingerprint"
+      }
+    };
+    const { manifest, tiles } = createManifest(10, 10, { kind: "imported", fileName: "a.png" }, [layered], 1, "2026-10-01T00:00:00.000Z", { base: "" });
+    expect(tiles.map((tile) => tile.path)).toEqual([
+      "history/0001-source-layer.png",
+      "history/0001-source-mask.png",
+      "history/0001-source-adjust-adj-1-mask.png",
+      "history/0001-layer.png"
+    ]);
+    expect(parseManifest(JSON.stringify(manifest), tiles).history).toEqual([layered]);
+  });
+
   it("writes version 3 when the original image is a normal layer", () => {
     const { before: _before, after: _after, ...plain } = step(1);
     const layered: EditStep = { ...plain, layer: "data:image/png;base64,layer1" };

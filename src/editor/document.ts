@@ -1,4 +1,4 @@
-import type { Adjustment, DocumentOrigin, EditStep, LayerAdjust, MaskImage, MaskStroke, SentRegion, SquareSelection } from "./types";
+import type { Adjustment, DocumentOrigin, EditStep, LayerAdjust, MaskImage, MaskStroke, SentRegion, SquareSelection, TransformSource } from "./types";
 
 export const IMAGESAGE_DOCUMENT_FORMAT = "imagesage-document";
 /**
@@ -39,7 +39,7 @@ export interface HistoryTile {
   dataUrl: string;
 }
 
-const tilePath = (index: number, kind: "before" | "after" | "layer" | "mask" | `adjust-${number}-mask`) =>
+const tilePath = (index: number, kind: "before" | "after" | "layer" | "mask" | `adjust-${number}-mask` | "source-layer" | "source-mask" | `source-adjust-${string}-mask`) =>
   `history/${String(index + 1).padStart(4, "0")}-${kind}.png`;
 const BASE_PATH = "history/base.png";
 /** The tile path of the mask of the original image's adjustment number `index` (from 0). */
@@ -220,6 +220,23 @@ const parseOrigin = (value: unknown): DocumentOrigin => {
   return { kind: "imported", fileName: typeof value.fileName === "string" ? value.fileName : "" };
 };
 
+/** A layer's transform source: the paths (or data) of its images, its total transform and its fingerprint; null when it is not valid. */
+const parseTransformSource = (value: unknown): TransformSource | null => {
+  if (!isRecord(value) || typeof value.layer !== "string" || typeof value.made !== "string" || !isRecord(value.transform)) return null;
+  const { a, b, x, y } = value.transform;
+  if (![a, b, x, y].every((number) => typeof number === "number" && Number.isFinite(number))) return null;
+  const adjustMasks = isRecord(value.adjustMasks)
+    ? Object.fromEntries(Object.entries(value.adjustMasks).filter((entry): entry is [string, string] => typeof entry[1] === "string"))
+    : undefined;
+  return {
+    layer: value.layer,
+    ...(typeof value.layerMask === "string" ? { layerMask: value.layerMask } : {}),
+    ...(adjustMasks && Object.keys(adjustMasks).length ? { adjustMasks } : {}),
+    transform: { a: a as number, b: b as number, x: x as number, y: y as number },
+    made: value.made
+  };
+};
+
 const parseStep = (value: unknown): ManifestStep => {
   if (!isRecord(value)) throw new Error("The document contains an invalid edit step.");
   return {
@@ -240,6 +257,7 @@ const parseStep = (value: unknown): ManifestStep => {
     ...(parseAdjust(value.adjust) ? { adjust: parseAdjust(value.adjust) } : {}),
     ...(parseMask(value.mask) ? { mask: parseMask(value.mask) } : {}),
     ...(isRecord(value.target) ? { target: parseSelection(value.target) } : {}),
+    ...(parseTransformSource(value.transformSource) ? { transformSource: parseTransformSource(value.transformSource)! } : {}),
     ...(typeof value.parent === "number" && Number.isInteger(value.parent) ? { parent: value.parent } : {}),
     ...(isRecord(value.area)
       ? {
@@ -278,9 +296,25 @@ export function createManifest(
   const baseAdjust = storeAdjust(extras.baseAdjust, baseAdjustMaskPath);
   /** Layer steps store the layer and its mask; steps not yet turned into layers keep their before/after tiles. */
   const steps = history.map((step, index): ManifestStep => {
-    const { before: beforeData, after: afterData, layer: layerData, layerMask: maskData, adjust: adjustData, ...stepRest } = step;
+    const { before: beforeData, after: afterData, layer: layerData, layerMask: maskData, adjust: adjustData, transformSource: sourceData, ...stepRest } = step;
     const adjust = storeAdjust(adjustData, (at) => tilePath(index, `adjust-${at + 1}-mask`));
-    const rest = adjust ? { ...stepRest, adjust } : stepRest;
+    /** A transform source stores its images as tiles too; the manifest keeps their paths. */
+    let transformSource: TransformSource | undefined;
+    if (sourceData) {
+      const store = (path: string, dataUrl: string) => {
+        tiles.push({ path, dataUrl });
+        return path;
+      };
+      transformSource = {
+        ...sourceData,
+        layer: store(tilePath(index, "source-layer"), sourceData.layer),
+        ...(sourceData.layerMask ? { layerMask: store(tilePath(index, "source-mask"), sourceData.layerMask) } : {}),
+        ...(sourceData.adjustMasks
+          ? { adjustMasks: Object.fromEntries(Object.entries(sourceData.adjustMasks).map(([id, mask]) => [id, store(tilePath(index, `source-adjust-${id}-mask`), mask)])) }
+          : {})
+      };
+    }
+    const rest = { ...stepRest, ...(adjust ? { adjust } : {}), ...(transformSource ? { transformSource } : {}) };
     if (layerData) {
       const layer = tilePath(index, "layer");
       tiles.push({ path: layer, dataUrl: layerData });
@@ -347,6 +381,24 @@ export function parseManifest(manifestJson: string, tiles?: HistoryTile[]) {
     }
     resolved.adjust = resolveAdjust(step.adjust);
     if (!resolved.adjust) delete resolved.adjust;
+    /** A transform source whose tiles are missing is dropped; the layer itself still opens. */
+    if (step.transformSource) {
+      const source = step.transformSource;
+      const layer = tileData.get(source.layer);
+      const layerMask = source.layerMask ? tileData.get(source.layerMask) : undefined;
+      const adjustMasks = source.adjustMasks ? Object.fromEntries(Object.entries(source.adjustMasks).map(([id, path]) => [id, tileData.get(path)])) : undefined;
+      const complete = layer && (!source.layerMask || layerMask) && (!adjustMasks || Object.values(adjustMasks).every(Boolean));
+      if (complete) {
+        resolved.transformSource = {
+          ...source,
+          layer,
+          ...(layerMask ? { layerMask } : {}),
+          ...(adjustMasks ? { adjustMasks: adjustMasks as Record<string, string> } : {})
+        };
+      } else {
+        delete resolved.transformSource;
+      }
+    }
     return resolved;
   });
   const basePath = typeof value.base === "string" ? value.base : undefined;

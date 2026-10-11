@@ -1,6 +1,7 @@
-import { CheckCircle, PencilSimple, SpinnerGap, Trash, WarningCircle, X } from "@phosphor-icons/react";
+import { CheckCircle, GearSix, PencilSimple, SpinnerGap, Trash, WarningCircle, X } from "@phosphor-icons/react";
 import { OpenAiMark } from "./BrandLogos";
 import { useEffect, useState } from "react";
+import { confirms, setConfirms, type Confirmation } from "../lib/confirmations";
 import {
   clearApiKey,
   openApiKeysPage,
@@ -11,7 +12,9 @@ import {
   type Provider
 } from "../lib/ai";
 
-export type SettingsSection = "new";
+/** "new" is the OpenAI key; "general" holds the app's own settings. */
+export type SettingsSection = "new" | "general";
+type KeySection = Exclude<SettingsSection, "general">;
 
 interface Props {
   statuses: KeyStatuses;
@@ -28,7 +31,7 @@ type CheckState =
   | { kind: "success"; message: string }
   | { kind: "error"; message: string };
 
-const SECTIONS: Record<SettingsSection, { label: string; service: string; provider: Provider; description: string; keyHelp: string; placeholder: string }> = {
+const SECTIONS: Record<KeySection, { label: string; service: string; provider: Provider; description: string; keyHelp: string; placeholder: string }> = {
   new: {
     label: "OpenAI",
     service: "OpenAI",
@@ -46,7 +49,7 @@ function KeyPanel({
   onStatusChange,
   onWorkingChange
 }: {
-  section: SettingsSection;
+  section: KeySection;
   status: ApiKeyStatus;
   model: string;
   onStatusChange: (provider: Provider, status: ApiKeyStatus) => void;
@@ -149,12 +152,47 @@ function KeyPanel({
   );
 }
 
+/** The confirmations the app can ask before it changes your work, each with its own check box. */
+const CONFIRMATIONS: { id: Confirmation; label: string }[] = [
+  { id: "delete", label: "Confirm when deleting a layer" },
+  { id: "regenerate", label: "Confirm before regenerating a layer" }
+];
+
+/** The General section: the app's own settings. */
+function GeneralPanel() {
+  const [on, setOn] = useState(() => Object.fromEntries(CONFIRMATIONS.map(({ id }) => [id, confirms(id)])) as Record<Confirmation, boolean>);
+  return (
+    <>
+      <div className="settings-pane-intro">
+        <h3><GearSix size={22} /> General</h3>
+        <p>"Don't show again" in a confirmation turns it off here; check it to see the confirmation again.</p>
+      </div>
+      <div className="settings-group">
+        <div className="settings-group-title">Confirmations</div>
+        {CONFIRMATIONS.map(({ id, label }) => (
+          <label key={id} className="settings-toggle">
+            <input
+              type="checkbox"
+              checked={on[id]}
+              onChange={(event) => {
+                setConfirms(id, event.target.checked);
+                setOn((current) => ({ ...current, [id]: event.target.checked }));
+              }}
+            />
+            {label}
+          </label>
+        ))}
+      </div>
+    </>
+  );
+}
+
 export function ConnectDialog({ statuses, generateModel, initialSection, onStatusChange, onClose }: Props) {
   const [section, setSection] = useState<SettingsSection>(initialSection);
   const [workingCount, setWorkingCount] = useState(0);
   const working = workingCount > 0;
   const onWorkingChange = (next: boolean) => setWorkingCount((count) => Math.max(0, count + (next ? 1 : -1)));
-  const copy = SECTIONS[section];
+  const copy = section === "general" ? null : SECTIONS[section];
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -182,7 +220,7 @@ export function ConnectDialog({ statuses, generateModel, initialSection, onStatu
 
         <div className="settings-layout">
           <nav className="settings-nav" aria-label="Settings sections">
-            {(Object.keys(SECTIONS) as SettingsSection[]).map((id) => {
+            {(Object.keys(SECTIONS) as KeySection[]).map((id) => {
               const item = SECTIONS[id];
               const connected = statuses[item.provider].connected;
               return (
@@ -201,23 +239,37 @@ export function ConnectDialog({ statuses, generateModel, initialSection, onStatu
                 </button>
               );
             })}
+            <button
+              className={section === "general" ? "active" : ""}
+              aria-current={section === "general" ? "page" : undefined}
+              onClick={() => setSection("general")}
+            >
+              <GearSix size={20} />
+              <span>
+                <strong>General</strong>
+                <small>Confirmations</small>
+              </span>
+            </button>
           </nav>
 
           <div className="settings-pane">
-            <div className="settings-pane-intro">
-              <h3><OpenAiMark size={22} /> {copy.label}</h3>
-              <p>{copy.description}</p>
-            </div>
+            {copy && section !== "general" ? (
+              <>
+                <div className="settings-pane-intro">
+                  <h3><OpenAiMark size={22} /> {copy.label}</h3>
+                  <p>{copy.description}</p>
+                </div>
 
-            <KeyPanel
-              key={section}
-              section={section}
-              status={statuses[copy.provider]}
-              model={generateModel}
-              onStatusChange={onStatusChange}
-              onWorkingChange={onWorkingChange}
-            />
-
+                <KeyPanel
+                  key={section}
+                  section={section}
+                  status={statuses[copy.provider]}
+                  model={generateModel}
+                  onStatusChange={onStatusChange}
+                  onWorkingChange={onWorkingChange}
+                />
+              </>
+            ) : <GeneralPanel />}
           </div>
         </div>
 

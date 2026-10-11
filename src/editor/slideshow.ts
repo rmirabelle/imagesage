@@ -116,6 +116,19 @@ export function videoSize(width: number, height: number) {
   return { width: even(width), height: even(height) };
 }
 
+/** The vertical video for Instagram Reels and other phone feeds: 9:16 at 1080 by 1920. */
+export const VERTICAL_VIDEO = { width: 1080, height: 1920 };
+
+/**
+ * The picture size inside the vertical video: the whole image, as large as
+ * fits in it, the same shape, both sides even. Small images grow to fit.
+ */
+export function verticalPictureSize(width: number, height: number) {
+  const scale = Math.min(VERTICAL_VIDEO.width / width, VERTICAL_VIDEO.height / height);
+  const even = (value: number, limit: number) => Math.max(2, Math.min(limit, Math.round(value * scale / 2) * 2));
+  return { width: even(width, VERTICAL_VIDEO.width), height: even(height, VERTICAL_VIDEO.height) };
+}
+
 /**
  * One layer's segment, `seconds` long. Its name lead, fade and hold change
  * together by the same factor; the flash keeps its length.

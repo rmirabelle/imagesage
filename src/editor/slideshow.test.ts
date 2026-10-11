@@ -29,6 +29,7 @@ import {
   slideshowDuration,
   slideshowFrame,
   slideshowSegments,
+  verticalPictureSize,
   videoSize
 } from "./slideshow";
 
@@ -37,6 +38,12 @@ describe("slideshow", () => {
     expect(videoSize(4000, 2000)).toEqual({ width: 1920, height: 960 });
     expect(videoSize(1001, 667)).toEqual({ width: 1002, height: 668 });
     expect(videoSize(1000, 3000)).toEqual({ width: 360, height: 1080 });
+  });
+
+  it("fits the whole image inside the vertical video, growing small images", () => {
+    expect(verticalPictureSize(1536, 1024)).toEqual({ width: 1080, height: 720 });
+    expect(verticalPictureSize(500, 500)).toEqual({ width: 1080, height: 1080 });
+    expect(verticalPictureSize(1000, 3000)).toEqual({ width: 640, height: 1920 });
   });
 
   it("lasts one step per picture, then the final image's long hold and the fade", () => {

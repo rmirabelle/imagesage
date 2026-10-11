@@ -1,11 +1,13 @@
 import { invoke } from "@tauri-apps/api/core";
 import {
   ArrowArcLeft,
+  ArrowsLeftRight,
   Camera,
   Check,
   CircleDashed,
+  Selection,
+  Eraser,
   Cursor,
-  Gradient,
   MagicWand,
   Minus,
   PaintBrush,
@@ -13,10 +15,12 @@ import {
   Plus,
   SpinnerGap,
   StopCircle,
+  Trash,
   WarningCircle,
   X
 } from "@phosphor-icons/react";
 import {
+  Fragment,
   useCallback,
   useEffect,
   useLayoutEffect,
@@ -37,6 +41,7 @@ import {
   drawLayer,
   drawLayers,
   drawMaskGradient,
+  drawPaintGradient,
   flattenLayers,
   scaledCanvas,
   opaqueBounds,
@@ -53,7 +58,7 @@ import { ADJUSTMENT_LABELS, adjustList, adjustmentFields, setColorize, newAdjust
 import {
   wholeImageSize
 } from "../editor/region";
-import type { Adjustment, BlendMode, EditStep, LayerAdjust, LayerPart, MaskImage, Point, Rect, SentRegion } from "../editor/types";
+import type { Adjustment, BlendMode, EditStep, LayerAdjust, LayerPart, MaskImage, Point, Rect, SentRegion, TransformSource } from "../editor/types";
 import {
   CANCELLED_MESSAGE,
   canAbort,
@@ -81,11 +86,28 @@ import { modelStatus, type ModelId } from "../lib/models";
 import { samEncode, samMask, type SamPoint } from "../lib/sam";
 import { ModelDownloadDialog } from "./ModelDownloadDialog";
 import { OpenDialog } from "./OpenDialog";
-import { videoSize } from "../editor/slideshow";
+import { verticalPictureSize, videoSize } from "../editor/slideshow";
 import { encodeSlideshow, type SlideshowOptions } from "../lib/slideshowVideo";
 import { SlideshowDialog } from "./SlideshowDialog";
 import { SaveDialog, type SaveFormat, type SaveSettings } from "./SaveDialog";
 import { ColorPicker } from "./ColorPicker";
+import { confirms, setConfirms } from "../lib/confirmations";
+import { LinearGradientIcon } from "./LinearGradientIcon";
+import { RadialGradientIcon } from "./RadialGradientIcon";
+import { combineSelection, DEFAULT_WAND_TOLERANCE, marqueeBox, invertSelection, selectedHalf, selectionBounds, selectionContours, simplifyLoop, smoothEdge, wandArea, type SelectMode, type WandClick } from "../editor/magicWand";
+import {
+  clampMiddleOffset,
+  DEFAULT_MASK_STOPS,
+  DEFAULT_PAINT_STOPS,
+  grayLevel,
+  pointOnLine,
+  projectOnLine,
+  resolveClearStops,
+  reverseStops,
+  stopAt,
+  stopCss,
+  type GradientStop
+} from "../editor/gradient";
 import { PolygonLassoIcon } from "./PolygonLassoIcon";
 import { rgbToHex } from "../editor/color";
 import { StepsPanel, stepKey, type PartAction } from "./StepsPanel";
@@ -107,6 +129,19 @@ const BASE_OWNER = "";
  * and the size of the image it came from. The event tells every editor that
  * it changed, so their menus can offer Paste.
  */
+/** The pasted pixels on a canvas of this image's size; from an image of another size, they keep their place from the top left. */
+const pastedCanvas = (pixels: HTMLCanvasElement, width: number, height: number) => {
+  if (pixels.width === width && pixels.height === height) return pixels;
+  const canvas = createCanvas(width, height);
+  canvas.getContext("2d")!.drawImage(pixels, 0, 0);
+  return canvas;
+};
+/**
+ * Pixels cut or copied from a selection (Ctrl+X, Ctrl+C), shared by every
+ * open image: a canvas of the image size, clear outside the selection, so
+ * Ctrl+V puts them back at the same place.
+ */
+let pixelClipboard: HTMLCanvasElement | null = null;
 let maskClipboard: { mask: string; hides: boolean; width: number; height: number; documentId: string; source: MaskRef } | null = null;
 const MASK_CLIPBOARD_EVENT = "imagesage-mask-clipboard";
 /** The model name of a layer imported from a file; the layers list shows it under the layer name. */
@@ -141,11 +176,6 @@ const originalLayer = (doc: ImageDocument, layer: string): EditStep => {
     ...(doc.baseAdjust ? { adjust: doc.baseAdjust } : {})
   };
 };
-/** Set when the user checks "Don't show again" in the Regenerate confirmation. */
-const SKIP_REGEN_CONFIRM_KEY = "imagesage.skip-regenerate-confirm";
-const skipRegenConfirm = () => {
-  try { return localStorage.getItem(SKIP_REGEN_CONFIRM_KEY) === "1"; } catch { return false; }
-};
 /** A layer counts as showing at a point when its opacity there is above this (of 255). */
 const PICK_ALPHA = 24;
 /** One mask change, for Ctrl+Z and Ctrl+Y: the layer mask or an adjustment mask of one layer. */
@@ -154,8 +184,27 @@ type MaskChange = { owner: string; part: LayerPart; before: MaskState; after: Ma
 type AdjustChange = { kind: "adjust"; owner: string; before: LayerAdjust | undefined; after: LayerAdjust | undefined };
 /** A layer's pixels before and after paint (PNG data URLs). */
 type PixelsChange = { kind: "pixels"; owner: string; before: string; after: string };
+/**
+ * A pixel selection, shown as marching ants: `levels` says how much each
+ * pixel of a grid at most 2048 px wide or tall is selected, 0 to 255
+ * (`scale` maps image pixels to the grid); a lasso's slanted edges are
+ * partly selected, so fills there are smooth. `outline` is the edge of the
+ * pixels at least half selected, as closed loops (see `selectionContours`),
+ * and `canvas` the mask at grid size: white, as clear as it is unselected.
+ */
+type PixelSelection = { width: number; height: number; scale: number; levels: Uint8Array; outline: number[][]; canvas: HTMLCanvasElement };
+/** The selection before and after a change, so Ctrl+Z takes selection changes back in order with paint. */
+type SelectionChange = { kind: "selection"; before: PixelSelection | null; after: PixelSelection | null };
+/** Several layers' pixels before and after one change, such as Ctrl+Shift+X (PNG data URLs). */
+type PixelsManyChange = { kind: "pixels-many"; changes: { owner: string; before: string; after: string }[] };
+/** A whole layer before and after a change of its pixels and masks together, such as Transform. */
+type LayerChange = { kind: "layer"; before: EditStep; after: EditStep };
+/** Layers deleted together, each with its node (1-based place in the list) at the time. */
+type DeleteChange = { kind: "delete-layers"; removed: { step: EditStep; node: number }[] };
+/** Layers added (new layer, paste, duplicate, Snapshot), each with its node after it was added. */
+type AddChange = { kind: "add-layers"; added: { step: EditStep; node: number }[] };
 /** One step for Ctrl+Z and Ctrl+Y. */
-type UndoEntry = MaskChange | AdjustChange | PixelsChange;
+type UndoEntry = MaskChange | AdjustChange | PixelsChange | SelectionChange | PixelsManyChange | LayerChange | DeleteChange | AddChange;
 /** One adjustment of a prepared layer: its filter (null when it changes nothing), its opacity (for opacity adjustments), and its mask. */
 type PrepAdjustment = { id: string; filter: string | null; opacity: number | null; mask: HTMLCanvasElement | null; hides: boolean };
 /**
@@ -175,15 +224,62 @@ type MaskPrep = {
   above: FlatLayers;
 };
 /** A mask brush stroke in progress. The stroke is drawn at full strength on `stroke`, then laid on `base` (the mask before the stroke) at `opacity`. */
-type MaskBrushStroke = { prep: MaskPrep; last: Point; add: boolean; before: MaskState; base: HTMLCanvasElement; stroke: HTMLCanvasElement; opacity: number; frame: number | null };
+type MaskBrushStroke = {
+  prep: MaskPrep;
+  last: Point;
+  add: boolean;
+  before: MaskState;
+  base: HTMLCanvasElement;
+  stroke: HTMLCanvasElement;
+  opacity: number;
+  frame: number | null;
+  /** Inside a selection: the selection's mask (stretched over the image) and a canvas to cut the stroke in. */
+  clip?: { mask: HTMLCanvasElement; scratch: HTMLCanvasElement };
+};
 /**
  * A paint brush stroke in progress. The stroke is drawn in the paint color at
  * full strength on `stroke`, then laid on `base` (the layer before the stroke)
  * at `opacity`; the result goes into the prepared layer image.
  */
-type PaintStroke = { prep: MaskPrep; last: Point; base: HTMLCanvasElement; stroke: HTMLCanvasElement; opacity: number; color: string; frame: number | null };
-/** A mask gradient being dragged on the image. */
-type GradientDrag = { prep: MaskPrep; kind: "linear" | "radial"; from: Point; to: Point; before: MaskState; base: HTMLCanvasElement; created: boolean; opacity: number; frame: number | null };
+type PaintStroke = {
+  prep: MaskPrep;
+  last: Point;
+  base: HTMLCanvasElement;
+  stroke: HTMLCanvasElement;
+  opacity: number;
+  color: string;
+  frame: number | null;
+  /** Inside a selection: the selection's mask (stretched over the image) and a canvas to cut the stroke in. */
+  clip?: { mask: HTMLCanvasElement; scratch: HTMLCanvasElement };
+  /** The eraser: the stroke takes pixels away instead of painting the color. */
+  erase?: boolean;
+};
+/** What is being dragged on a gradient that is being edited: an end, or a stop (by its index in the stops). */
+type GradientGrab = { what: "from" | "to" | "stop"; index: number; startX: number; startY: number; moved: boolean; away: boolean };
+/**
+ * A gradient on the image, into a mask or (`target` "paint") a layer's
+ * pixels. It is first dragged; after the drag it stays `editing`: its ends
+ * and stops can be moved until it is applied or canceled.
+ */
+type GradientDrag = {
+  prep: MaskPrep;
+  target: "mask" | "paint";
+  kind: "linear" | "radial";
+  from: Point;
+  to: Point;
+  before: MaskState;
+  base: HTMLCanvasElement;
+  created: boolean;
+  frame: number | null;
+  editing: boolean;
+  grab: GradientGrab | null;
+  /** A paint gradient inside a selection: the selection's mask and a canvas to draw in. */
+  clip?: { mask: HTMLCanvasElement; scratch: HTMLCanvasElement };
+};
+/** How far, in screen pixels, a stop is dragged from the line before it is removed. */
+const STOP_REMOVE_DISTANCE = 40;
+/** How far past the gradient's end point, in screen pixels, the Apply check sits. */
+const GRADIENT_APPLY_GAP = 28;
 
 /**
  * A layer's transform so far: a point (px, py) of the layer moves to
@@ -192,12 +288,39 @@ type GradientDrag = { prep: MaskPrep; kind: "linear" | "radial"; from: Point; to
  */
 type LayerTransform = { a: number; b: number; x: number; y: number };
 const IDENTITY: LayerTransform = { a: 1, b: 0, x: 0, y: 0 };
+const sameTransform = (one: LayerTransform, two: LayerTransform) => one.a === two.a && one.b === two.b && one.x === two.x && one.y === two.y;
+/** A short fingerprint of a layer's pixels and masks: a transform source is used only while the layer still matches what its transform made. */
+const transformMade = (step: EditStep) => [maskSignature(step.layer), maskSignature(step.layerMask), ...adjustList(step.adjust).map((item) => `${item.id}=${maskSignature(item.mask)}`)].join("|");
+/** The layer as its transform source holds it: the source pixels and masks, under its own decode-cache keys. */
+const sourceStepOf = (step: EditStep, source: TransformSource): EditStep => {
+  const { layerMask: _mask, ...rest } = step;
+  return {
+    ...rest,
+    id: `${step.id}:source`,
+    layer: source.layer,
+    ...(source.layerMask ? { layerMask: source.layerMask } : {}),
+    ...(step.adjust ? { adjust: adjustList(step.adjust).map((item) => item.mask ? { ...item, mask: source.adjustMasks?.[item.id] ?? item.mask } : item) } : {})
+  };
+};
 /**
  * A layer being transformed with handles on its bounds: the drawn layer, the
  * combined layers below and above it, the bounds before the transform, and
- * the transform so far.
+ * the transform so far. With a transform source, the drawn layer is the
+ * source and `start` its total transform, so pixels moved past the image edge
+ * before can come back.
  */
-type ResizeSession = { owner: string; bounds: Rect; rendered: HTMLCanvasElement; below: HTMLCanvasElement; above: FlatLayers; transform: LayerTransform; frame: number | null; blend?: BlendMode };
+type ResizeSession = {
+  owner: string;
+  bounds: Rect;
+  rendered: HTMLCanvasElement;
+  below: HTMLCanvasElement;
+  above: FlatLayers;
+  transform: LayerTransform;
+  start: LayerTransform;
+  source: TransformSource | null;
+  frame: number | null;
+  blend?: BlendMode;
+};
 /**
  * One drag during Transform, with the transform when the drag started:
  * a corner handle scales around the fixed opposite corner, the inside moves,
@@ -252,6 +375,27 @@ const EYEDROPPER_CURSOR = `url("data:image/svg+xml,${encodeURIComponent(
   + "<g stroke='#fff'><path d='M4 20L13 11' stroke-width='2.5'/><path d='M10.5 8.5l5 5' stroke-width='2.5'/><path d='M15 9l3.5-3.5' stroke-width='6'/></g>"
   + "</svg>"
 )}") 3 21, crosshair`;
+/**
+ * The Magic Wand cursor, as in Photoshop: a wand pointing to the top left,
+ * with a white tip edged in black, a black handle edged in white, and a
+ * sparkle at its tip, and with `sign` a small + or − at the bottom right.
+ * The tip is the click point.
+ */
+const wandCursor = (sign: "" | "+" | "-") => `url("data:image/svg+xml,${encodeURIComponent(
+  "<svg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='none' stroke-linecap='round'>"
+  + "<g stroke='#000'><path d='M7 7L10 10' stroke-width='5'/><path d='M4 1v2M1 4h2M7 1.5L6 2.5M1.5 7l1-1' stroke-width='3'/></g>"
+  + "<path d='M10 10L16 16' stroke='#fff' stroke-width='5'/>"
+  + "<g stroke='#fff'><path d='M7 7L10 10' stroke-width='3'/><path d='M4 1v2M1 4h2M7 1.5L6 2.5M1.5 7l1-1' stroke-width='1.2'/></g>"
+  + "<path d='M10 10L16 16' stroke='#000' stroke-width='3'/>"
+  /** The sign at the bottom right: + adds to the selection, − takes from it. */
+  + (sign ? `<path d='M16 20.5h6${sign === "+" ? "M19 17.5v6" : ""}' stroke='#000' stroke-width='3.5'/><path d='M16 20.5h6${sign === "+" ? "M19 17.5v6" : ""}' stroke='#fff' stroke-width='1.5'/>` : "")
+  + "</svg>"
+)}") 4 4, crosshair`;
+const WAND_CURSOR = wandCursor("");
+/** The Magic Wand with Shift held: a click adds to the selection. */
+const WAND_ADD_CURSOR = wandCursor("+");
+/** The Magic Wand with Alt held: a click takes from the selection. */
+const WAND_SUBTRACT_CURSOR = wandCursor("-");
 /** A trash can cursor, for Ctrl over a lasso corner: a click there deletes the corner. */
 const TRASH_CURSOR = `url("data:image/svg+xml,${encodeURIComponent(
   "<svg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='none' stroke-linecap='round' stroke-linejoin='round'>"
@@ -404,15 +548,24 @@ type EditJob = {
  * Click to select in progress: what it fills, the prepared image (`key`),
  * the clicks so far and the mask they make. The image is prepared at most
  * 2048 px wide or tall, so clicks and the mask use that size (`scale` maps
- * image pixels to it).
+ * image pixels to it). `engine` is "wand" for the Magic Wand, which matches
+ * colors in `pixels` at once, or "sam" for Object, the local AI model.
  */
 type ClickSelect = {
+  engine: "wand" | "sam";
+  pixels?: ImageData;
+  /**
+   * The Magic Wand's last click, how it changed the selection, and the
+   * selection before it: a new Tolerance or Contiguous makes that click again.
+   */
+  last?: { click: WandClick; mode: SelectMode; before: PixelSelection | null };
   target: { owner: string; part: LayerPart };
   key: string;
   scale: number;
   width: number;
   height: number;
-  points: SamPoint[];
+  /** Object's clicks; the Magic Wand changes the editor's selection instead. */
+  points: WandClick[];
   mask: MaskImage | null;
   busy: boolean;
 };
@@ -477,6 +630,8 @@ const CORNERS: Corner[] = ["nw", "ne", "sw", "se"];
 const BRUSH_RADIUS_KEY = "imagesage.brush-radius";
 const BRUSH_PRECISE_KEY = "imagesage.brush-precise";
 const PAINT_COLOR_KEY = "imagesage.paint-color";
+const WAND_TOLERANCE_KEY = "imagesage.wand-tolerance";
+const WAND_CONTIGUOUS_KEY = "imagesage.wand-contiguous";
 /** The `part` of a layer prepared for the Paint tool: the layer's own pixels, not a mask. */
 const PAINT_PART = "paint-pixels";
 /** The soft edge of a precise brush, in image pixels, at every brush size; a soft brush blurs by 30% of its radius. */
@@ -566,6 +721,8 @@ export function Editor({
   const brushCursorRef = useRef<HTMLDivElement>(null);
   const brushPointRef = useRef<Point | null>(null);
   const [erasing, setErasing] = useState(false);
+  /** Shift is held: the Magic Wand shows its + cursor, as a click then adds to the selection. */
+  const [shiftHeld, setShiftHeld] = useState(false);
   const [workspaceSize, setWorkspaceSize] = useState({ width: 900, height: 600 });
   const [pixelRatio, setPixelRatio] = useState(() => window.devicePixelRatio || 1);
   const [zoom, setZoom] = useState<number | null>(null);
@@ -601,6 +758,8 @@ export function Editor({
   /** Regenerate waiting for the user to confirm: the layer, and the prompt to run. */
   const [confirmRegen, setConfirmRegen] = useState<{ stepId: string; instruction: string } | null>(null);
   const [regenDontAsk, setRegenDontAsk] = useState(false);
+  /** "Don't show again" in the Delete confirmation. */
+  const [deleteDontAsk, setDeleteDontAsk] = useState(false);
   /** Which mask of the selected layer the Mask tool paints: "mask" for the layer mask, or an adjustment id. */
   const [maskPart, setMaskPart] = useState<LayerPart>("mask");
   /** The mask brush shows (true) or hides (false) what it paints; holding Alt does the other one. */
@@ -627,8 +786,39 @@ export function Editor({
   const [maskOverlay, setMaskOverlay] = useState(true);
   /** A gradient waiting to be dragged on the image, or null. */
   const [gradient, setGradient] = useState<"linear" | "radial" | null>(null);
+  /** The stops of mask gradients: grays only. */
+  const [maskStops, setMaskStops] = useState<GradientStop[]>(DEFAULT_MASK_STOPS);
+  /** The stops of paint gradients. The first stop's color is always the paint color. */
+  const [paintStops, setPaintStops] = useState<GradientStop[]>(DEFAULT_PAINT_STOPS);
+  const paintGradientStops = useMemo(() => paintStops.map((stop, index) => index === 0 ? { ...stop, color: paintColor } : stop), [paintStops, paintColor]);
+  /** The stops as the last render left them, for drawing between renders. */
+  const gradientStopsRef = useRef({ mask: maskStops, paint: paintGradientStops });
+  gradientStopsRef.current = { mask: maskStops, paint: paintGradientStops };
+  /** The gradient being edited on the image, as drawn: its ends, and the stop dragged away to be removed. */
+  const [gradientEdit, setGradientEdit] = useState<{ from: Point; to: Point; kind: "linear" | "radial"; target: "mask" | "paint"; awayIndex: number | null } | null>(null);
+  /** The stop of the edited gradient whose color picker is open, by index. */
+  const [stopPicker, setStopPicker] = useState<number | null>(null);
+  /** The open color picker of a gradient end in the toolbar (the paint start uses the paint color picker). */
+  const [swatchPicker, setSwatchPicker] = useState<"start" | "end" | null>(null);
   /** The polygon lasso is on: clicks add corners of a shape, and closing the shape fills it in the mask. */
-  const [lasso, setLasso] = useState(false);
+  const [lasso, setLassoState] = useState(false);
+  /** A marquee select tool is on: a drag draws a rectangle or an ellipse that becomes the selection. */
+  const [marquee, setMarquee] = useState<"rect" | "ellipse" | null>(null);
+  /**
+   * Every tool change sets the lasso, so setting it also turns the marquee
+   * and the eraser off; picking one of them turns it on after that.
+   */
+  /** The Paint tool's eraser is on: brush strokes take pixels away from the layer. */
+  const [eraser, setEraser] = useState(false);
+  const setLasso = useCallback((next: boolean | ((on: boolean) => boolean)) => {
+    setMarquee(null);
+    setEraser(false);
+    setLassoState(next);
+  }, []);
+  /** A marquee being dragged: its shape, where it started and is now, how it changes the selection, and where the press was on screen. */
+  const marqueeDragRef = useRef<{ shape: "rect" | "ellipse"; start: Point; current: Point; even: boolean; centered: boolean; startX: number; startY: number } | null>(null);
+  /** The marquee being dragged, in image pixels, for its marching ants. */
+  const [marqueeDrag, setMarqueeDrag] = useState<(Rect & { shape: "rect" | "ellipse" }) | null>(null);
   /** The corners placed so far, in image pixels. */
   const [lassoPoints, setLassoPointsState] = useState<Point[]>([]);
   const lassoPointsRef = useRef<Point[]>([]);
@@ -645,7 +835,7 @@ export function Editor({
    * A press on a placed corner: it moves the corner once the pointer moves a
    * few pixels; a press without movement is an ordinary lasso click.
    */
-  const lassoDragRef = useRef<{ index: number; point: Point; startX: number; startY: number; moved: boolean; reverse: boolean } | null>(null);
+  const lassoDragRef = useRef<{ index: number; point: Point; startX: number; startY: number; moved: boolean; reverse: boolean; add: boolean } | null>(null);
   /** The corner just placed cannot be grabbed until the pointer leaves it, so a double-click still closes the shape. */
   const lassoFreshRef = useRef<number | null>(null);
   /** The corner under the pointer that it can grab, or null. */
@@ -668,6 +858,35 @@ export function Editor({
   }, []);
   /** Only the newest click's mask is shown, when masks come back out of order. */
   const clickSeqRef = useRef(0);
+  /**
+   * The selection of the Mask and Paint tools, made by the Magic Wand or the
+   * polygon lasso, or Ctrl+A. While it is there, brushes, gradients and
+   * Alt+Backspace change only the pixels inside it. It stays while tools
+   * change, and ends with Ctrl+D or a new image size.
+   */
+  const [selection, setSelectionState] = useState<PixelSelection | null>(null);
+  const selectionRef = useRef<PixelSelection | null>(null);
+  const setSelection = useCallback((next: PixelSelection | null) => {
+    selectionRef.current = next;
+    setSelectionState(next);
+  }, []);
+  /** The Magic Wand's settings: how far a color may be from the clicked one (0 to 255), and whether the area must touch the click. */
+  const [wandTolerance, setWandToleranceState] = useState(() => {
+    const stored = Number(readStored(WAND_TOLERANCE_KEY));
+    return readStored(WAND_TOLERANCE_KEY) !== null && Number.isFinite(stored) ? Math.max(0, Math.min(255, Math.round(stored))) : DEFAULT_WAND_TOLERANCE;
+  });
+  const setWandTolerance = (next: number) => {
+    const value = Math.max(0, Math.min(255, Math.round(next)));
+    setWandToleranceState(value);
+    writeStored(WAND_TOLERANCE_KEY, String(value));
+  };
+  const [wandContiguous, setWandContiguousState] = useState(() => readStored(WAND_CONTIGUOUS_KEY) !== "0");
+  const setWandContiguous = (next: boolean) => {
+    setWandContiguousState(next);
+    writeStored(WAND_CONTIGUOUS_KEY, next ? "1" : "0");
+  };
+  const wandSettingsRef = useRef({ tolerance: wandTolerance, contiguous: wandContiguous });
+  wandSettingsRef.current = { tolerance: wandTolerance, contiguous: wandContiguous };
   /** A mask has been copied, so the mask menus offer Paste. */
   const [canPasteMask, setCanPasteMask] = useState(() => maskClipboard !== null);
   useEffect(() => {
@@ -1070,6 +1289,49 @@ export function Editor({
 
   /** Puts back one side of a change; false when its layer (or adjustment) is gone. */
   const applyUndoEntry = useCallback((entry: UndoEntry, side: "before" | "after") => {
+    if ("kind" in entry && entry.kind === "selection") {
+      setSelection(entry[side]);
+      /** The Magic Wand's last click no longer made this selection, so a new Tolerance leaves it alone. */
+      const session = clickSelectRef.current;
+      if (session?.last) setClickSelect({ ...session, last: undefined });
+      return true;
+    }
+    if ("kind" in entry && (entry.kind === "delete-layers" || entry.kind === "add-layers")) {
+      const current = documentRef.current;
+      const layers = entry.kind === "delete-layers" ? entry.removed : entry.added;
+      /** Undoing a delete, or redoing an add, puts the layers back. */
+      const putBack = (entry.kind === "delete-layers") === (side === "before");
+      if (putBack) {
+        /** The layers go back at their nodes, bottom first; the top one is selected. */
+        if (layers.some(({ step }) => current.history.some((item) => item.id === step.id))) return false;
+        const history = [...current.history];
+        for (const { step, node } of [...layers].sort((a, b) => a.node - b.node)) history.splice(Math.min(node, history.length + 1) - 1, 0, step);
+        const top = Math.max(...layers.map(({ step }) => history.indexOf(step) + 1));
+        onCommit(current.id, { history, historyIndex: top });
+        return true;
+      }
+      /** The layers go, and the layer below the lowest is selected. */
+      const ids = new Set(layers.map(({ step }) => step.id));
+      if (!current.history.some((step) => ids.has(step.id))) return false;
+      const lowest = Math.min(...layers.map(({ node }) => node));
+      const history = current.history.filter((step) => !ids.has(step.id));
+      onCommit(current.id, { history, historyIndex: current.base ? lowest - 1 : Math.max(lowest - 1, Math.min(1, history.length)) });
+      return true;
+    }
+    if ("kind" in entry && entry.kind === "layer") {
+      const current = documentRef.current;
+      const at = current.history.findIndex((item) => item.id === entry[side].id);
+      if (at < 0) return false;
+      onCommit(current.id, { history: current.history.map((item, index) => index === at ? entry[side] : item), historyIndex: at + 1 });
+      return true;
+    }
+    if ("kind" in entry && entry.kind === "pixels-many") {
+      const current = documentRef.current;
+      const layers = new Map(entry.changes.map((change) => [change.owner, change[side]]));
+      if (!current.history.some((step) => layers.has(step.id))) return false;
+      onCommit(current.id, { history: current.history.map((step) => layers.has(step.id) ? { ...step, layer: layers.get(step.id)! } : step) });
+      return true;
+    }
     if ("kind" in entry && entry.kind === "pixels") {
       const current = documentRef.current;
       const node = nodeOfOwner(current, entry.owner);
@@ -1085,7 +1347,7 @@ export function Editor({
       return true;
     }
     return setPartMask(entry.owner, entry.part, entry[side]);
-  }, [commitAdjust, onCommit, setPartMask]);
+  }, [commitAdjust, onCommit, setClickSelect, setPartMask, setSelection]);
 
   const undoMask = useCallback(() => {
     const change = maskUndoRef.current.pop();
@@ -1102,15 +1364,19 @@ export function Editor({
   /** The mask brush hides now: its mode, reversed while Alt is held. */
   const brushHides = isMaskTool && maskShows === erasing;
   /** The mask and paint brushes show the round brush cursor and use the brush size; a waiting gradient and the lasso use a crosshair instead. */
-  const brushLike = (isMaskTool || isPaintTool) && !gradient && !lasso && !clickSelect;
+  const brushLike = (isMaskTool || isPaintTool) && !gradient && !lasso && !marquee && !clickSelect;
+  /** Alt held with the paint brush: the pointer is the eyedropper, with the color preview, and Alt+click picks the color. */
+  const altPicking = isPaintTool && brushLike && !eraser && erasing && !pickingColor;
+  /** The image point under the pointer while it is over the image or the work area, or null; Alt shows the eyedropper there at once. */
+  const hoverPointRef = useRef<Point | null>(null);
   /**
-   * The lasso works with the Mask and Paint tools, a gradient only with the
-   * Mask tool. Whoever switches between those two tools sets both.
+   * The lasso and the gradients work with the Mask and Paint tools.
+   * Whoever switches between those two tools sets both.
    */
   useEffect(() => {
-    if (tool === "mask") return;
+    if (tool !== "whole") return;
     setGradient(null);
-    if (tool === "whole") setLasso(false);
+    setLasso(false);
   }, [tool]);
   /** A shape in progress belongs to one mask; it is dropped when the lasso turns off or another mask is picked. */
   useEffect(() => {
@@ -1166,6 +1432,50 @@ export function Editor({
    * stroke, a gradient, or a menu action changes only the selected layer, so
    * then only the selected layer's image and masks are refreshed from the cache.
    */
+  /** Changes one gradient stop. The paint start's color is the paint color. Ends stay at the ends. */
+  const changeStop = (target: "mask" | "paint", index: number, patch: Partial<GradientStop>) => {
+    if (target === "paint" && index === 0 && patch.color !== undefined) setPaintColor(patch.color);
+    const update = (stops: GradientStop[]) => stops.map((stop, at) => at === index
+      ? { ...stop, ...patch, ...(at === 0 ? { offset: 0 } : at === stops.length - 1 ? { offset: 1 } : {}) }
+      : stop);
+    if (target === "mask") setMaskStops(update);
+    else setPaintStops(update);
+  };
+  /** Adds a middle stop; it goes just before the end stop, so its index is the old number of stops − 1. */
+  const addStop = (target: "mask" | "paint", stop: GradientStop) => {
+    const update = (stops: GradientStop[]) => [...stops.slice(0, -1), stop, stops[stops.length - 1]];
+    if (target === "mask") setMaskStops(update);
+    else setPaintStops(update);
+  };
+  /** Removes a middle stop; the ends cannot be removed. */
+  const removeStop = (target: "mask" | "paint", index: number) => {
+    const update = (stops: GradientStop[]) => index > 0 && index < stops.length - 1 ? stops.filter((_, at) => at !== index) : stops;
+    if (target === "mask") setMaskStops(update);
+    else setPaintStops(update);
+  };
+  /** Swaps the start and end of the gradient. */
+  const swapStops = (target: "mask" | "paint") => {
+    if (target === "mask") {
+      setMaskStops(reverseStops);
+      return;
+    }
+    const reversed = reverseStops(paintGradientStops);
+    setPaintColor(reversed[0].color);
+    setPaintStops(reversed);
+  };
+  /**
+   * A gradient being edited is applied when the tool, the layer or the mask
+   * changes. This runs before the layer is prepared again below, which
+   * waits while a gradient is open.
+   */
+  useEffect(() => {
+    if (gradientRef.current?.editing) finishGradientDrag(true);
+  }, [tool, gradient, imageDocument.id, imageDocument.historyIndex, targetPart]);
+  /** New stops redraw the gradient being edited. */
+  useEffect(() => {
+    const drag = gradientRef.current;
+    if (drag?.editing) drawGradientDrag(drag);
+  }, [maskStops, paintGradientStops]);
   const maskPrepKeyRef = useRef("");
   useEffect(() => {
     const doc = imageDocument;
@@ -1398,7 +1708,7 @@ export function Editor({
       });
       setGradient(null);
       setLasso(false);
-      setClickSelect({ target, key, scale, width: source.width, height: source.height, points: [], mask: null, busy: false });
+      setClickSelect({ engine: "sam", target, key, scale, width: source.width, height: source.height, points: [], mask: null, busy: false });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       if (message !== CANCELLED_MESSAGE) onNotice({ tone: "error", message });
@@ -1407,7 +1717,87 @@ export function Editor({
     }
   };
 
-  /** Asks for the mask of these clicks and shows it. */
+  /** The grid of a selection for this image: at most 2048 px wide or tall. */
+  const selectionGrid = () => {
+    const scale = Math.min(1, CLICK_SELECT_MAX_SIDE / Math.max(width, height));
+    return { scale, width: Math.max(1, Math.round(width * scale)), height: Math.max(1, Math.round(height * scale)) };
+  };
+
+  /** A selection from its levels on the selection grid, with its outline and mask; null when nothing is selected. */
+  const makeSelection = (levels: Uint8Array): PixelSelection | null => {
+    const grid = selectionGrid();
+    if (!selectionBounds(levels, grid.width, grid.height)) return null;
+    const pixels = new ImageData(grid.width, grid.height);
+    for (let index = 0; index < levels.length; index++) {
+      if (!levels[index]) continue;
+      pixels.data.fill(255, index * 4, index * 4 + 3);
+      pixels.data[index * 4 + 3] = levels[index];
+    }
+    const canvas = createCanvas(grid.width, grid.height);
+    canvas.getContext("2d")!.putImageData(pixels, 0, 0);
+    return { ...grid, levels, outline: selectionContours(selectedHalf(levels), grid.width, grid.height), canvas };
+  };
+
+  /** Records added layers as one step for Ctrl+Z, which removes them again. */
+  const recordAdded = (added: { step: EditStep; node: number }[]) => {
+    maskUndoRef.current.push({ kind: "add-layers", added });
+    maskRedoRef.current = [];
+  };
+
+  /** Changes the selection as one step for Ctrl+Z. */
+  const changeSelection = (next: PixelSelection | null) => {
+    const before = selectionRef.current;
+    if (before === next) return;
+    maskUndoRef.current.push({ kind: "selection", before, after: next });
+    maskRedoRef.current = [];
+    setSelection(next);
+  };
+
+  /**
+   * Starts the Magic Wand on `source`, the image as it shows. It reads the
+   * pixels once, at the selection grid size; each click then selects at
+   * once, with no model.
+   */
+  const startWandSelect = (target: ClickSelect["target"], source: HTMLCanvasElement) => {
+    if (applyingRef.current || resizeRef.current || clickSelectRef.current) return;
+    const grid = selectionGrid();
+    const sample = grid.scale < 1 ? scaledCanvas(source, grid.width, grid.height) : source;
+    const pixels = sample.getContext("2d")!.getImageData(0, 0, grid.width, grid.height);
+    setGradient(null);
+    setLasso(false);
+    onNotice(null);
+    setClickSelect({ engine: "wand", pixels, target, key: crypto.randomUUID(), scale: grid.scale, width, height, points: [], mask: null, busy: false });
+  };
+
+  /** The selection after a Magic Wand click in `mode`, with the current Tolerance and Contiguous. */
+  const wandResult = (pixels: ImageData, click: WandClick, mode: SelectMode, before: PixelSelection | null) => {
+    const { tolerance, contiguous } = wandSettingsRef.current;
+    /** The wand selects whole pixels; their edge is then smoothed, as Photoshop's Anti-alias does. */
+    const area = smoothEdge(wandArea(pixels.data, pixels.width, pixels.height, click.x, click.y, tolerance, contiguous).map((bit) => bit ? 255 : 0), pixels.width, pixels.height);
+    return makeSelection(combineSelection(before?.levels ?? null, area, mode));
+  };
+
+  /** A Magic Wand click: a new selection, or (`mode`) added to or taken from the selection. */
+  const wandClick = (point: Point, mode: SelectMode) => {
+    const session = clickSelectRef.current;
+    if (!session?.pixels) return;
+    const click = { x: point.x * session.scale, y: point.y * session.scale, include: mode !== "subtract" };
+    const before = selectionRef.current;
+    changeSelection(wandResult(session.pixels, click, mode, before));
+    setClickSelect({ ...session, last: { click, mode, before } });
+  };
+
+  /** A new Tolerance or Contiguous makes the Magic Wand's last click again. */
+  useEffect(() => {
+    const session = clickSelectRef.current;
+    if (session?.engine !== "wand" || !session.pixels || !session.last) return;
+    const next = wandResult(session.pixels, session.last.click, session.last.mode, session.last.before);
+    const top = maskUndoRef.current[maskUndoRef.current.length - 1];
+    if (top && "kind" in top && top.kind === "selection") top.after = next;
+    setSelection(next);
+  }, [wandTolerance, wandContiguous]);
+
+  /** Asks the model for the mask of Object's clicks and shows it. */
   const updateClickMask = async (session: ClickSelect, points: SamPoint[]) => {
     const seq = ++clickSeqRef.current;
     setClickSelect({ ...session, points, busy: true });
@@ -1423,13 +1813,14 @@ export function Editor({
     }
   };
 
-  /** A click adds the area under it; Alt+click removes it. */
+  /** An Object click adds the area under it; Alt+click removes it. */
   const addClickPoint = (point: Point, include: boolean) => {
     const session = clickSelectRef.current;
     if (!session) return;
     void updateClickMask(session, [...session.points, { x: point.x * session.scale, y: point.y * session.scale, include }]);
   };
 
+  /** Ctrl+Z in Object removes its last click. */
   const undoClickPoint = () => {
     const session = clickSelectRef.current;
     if (session?.points.length) void updateClickMask(session, session.points.slice(0, -1));
@@ -1440,22 +1831,75 @@ export function Editor({
     setClickSelect(null);
   };
   /**
-   * Magic runs inside the Mask tool, for the mask being painted. Turning the
-   * Mask tool off, or picking another layer or mask, ends Magic without
-   * applying it.
+   * A click selection belongs to one tool and layer: in the Mask tool, to the
+   * mask being painted; in the Paint tool, to the layer's pixels. Leaving
+   * that tool, or picking another layer or mask, ends it without applying it.
    */
   useEffect(() => {
     const session = clickSelectRef.current;
     if (!session) return;
     const doc = documentRef.current;
     const owner = doc.historyIndex > 0 ? doc.history[doc.historyIndex - 1]?.id : BASE_OWNER;
-    if (!isMaskTool || session.target.owner !== owner || session.target.part !== targetPart) cancelClickSelect();
-  }, [clickSelect, imageDocument.historyIndex, isMaskTool, targetPart]);
+    const kept = session.target.part === PAINT_PART
+      ? isPaintTool && session.target.owner === owner
+      : isMaskTool && session.target.owner === owner && session.target.part === targetPart;
+    if (!kept) cancelClickSelect();
+  }, [clickSelect, imageDocument.historyIndex, isMaskTool, isPaintTool, targetPart]);
 
-  /** Writes the mask into its target, a layer or adjustment mask; Ctrl+Z undoes it. */
+  /**
+   * The Mask tool on a layer or adjustment without a mask adds one at once,
+   * so the layers panel shows it: an empty mask that hides nothing, so the
+   * image does not change. It happens once per mask the tool is turned to,
+   * so Ctrl+Z can take it away again.
+   */
+  const ensuredMaskRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!isMaskTool || !targetPart) {
+      ensuredMaskRef.current = null;
+      return;
+    }
+    const doc = documentRef.current;
+    const node = doc.historyIndex;
+    const step = node > 0 ? doc.history[node - 1] : null;
+    const owner = step ? step.id : BASE_OWNER;
+    const key = `${doc.id}:${owner}:${targetPart}`;
+    if (ensuredMaskRef.current === key) return;
+    ensuredMaskRef.current = key;
+    /** The original image of an older document has no layer mask of its own. */
+    if (targetPart === "mask" && !step) return;
+    const before = partMaskState(doc, node, targetPart);
+    if (before.mask) return;
+    const mask = createCanvas(width, height);
+    void canvasToDataUrl(mask).then((url) => recordMaskChange({ owner, part: targetPart, before, after: { mask: url, hides: true } }, mask));
+  }, [isMaskTool, targetPart, imageDocument.historyIndex, imageDocument.id]);
+
+  /** A new image size (crop or canvas size) ends the selection; it was made for the old size. */
+  useEffect(() => {
+    if (selectionRef.current) setSelection(null);
+  }, [width, height, setSelection]);
+
+  /** Writes the mask into its target, a layer or adjustment mask; Ctrl+Z undoes it. A paint selection has no mask to set. */
   const applyClickSelect = async () => {
     const session = clickSelectRef.current;
-    if (!session) return;
+    if (!session || session.target.part === PAINT_PART) return;
+    if (session.engine === "wand") {
+      const chosen = selectionRef.current;
+      if (!chosen) {
+        onNotice({ tone: "warning", message: "Click to select an area for the mask first, or press Esc to cancel." });
+        return;
+      }
+      const src = await canvasToDataUrl(chosen.scale !== 1 ? scaledCanvas(chosen.canvas, width, height) : chosen.canvas);
+      cancelClickSelect();
+      setSelection(null);
+      const { owner, part } = session.target;
+      const doc = documentRef.current;
+      const node = nodeOfOwner(doc, owner);
+      if (node < 0) return;
+      const before = partMaskState(doc, node, part);
+      const after: MaskState = { mask: src };
+      recordMaskChange({ owner, part, before, after });
+      return;
+    }
     if (!session.mask) {
       onNotice({ tone: "warning", message: "Click to select an area for the mask first, or press Esc to cancel." });
       return;
@@ -1480,7 +1924,6 @@ export function Editor({
     const before = partMaskState(doc, node, part);
     const after: MaskState = { mask: src };
     recordMaskChange({ owner, part, before, after });
-    onNotice({ tone: "success", message: "Mask set to the selected area.", action: { label: "Undo", run: () => recordMaskChange({ owner, part, before: after, after: before }) } });
   };
 
   const submit = () => {
@@ -1498,23 +1941,24 @@ export function Editor({
     const current = documentRef.current;
     if (node < 1 || node > current.history.length || applyingRef.current) return;
     const group = multiNodes(current);
-    setConfirmDelete(group.includes(node) ? group : [node]);
+    const nodes = group.includes(node) ? group : [node];
+    /** Without the confirmation (Settings, or "Don't show again"), the layers go at once; the message after it can undo it. */
+    if (!confirms("delete")) {
+      deleteLayers(nodes);
+      return;
+    }
+    setDeleteDontAsk(false);
+    setConfirmDelete(nodes);
+  };
+  /** Deletes the layers the confirmation asked about, and remembers "Don't show again". */
+  const confirmDeleteLayers = (nodes: number[]) => {
+    if (deleteDontAsk) setConfirms("delete", false);
+    deleteLayers(nodes);
   };
 
-  /** Puts deleted layers back at their old places in the list and selects the top one. */
-  const undoDelete = useCallback((removed: { step: EditStep; node: number }[]) => {
-    const current = documentRef.current;
-    const history = [...current.history];
-    /** Bottom first, so each one goes back at its old node. */
-    for (const { step, node } of [...removed].sort((a, b) => a.node - b.node)) history.splice(Math.min(node, history.length + 1) - 1, 0, step);
-    const top = Math.max(...removed.map(({ step }) => history.indexOf(step) + 1));
-    onCommit(current.id, { history, historyIndex: top });
-    onNotice({ tone: "success", message: removed.length > 1 ? `${removed.length} layers restored.` : "Layer restored." });
-  }, [onCommit, onNotice]);
-
   /**
-   * Removes layers and selects the one below the lowest. For one layer, its
-   * prompt comes back so the edit can be tried again.
+   * Removes layers and selects the one below the lowest; Ctrl+Z puts them
+   * back. For one layer, its prompt comes back so the edit can be tried again.
    */
   const deleteLayers = (nodes: number[]) => {
     setConfirmDelete(null);
@@ -1526,13 +1970,9 @@ export function Editor({
     /** Without a separate original image, node 0 is no layer, so the layer above is selected instead. */
     onCommit(current.id, { history, historyIndex: current.base ? lowest - 1 : Math.max(lowest - 1, Math.min(1, history.length)) });
     setMultiIds([]);
-    const only = removed.length === 1 ? removed[0] : null;
-    if (only) setPrompt(only.step.prompt);
-    onNotice({
-      tone: "success",
-      message: only ? `Deleted ${only.step.name || `Layer ${only.node}`}.` : `Deleted ${removed.length} layers.`,
-      action: { label: "Undo", run: () => undoDelete(removed) }
-    });
+    if (removed.length === 1) setPrompt(removed[0].step.prompt);
+    maskUndoRef.current.push({ kind: "delete-layers", removed });
+    maskRedoRef.current = [];
   };
 
   /**
@@ -1635,7 +2075,7 @@ export function Editor({
     };
     const history = [...current.history.slice(0, node), copy, ...current.history.slice(node)];
     onCommit(current.id, { history, historyIndex: node + 1 });
-    onNotice({ tone: "success", message: `Duplicated ${step.name || `Layer ${node}`}.` });
+    recordAdded([{ step: copy, node: node + 1 }]);
   };
 
   /**
@@ -1660,7 +2100,7 @@ export function Editor({
       ...(current.baseAdjust ? { adjust: adjustList(current.baseAdjust).map((adjustment) => ({ ...adjustment, id: newAdjustmentId() })) } : {})
     };
     onCommit(current.id, { history: [copy, ...current.history], historyIndex: 1 });
-    onNotice({ tone: "success", message: "Duplicated the original image." });
+    recordAdded([{ step: copy, node: 1 }]);
   };
 
   /**
@@ -1687,17 +2127,19 @@ export function Editor({
       sent: { ...area, margin: 0, requestWidth: width, requestHeight: height },
       layer: await canvasToDataUrl(image)
     };
+    const top = documentRef.current.history.length + 1;
     appendStep(step, image);
-    onNotice({ tone: "success", message: `Added ${step.name}: the visible layers combined, as a new top layer.` });
+    recordAdded([{ step, node: top }]);
   };
 
   /**
    * Adds an empty, transparent layer the size of the image directly above the
    * selected layer, and selects it. Its name is the first free "Layer N".
+   * With `pixels` (Ctrl+V), the layer holds them, at the same place.
    */
-  const addBlankLayer = async () => {
+  const addBlankLayer = async (pixels?: HTMLCanvasElement) => {
     const current = documentRef.current;
-    if (applyingRef.current || resizeRef.current || clickSelectRef.current) return;
+    if (applyingRef.current || resizeRef.current || (clickSelectRef.current && !pixels)) return;
     const { width, height } = current.surface;
     const area: Rect = { x: 0, y: 0, width, height };
     const names = new Set(current.history.map((step, index) => step.name || `Layer ${index + 1}`));
@@ -1706,14 +2148,14 @@ export function Editor({
     const step: EditStep = {
       id: crypto.randomUUID(),
       name: `Layer ${number}`,
-      prompt: "Empty layer",
+      prompt: pixels ? "Pasted pixels" : "Empty layer",
       model: BLANK_MODEL,
       quality: "",
       createdAt: new Date().toISOString(),
       selection: { x: 0, y: 0, size: Math.min(width, height) },
       area,
       sent: { ...area, margin: 0, requestWidth: width, requestHeight: height },
-      layer: await canvasToDataUrl(createCanvas(width, height))
+      layer: await canvasToDataUrl(pixels ? pastedCanvas(pixels, width, height) : createCanvas(width, height))
     };
     /** The selected layer may change while the PNG is made; read it again. */
     const latest = documentRef.current;
@@ -1721,7 +2163,7 @@ export function Editor({
     const history = [...latest.history.slice(0, at), step, ...latest.history.slice(at)];
     setMultiIds([]);
     onCommit(latest.id, { history, historyIndex: at + 1 });
-    onNotice({ tone: "success", message: `Added ${step.name}: an empty layer.` });
+    recordAdded([{ step, node: at + 1 }]);
   };
 
   /**
@@ -1743,7 +2185,7 @@ export function Editor({
       await composeRef.current;
       const visible = doc.history.map((step, index) => ({ step, node: index + 1 })).filter(({ step }) => !step.hidden);
       const [base, layers] = await Promise.all([baseCanvases(doc), layerCanvases(visible.map(({ step }) => step))]);
-      const size = videoSize(width, height);
+      const size = options.vertical ? verticalPictureSize(width, height) : videoSize(width, height);
       const full = createCanvas(width, height);
       const context = full.getContext("2d")!;
       /** A separate original image (older documents) is the first picture; otherwise the bottom visible layer is. */
@@ -1862,6 +2304,8 @@ export function Editor({
     const pick = (target: LayerPart) => {
       if (node !== current.historyIndex) selectLayer(node);
       setMaskPart(target);
+      /** A paint gradient does not carry into the Mask tool; the gradient actions below set their own. */
+      if (!isMaskTool) setGradient(null);
       setTool("mask");
     };
     switch (action) {
@@ -1951,7 +2395,8 @@ export function Editor({
         }
         const before = partMaskState(current, node, part);
         recordMaskChange({ owner, part, before, after: { mask, ...(copied.hides ? { hides: true } : {}) } });
-        onNotice({ tone: "success", message: copied.width !== width || copied.height !== height ? "Mask pasted and scaled to this image." : "Mask pasted." });
+        /** Ctrl+Z undoes a paste, so only a paste that was scaled says so. */
+        if (copied.width !== width || copied.height !== height) onNotice({ tone: "success", message: "Mask pasted and scaled to this image." });
         return;
       }
       case "mask-unlink": {
@@ -2026,6 +2471,26 @@ export function Editor({
         void startClickSelect({ owner, part }, image, "Click to select");
         return;
       }
+      case "select-pixels":
+      case "select-pixels-add":
+      case "select-pixels-subtract": {
+        /** Ctrl+click on a layer thumbnail: the layer's pixels, as much as each shows, become the selection. */
+        if (!step?.layer) return;
+        const image = await decodeLayer(`${step.id}:image`, await latestPixels(step.id));
+        const grid = selectionGrid();
+        const sample = grid.scale < 1 ? scaledCanvas(image, grid.width, grid.height) : image;
+        const alpha = sample.getContext("2d")!.getImageData(0, 0, grid.width, grid.height).data;
+        const levels = new Uint8Array(grid.width * grid.height);
+        for (let index = 0; index < levels.length; index++) levels[index] = alpha[index * 4 + 3];
+        const before = selectionRef.current;
+        changeSelection(makeSelection(combineSelection(before?.levels ?? null, levels, action === "select-pixels-add" ? "add" : action === "select-pixels-subtract" ? "subtract" : "replace")));
+        return;
+      }
+      case "wand-select":
+        /** The Magic Wand reads the image as it shows, all visible layers together. */
+        await composeRef.current;
+        startWandSelect({ owner, part }, surface);
+        return;
       case "blend-normal":
       case "blend-screen":
       case "blend-overlay": {
@@ -2038,33 +2503,20 @@ export function Editor({
       case "delete":
         if (!adjustment) return;
         if (node === current.historyIndex && maskPart === part) setMaskPart("mask");
-        deleteAdjustments(replaceAdjustment(adjust, part, undefined), `Deleted ${adjustment.label || ADJUSTMENT_LABELS[adjustment.kind]}.`);
+        deleteAdjustments(replaceAdjustment(adjust, part, undefined));
         return;
       case "delete-all":
         if (!adjust?.length) return;
         if (node === current.historyIndex && maskPart !== "mask") setMaskPart("mask");
-        deleteAdjustments(undefined, `Deleted ${adjust.length} ${adjust.length === 1 ? "adjustment" : "adjustments"}.`);
+        deleteAdjustments(undefined);
         return;
     }
-    /** Deletes one or all adjustments of this layer; Ctrl+Z, or Undo in the message, puts them back. */
-    function deleteAdjustments(after: LayerAdjust | undefined, message: string) {
+    /** Deletes one or all adjustments of this layer; Ctrl+Z puts them back. */
+    function deleteAdjustments(after: LayerAdjust | undefined) {
       const change: AdjustChange = { kind: "adjust", owner, before: adjust, after };
       maskUndoRef.current.push(change);
       maskRedoRef.current = [];
       commitAdjust(current, node, after);
-      onNotice({
-        tone: "success",
-        message,
-        action: {
-          label: "Undo",
-          run: () => {
-            /** Undo from the message takes this change off the Ctrl+Z list, so Ctrl+Z cannot apply it twice. */
-            if (!maskUndoRef.current.includes(change)) return;
-            maskUndoRef.current = maskUndoRef.current.filter((entry) => entry !== change);
-            if (applyUndoEntry(change, "before")) maskRedoRef.current.push(change);
-          }
-        }
-      });
     }
   };
 
@@ -2079,7 +2531,9 @@ export function Editor({
     if (node !== current.historyIndex) selectLayer(node);
     setTool("whole");
     await composeRef.current;
-    const [layer] = await layerCanvases([{ ...step, hidden: false }]);
+    /** A transform source that still matches the layer is drawn instead, with its total transform as the start. */
+    const source = step.transformSource && step.transformSource.made === transformMade(step) ? step.transformSource : null;
+    const [layer] = await layerCanvases([{ ...(source ? sourceStepOf(step, source) : step), hidden: false }]);
     const rendered = createCanvas(width, height);
     drawLayer(context2d(rendered), layer);
     const bounds = opaqueBounds(rendered) ?? { x: 0, y: 0, width, height };
@@ -2088,8 +2542,8 @@ export function Editor({
       layerCanvases(current.history.slice(node))
     ]);
     const above = flattenLayers(width, height, layersAbove);
-    const transform = IDENTITY;
-    resizeRef.current = { owner: step.id, bounds, rendered, below, above, transform, frame: null, ...(step.blend ? { blend: step.blend } : {}) };
+    const transform = source ? source.transform : IDENTITY;
+    resizeRef.current = { owner: step.id, bounds, rendered, below, above, transform, start: transform, source, frame: null, ...(step.blend ? { blend: step.blend } : {}) };
     setResize({ bounds, transform });
   };
 
@@ -2160,18 +2614,25 @@ export function Editor({
     return () => { cancelled = true; };
   }, [imageDocument.history, imageDocument.baseAdjust, imageDocument.id]);
 
-  /** Enter: the layer and its masks are drawn again at the new size. The message that follows can undo it. */
+  /** Enter: the layer and its masks are drawn again with the new transform; Ctrl+Z undoes it. */
   const commitResize = async () => {
     const session = stopResize();
     if (!session) return;
     const transform = session.transform;
     const current = documentRef.current;
     const node = nodeOfOwner(current, session.owner);
-    if (node < 1 || (transform.a === 1 && !transform.b && !transform.x && !transform.y)) {
+    if (node < 1 || sameTransform(transform, session.start)) {
       setComposeTick((tick) => tick + 1);
       return;
     }
     const step = current.history[node - 1];
+    /**
+     * The layer is drawn again from its source with the total transform, so
+     * pixels past the image edge come back when moved into view and the
+     * layer does not soften with each transform. The first time, the layer
+     * itself becomes the source.
+     */
+    const origin = session.source ? sourceStepOf(step, session.source) : step;
     const scaled = (source: HTMLCanvasElement) => {
       const canvas = createCanvas(width, height);
       const context = canvas.getContext("2d")!;
@@ -2184,39 +2645,41 @@ export function Editor({
     try {
       /** The layer image, its layer mask, and each adjustment mask are drawn again with the transform. */
       const sources = [
-        { key: `${step.id}:image`, src: step.layer ?? "" },
-        ...(step.layerMask ? [{ key: `${step.id}:mask`, src: step.layerMask }] : []),
-        ...adjustList(step.adjust).flatMap((item) => item.mask ? [{ key: adjustMaskKey(step.id, item.id), src: item.mask }] : [])
+        { key: `${origin.id}:image`, src: origin.layer ?? "", out: `${step.id}:image` },
+        ...(origin.layerMask ? [{ key: `${origin.id}:mask`, src: origin.layerMask, out: `${step.id}:mask` }] : []),
+        ...adjustList(origin.adjust).flatMap((item) => item.mask ? [{ key: adjustMaskKey(origin.id, item.id), src: item.mask, out: adjustMaskKey(step.id, item.id) }] : [])
       ];
       const urls = new Map<string, string>();
-      await Promise.all(sources.map(async ({ key, src }) => {
+      await Promise.all(sources.map(async ({ key, src, out }) => {
         const canvas = scaled(await decodeLayer(key, src));
         const url = await canvasToDataUrl(canvas);
-        layerCacheRef.current.set(key, { src: url, canvas });
-        urls.set(key, url);
+        layerCacheRef.current.set(out, { src: url, canvas });
+        urls.set(out, url);
       }));
-      const resized: EditStep = {
+      const drawn: EditStep = {
         ...step,
         layer: urls.get(`${step.id}:image`),
         ...(step.layerMask ? { layerMask: urls.get(`${step.id}:mask`) } : {}),
         ...(step.adjust ? { adjust: adjustList(step.adjust).map((item) => item.mask ? { ...item, mask: urls.get(adjustMaskKey(step.id, item.id)) } : item) } : {})
       };
+      const adjustMasks = Object.fromEntries(adjustList(origin.adjust).flatMap((item) => item.mask ? [[item.id, item.mask]] : []));
+      const resized: EditStep = {
+        ...drawn,
+        transformSource: {
+          layer: origin.layer ?? "",
+          ...(origin.layerMask ? { layerMask: origin.layerMask } : {}),
+          ...(Object.keys(adjustMasks).length ? { adjustMasks } : {}),
+          transform,
+          made: transformMade(drawn)
+        }
+      };
       const latest = documentRef.current;
       const index = latest.history.findIndex((item) => item.id === step.id);
       if (index < 0) return;
       onCommit(latest.id, { history: latest.history.map((item, at) => at === index ? resized : item), historyIndex: index + 1 });
-      onNotice({
-        tone: "success",
-        message: "Layer transformed.",
-        action: {
-          label: "Undo",
-          run: () => {
-            const doc = documentRef.current;
-            const at = doc.history.findIndex((item) => item.id === step.id);
-            if (at >= 0) onCommit(doc.id, { history: doc.history.map((item, i) => i === at ? step : item) });
-          }
-        }
-      });
+      /** Ctrl+Z puts the layer back as it was; no message. */
+      maskUndoRef.current.push({ kind: "layer", before: step, after: resized });
+      maskRedoRef.current = [];
     } catch (error) {
       setComposeTick((tick) => tick + 1);
       onNotice({ tone: "error", message: `Could not resize the layer: ${error instanceof Error ? error.message : String(error)}` });
@@ -2448,20 +2911,100 @@ export function Editor({
     const onKeyDown = (event: KeyboardEvent) => {
       const target = event.target as HTMLElement;
       const typing = target.tagName === "TEXTAREA" || target.tagName === "INPUT" || target.tagName === "SELECT";
-      if (event.key === "Alt") setErasing(true);
+      /**
+       * Alt alone would open the window's system menu when let go, and that
+       * menu holds the mouse until a click; the app uses Alt itself.
+       */
+      if (event.key === "Alt") {
+        event.preventDefault();
+        setErasing(true);
+      }
+      if (event.key === "Shift") setShiftHeld(true);
       setZoomKeys(event.ctrlKey ? (event.altKey ? "out" : "in") : null);
       if (window.document.querySelector(".save-dialog-overlay, .open-dialog-overlay, .confirm-overlay, .about-dialog-overlay")) return;
-      /** During click to select, Enter applies, Esc cancels and Ctrl+Z removes the last click; other keys wait. */
+      /** Ctrl+A selects the whole image, as in Photoshop, in any tool. */
+      if (event.ctrlKey && !event.altKey && !event.shiftKey && event.key.toLowerCase() === "a" && !typing && !resizeRef.current) {
+        event.preventDefault();
+        const grid = selectionGrid();
+        changeSelection(makeSelection(new Uint8Array(grid.width * grid.height).fill(255)));
+        return;
+      }
+      /**
+       * Space held turns a left drag into panning (and with Ctrl, a click
+       * into zooming) in every tool, also during the Magic Wand and
+       * Transform; it must not press a focused button.
+       */
+      if (event.code === "Space" && !typing) {
+        event.preventDefault();
+        if (!event.repeat) setSpaceHeld(true);
+        return;
+      }
+      /** Ctrl+V pastes cut or copied pixels into a new layer above the selected one, at the same place. */
+      if (event.ctrlKey && !event.altKey && !event.shiftKey && event.key.toLowerCase() === "v" && !typing && !resizeRef.current && pixelClipboard) {
+        event.preventDefault();
+        if (!event.repeat) void addBlankLayer(pixelClipboard);
+        return;
+      }
+      /**
+       * With a selection, as in Photoshop: Ctrl+X and Ctrl+C cut and copy,
+       * Ctrl+D drops it, Ctrl+I (or Ctrl+Shift+I) inverts it, and
+       * Alt+Backspace fills it: showing or hiding in the Mask tool, or else
+       * with the paint color.
+       */
+      const chosen = selectionRef.current;
+      if (chosen && !typing && !resizeRef.current) {
+        /** Ctrl+C copies what shows in the selection; Ctrl+X cuts from the selected layer; Ctrl+Shift+X cuts from every visible layer. */
+        if (event.ctrlKey && !event.altKey && (event.key.toLowerCase() === "x" || (event.key.toLowerCase() === "c" && !event.shiftKey))) {
+          event.preventDefault();
+          if (!event.repeat) void copySelectedPixels(chosen, event.key.toLowerCase() === "c" ? null : event.shiftKey ? "all" : "layer");
+          return;
+        }
+        if (event.ctrlKey && !event.altKey && event.key.toLowerCase() === "d") {
+          event.preventDefault();
+          changeSelection(null);
+          return;
+        }
+        if (event.ctrlKey && !event.altKey && event.key.toLowerCase() === "i") {
+          event.preventDefault();
+          changeSelection(makeSelection(invertSelection(chosen.levels)));
+          return;
+        }
+        if (event.altKey && !event.ctrlKey && event.key === "Backspace") {
+          event.preventDefault();
+          if (!event.repeat) {
+            if (isMaskTool) fillMaskSelection(chosen);
+            else void fillWithColor(chosen);
+          }
+          return;
+        }
+      }
+      /** During click to select, Enter applies, Esc ends it and Ctrl+Z undoes; other keys wait. */
       if (clickSelectRef.current && !typing) {
+        const session = clickSelectRef.current;
         if (event.key === "Enter") {
           event.preventDefault();
           void applyClickSelect();
         } else if (event.key === "Escape") {
           event.preventDefault();
-          cancelClickSelect();
+          /**
+           * With pixels selected, the Magic Wand's Esc deselects them and the
+           * wand stays on. With nothing selected, Esc ends the wand: in the
+           * Paint tool it goes back to Select.
+           */
+          if (session.engine === "wand" && selectionRef.current) {
+            changeSelection(null);
+          } else {
+            cancelClickSelect();
+            if (session.target.part === PAINT_PART) setTool("whole");
+          }
         } else if (event.ctrlKey && event.key.toLowerCase() === "z") {
           event.preventDefault();
-          undoClickPoint();
+          if (session.engine === "wand") {
+            if (event.shiftKey) redoMask();
+            else undoMask();
+          } else {
+            undoClickPoint();
+          }
         }
         return;
       }
@@ -2476,12 +3019,6 @@ export function Editor({
         }
         return;
       }
-      /** Space held turns a left drag into panning; it must not press a focused button. */
-      if (event.code === "Space" && !typing) {
-        event.preventDefault();
-        if (!event.repeat) setSpaceHeld(true);
-        return;
-      }
       /** Ctrl+Alt+S, or Photoshop's Ctrl+Shift+Alt+E, adds a snapshot of the visible layers. */
       if (event.ctrlKey && event.altKey && !typing && (event.code === "KeyS" || (event.shiftKey && event.code === "KeyE"))) {
         event.preventDefault();
@@ -2491,30 +3028,32 @@ export function Editor({
         void onSave(documentRef.current.id, event.shiftKey);
       }
       if (event.key === "Escape" && !typing) {
+        /** Esc first drops work in progress; then, in the Paint tool, it goes straight back to Select. */
         if (gradientRef.current) cancelGradientDrag();
-        else if (gradient) setGradient(null);
-        else if (lassoPointsRef.current.length) setLassoPoints([]);
+        else if (gradient && isMaskTool) setGradient(null);
+        else if (marqueeDragRef.current) {
+          marqueeDragRef.current = null;
+          setMarqueeDrag(null);
+        } else if (lassoPointsRef.current.length) setLassoPoints([]);
         else if (lasso && isMaskTool) setLasso(false);
+        else if (marquee && isMaskTool) setMarquee(null);
         else if (isMaskTool || isPaintTool) setTool("whole");
       }
-      /**
-       * Alt+Backspace fills the closed Paint lasso shape, or else the whole
-       * selected layer, with the paint color, as in Photoshop. Masks are not filled.
-       */
+      /** Without a selection, Alt+Backspace fills the whole selected layer with the paint color, as in Photoshop. Masks are not filled. */
       if (event.altKey && !event.ctrlKey && event.key === "Backspace" && !typing) {
         event.preventDefault();
-        if (!isMaskTool && !event.repeat) {
-          const points = isPaintTool && lasso && lassoPointsRef.current.length >= 3 ? lassoPointsRef.current : null;
-          if (points) {
-            setLassoPoints([]);
-            lassoClickRef.current = null;
-          }
-          void fillWithColor(points);
-        }
+        if (!isMaskTool && !event.repeat) void fillWithColor(null);
+      }
+      if (event.key === "Enter" && !typing && gradientRef.current?.editing) {
+        event.preventDefault();
+        finishGradientDrag(true);
+        return;
       }
       if (event.ctrlKey && event.key.toLowerCase() === "z" && !typing) {
         event.preventDefault();
-        if (event.shiftKey) redoMask();
+        /** Ctrl+Z on a gradient that is not applied yet removes it. */
+        if (gradientRef.current) cancelGradientDrag();
+        else if (event.shiftKey) redoMask();
         else undoMask();
       }
       /** Ctrl+R is Redo too; the app blocks the browser's reload on it. */
@@ -2544,7 +3083,10 @@ export function Editor({
         requestDelete(documentRef.current.historyIndex);
       }
       if (event.key.toLowerCase() === "m" && targetPart) {
-        if (isPaintTool) setLasso(false);
+        if (isPaintTool) {
+          setLasso(false);
+          setGradient(null);
+        }
         toggleTool("mask");
       }
       /**
@@ -2576,15 +3118,33 @@ export function Editor({
       /** Outside the Mask tool, B starts the paint brush and L the paint lasso; in the Paint tool, L switches between them. */
       if (!isMaskTool && event.key.toLowerCase() === "b") {
         setTool("paint");
+        setGradient(null);
         setLasso(false);
+      }
+      /** E starts the eraser, as in Photoshop. */
+      if (!isMaskTool && event.key.toLowerCase() === "e") {
+        if (clickSelectRef.current) cancelClickSelect();
+        setTool("paint");
+        setGradient(null);
+        setLasso(false);
+        setEraser(true);
+      }
+      /** W starts the Magic Wand, as in Photoshop: in the Mask tool for the mask being painted, or else in the Paint tool. */
+      if (event.key.toLowerCase() === "w") {
+        if (isMaskTool) {
+          if (targetPart) void partAction(documentRef.current.historyIndex, targetPart, "wand-select");
+        } else if (!paintWandOn) {
+          void togglePaintWand();
+        }
       }
       if (!isMaskTool && event.key.toLowerCase() === "l") {
         setTool("paint");
+        setGradient(null);
         setLasso((on) => isPaintTool ? !on : true);
       }
       if (lasso && event.key === "Enter" && lassoPointsRef.current.length >= 3) {
         event.preventDefault();
-        fillLasso(lassoPointsRef.current, false);
+        selectLasso(lassoPointsRef.current, event.altKey, event.shiftKey);
       }
       if (lasso && event.key === "Backspace" && lassoPointsRef.current.length) {
         event.preventDefault();
@@ -2597,12 +3157,17 @@ export function Editor({
       }
     };
     const onKeyUp = (event: KeyboardEvent) => {
-      if (event.key === "Alt") setErasing(false);
+      if (event.key === "Alt") {
+        event.preventDefault();
+        setErasing(false);
+      }
+      if (event.key === "Shift") setShiftHeld(false);
       if (event.code === "Space") setSpaceHeld(false);
       setZoomKeys(event.ctrlKey ? (event.altKey ? "out" : "in") : null);
     };
     const onBlur = () => {
       setErasing(false);
+      setShiftHeld(false);
       setSpaceHeld(false);
       setZoomKeys(null);
     };
@@ -2865,12 +3430,17 @@ export function Editor({
     };
   }, [layerPick]);
 
-  const pointFromEvent = (event: { currentTarget: HTMLElement; clientX: number; clientY: number }): Point => {
-    const rect = event.currentTarget.getBoundingClientRect();
-    return {
-      x: Math.max(0, Math.min(width, ((event.clientX - rect.left) / rect.width) * width)),
-      y: Math.max(0, Math.min(height, ((event.clientY - rect.top) / rect.height) * height))
-    };
+  /**
+   * The image point under the pointer. With `clamp` false, a point outside
+   * the image stays outside it (negative, or past the width or height), so
+   * the lasso, gradients and brushes can have points in the work area.
+   */
+  const pointFromEvent = (event: { clientX: number; clientY: number }, clamp = true): Point => {
+    const rect = stageRef.current?.getBoundingClientRect();
+    if (!rect || !rect.width || !rect.height) return { x: 0, y: 0 };
+    const x = ((event.clientX - rect.left) / rect.width) * width;
+    const y = ((event.clientY - rect.top) / rect.height) * height;
+    return clamp ? { x: Math.max(0, Math.min(width, x)), y: Math.max(0, Math.min(height, y)) } : { x, y };
   };
 
   /** Draws the surface from a prepared layer while a mask stroke or gradient runs. */
@@ -2889,7 +3459,7 @@ export function Editor({
     stroke.frame = null;
     const { mask } = prepTarget(stroke.prep);
     if (!mask) return;
-    applyMaskStroke(mask, stroke.base, stroke.stroke, stroke.opacity, stroke.add);
+    applyMaskStroke(mask, stroke.base, clipToSelection(stroke.stroke, stroke.clip), stroke.opacity, stroke.add);
     redrawPrepared(stroke.prep);
   };
 
@@ -2935,11 +3505,31 @@ export function Editor({
     context.save();
     context.globalCompositeOperation = "copy";
     context.drawImage(stroke.base, 0, 0);
-    context.globalCompositeOperation = "source-over";
+    /** The eraser takes the stroke's shape out of the layer; the brush lays the color on. */
+    context.globalCompositeOperation = stroke.erase ? "destination-out" : "source-over";
     context.globalAlpha = stroke.opacity;
-    context.drawImage(stroke.stroke, 0, 0);
+    context.drawImage(clipToSelection(stroke.stroke, stroke.clip), 0, 0);
     context.restore();
     redrawPrepared(stroke.prep);
+  };
+
+  /** `canvas` cut to the selection: only the part inside it, drawn in the clip's own canvas. Without a clip, `canvas` itself. */
+  const clipToSelection = (canvas: HTMLCanvasElement, clip?: { mask: HTMLCanvasElement; scratch: HTMLCanvasElement }) => {
+    if (!clip) return canvas;
+    const context = clip.scratch.getContext("2d")!;
+    context.save();
+    context.globalCompositeOperation = "copy";
+    context.drawImage(canvas, 0, 0);
+    context.globalCompositeOperation = "destination-in";
+    context.imageSmoothingEnabled = true;
+    context.drawImage(clip.mask, 0, 0, canvas.width, canvas.height);
+    context.restore();
+    return clip.scratch;
+  };
+  /** The selection's clip for a canvas of the image size, or none without a selection. */
+  const selectionClip = () => {
+    const mask = selectionRef.current?.canvas;
+    return mask ? { mask, scratch: createCanvas(width, height) } : undefined;
   };
 
   /** Paints one piece of a paint stroke and redraws the surface on the next frame. */
@@ -3002,12 +3592,11 @@ export function Editor({
   };
 
   /**
-   * Fills the closed shape `points`, or the whole selected layer for null,
-   * with the paint color at the brush opacity (Alt+Backspace, or a closed
-   * Paint lasso).
+   * Fills the selection, or the whole selected layer for null, with the
+   * paint color at the brush opacity (Alt+Backspace).
    */
-  const fillWithColor = async (points: Point[] | null) => {
-    if (applyingRef.current || resizeRef.current || clickSelectRef.current || paintStrokeRef.current) return;
+  const fillWithColor = async (chosen: PixelSelection | null) => {
+    if (applyingRef.current || resizeRef.current || paintStrokeRef.current) return;
     const step = paintTarget();
     if (!step) return;
     await pixelsChainRef.current;
@@ -3016,16 +3605,91 @@ export function Editor({
     const context = image.getContext("2d")!;
     context.save();
     context.globalAlpha = maskOpacity / 100;
-    context.fillStyle = paintColor;
-    if (points) {
-      context.beginPath();
-      points.forEach((point, index) => index ? context.lineTo(point.x, point.y) : context.moveTo(point.x, point.y));
-      context.closePath();
-      context.fill();
+    if (chosen) {
+      /** The selection's mask, at the layer size, filled with the paint color. */
+      const area = createCanvas(image.width, image.height);
+      const areaContext = area.getContext("2d")!;
+      areaContext.imageSmoothingEnabled = true;
+      areaContext.drawImage(chosen.canvas, 0, 0, image.width, image.height);
+      areaContext.globalCompositeOperation = "source-in";
+      areaContext.fillStyle = paintColor;
+      areaContext.fillRect(0, 0, image.width, image.height);
+      context.drawImage(area, 0, 0);
     } else {
+      context.fillStyle = paintColor;
       context.fillRect(0, 0, image.width, image.height);
     }
     context.restore();
+    const prep = maskPrepRef.current;
+    if (prep && prep.part === PAINT_PART && prep.owner === step.id && prep.image === image) redrawPrepared(prep);
+    else setComposeTick((tick) => tick + 1);
+    commitPixels(step.id, Promise.resolve(before), image);
+  };
+
+  /**
+   * Copies what shows inside the selection, all visible layers together, to
+   * the pixel clipboard (Ctrl+C). With `cut` "layer" (Ctrl+X), it takes the
+   * selected layer's own pixels instead and removes them from the layer.
+   * With `cut` "all" (Ctrl+Shift+X), it copies what shows and removes it
+   * from every visible layer. Each cut is one step for Ctrl+Z.
+   */
+  const copySelectedPixels = async (chosen: PixelSelection, cut: "layer" | "all" | null) => {
+    if (applyingRef.current || resizeRef.current || paintStrokeRef.current) return;
+    /** The selection's mask over `source`, on a new canvas of the image size. */
+    const insideSelection = (source: HTMLCanvasElement) => {
+      const piece = createCanvas(source.width, source.height);
+      const pieceContext = piece.getContext("2d")!;
+      pieceContext.drawImage(source, 0, 0);
+      pieceContext.globalCompositeOperation = "destination-in";
+      pieceContext.imageSmoothingEnabled = true;
+      pieceContext.drawImage(chosen.canvas, 0, 0, source.width, source.height);
+      return piece;
+    };
+    /** Removes the selection from `image`, in place. */
+    const eraseSelection = (image: HTMLCanvasElement) => {
+      const context = image.getContext("2d")!;
+      context.save();
+      context.globalCompositeOperation = "destination-out";
+      context.imageSmoothingEnabled = true;
+      context.drawImage(chosen.canvas, 0, 0, image.width, image.height);
+      context.restore();
+    };
+    if (cut !== "layer") {
+      await composeRef.current;
+      pixelClipboard = insideSelection(surface);
+      if (!cut) return;
+      /** Every visible layer loses the selected pixels; one Ctrl+Z puts them all back. */
+      await pixelsChainRef.current;
+      const visible = documentRef.current.history.filter((step) => !step.hidden && step.layer);
+      if (!visible.length) return;
+      const changes = await Promise.all(visible.map(async (step) => {
+        const before = await latestPixels(step.id);
+        const image = await decodeLayer(`${step.id}:image`, before);
+        eraseSelection(image);
+        const after = await canvasToDataUrl(image);
+        layerCacheRef.current.set(`${step.id}:image`, { src: after, canvas: image });
+        return { owner: step.id, before, after };
+      }));
+      maskUndoRef.current.push({ kind: "pixels-many", changes });
+      maskRedoRef.current = [];
+      const current = documentRef.current;
+      const layers = new Map(changes.map((change) => [change.owner, change.after]));
+      onCommit(current.id, { history: current.history.map((step) => layers.has(step.id) ? { ...step, layer: layers.get(step.id)! } : step) });
+      const prep = maskPrepRef.current;
+      if (prep && prep.part === PAINT_PART && layers.has(prep.owner)) redrawPrepared(prep);
+      return;
+    }
+    const doc = documentRef.current;
+    const step = doc.historyIndex > 0 ? doc.history[doc.historyIndex - 1] : null;
+    if (!step) {
+      onNotice({ tone: "error", message: "Select a layer to cut from first." });
+      return;
+    }
+    await pixelsChainRef.current;
+    const before = await latestPixels(step.id);
+    const image = await decodeLayer(`${step.id}:image`, before);
+    pixelClipboard = insideSelection(image);
+    eraseSelection(image);
     const prep = maskPrepRef.current;
     if (prep && prep.part === PAINT_PART && prep.owner === step.id && prep.image === image) redrawPrepared(prep);
     else setComposeTick((tick) => tick + 1);
@@ -3076,27 +3740,100 @@ export function Editor({
     ring.setAttribute("r", gradientRef.current?.kind === "radial" ? String(Math.hypot(to.x - from.x, to.y - from.y) * cssScale) : "0");
   };
 
-  /** Draws the dragged gradient into the mask and redraws the surface on the next frame. */
+  /** Draws the gradient into the mask or the layer's pixels, and redraws the surface. A stop dragged away to be removed is left out. */
+  const paintGradientNow = (drag: GradientDrag) => {
+    const away = drag.grab?.what === "stop" && drag.grab.away ? drag.grab.index : -1;
+    const stops = gradientStopsRef.current[drag.target].filter((_, index) => index !== away);
+    if (drag.target === "paint") {
+      drawPaintGradient(drag.prep.image, drag.base, drag.kind, drag.from, drag.to, resolveClearStops(stops).map((stop) => ({ offset: stop.offset, color: stopCss(stop) })), 1, drag.clip);
+    } else {
+      const { mask, hides } = prepTarget(drag.prep);
+      if (!mask) return;
+      drawMaskGradient(mask, drag.base, drag.kind, drag.from, drag.to, stops.map((stop) => ({ offset: stop.offset, shows: grayLevel(stop.color) })), 1, hides);
+      /** Inside a selection, the mask keeps its old values outside it. */
+      if (drag.clip) {
+        const outside = drag.clip.scratch.getContext("2d")!;
+        outside.save();
+        outside.globalCompositeOperation = "copy";
+        outside.drawImage(drag.base, 0, 0);
+        outside.globalCompositeOperation = "destination-out";
+        outside.imageSmoothingEnabled = true;
+        outside.drawImage(drag.clip.mask, 0, 0, mask.width, mask.height);
+        outside.restore();
+        const context = mask.getContext("2d")!;
+        context.save();
+        context.globalCompositeOperation = "destination-in";
+        context.imageSmoothingEnabled = true;
+        context.drawImage(drag.clip.mask, 0, 0, mask.width, mask.height);
+        context.globalCompositeOperation = "source-over";
+        context.drawImage(drag.clip.scratch, 0, 0);
+        context.restore();
+      }
+    }
+    redrawPrepared(drag.prep);
+  };
+
+  /** Draws the gradient on the next frame. */
   const drawGradientDrag = (drag: GradientDrag) => {
     if (drag.frame !== null) return;
     drag.frame = requestAnimationFrame(() => {
       drag.frame = null;
-      const { mask, hides } = prepTarget(drag.prep);
-      if (!mask) return;
-      drawMaskGradient(mask, drag.base, drag.kind, drag.from, drag.to, drag.opacity, hides);
-      redrawPrepared(drag.prep);
+      paintGradientNow(drag);
     });
   };
 
-  /** Ends a gradient drag. A drag too short to set a direction changes nothing. */
+  /** The gradient as the overlay draws it. */
+  const showGradientEdit = (drag: GradientDrag) => setGradientEdit({
+    from: drag.from,
+    to: drag.to,
+    kind: drag.kind,
+    target: drag.target,
+    awayIndex: drag.grab?.what === "stop" && drag.grab.away ? drag.grab.index : null
+  });
+
+  /**
+   * What is under `point` on the gradient being edited: a middle stop, an
+   * end, or the line between the ends (with the offset there), or null.
+   */
+  const gradientHit = (drag: GradientDrag, point: Point) => {
+    const stops = gradientStopsRef.current[drag.target];
+    const screenDistance = (target: Point) => Math.hypot(target.x - point.x, target.y - point.y) * cssScale;
+    for (let index = stops.length - 2; index >= 1; index--) {
+      if (screenDistance(pointOnLine(drag.from, drag.to, stops[index].offset)) <= 8) return { what: "stop" as const, index };
+    }
+    if (screenDistance(drag.to) <= 10) return { what: "to" as const, index: stops.length - 1 };
+    if (screenDistance(drag.from) <= 10) return { what: "from" as const, index: 0 };
+    const { offset, distance } = projectOnLine(drag.from, drag.to, point);
+    if (offset > 0 && offset < 1 && distance * cssScale <= 6) return { what: "line" as const, offset };
+    return null;
+  };
+
+  /** Ends a gradient: applies it, or puts the mask or pixels back. A gradient too short to set a direction changes nothing. */
   const finishGradientDrag = (commit: boolean) => {
     const drag = gradientRef.current;
     if (!drag) return;
     gradientRef.current = null;
     if (drag.frame !== null) cancelAnimationFrame(drag.frame);
     moveGradientLine(null);
-    const { mask, hides } = prepTarget(drag.prep);
+    setGradientEdit(null);
+    setStopPicker(null);
     const moved = Math.hypot(drag.to.x - drag.from.x, drag.to.y - drag.from.y) * cssScale >= 3;
+    if (drag.target === "paint") {
+      drag.grab = null;
+      if (!commit || !moved) {
+        const context = drag.prep.image.getContext("2d")!;
+        context.save();
+        context.globalCompositeOperation = "copy";
+        context.drawImage(drag.base, 0, 0);
+        context.restore();
+        redrawPrepared(drag.prep);
+        return;
+      }
+      paintGradientNow(drag);
+      commitPixels(drag.prep.owner, latestPixels(drag.prep.owner), drag.prep.image);
+      return;
+    }
+    const { mask, hides } = prepTarget(drag.prep);
     if (!mask || !commit || !moved) {
       if (drag.created) setPrepTarget(drag.prep, null, hides);
       else if (mask) {
@@ -3110,8 +3847,8 @@ export function Editor({
       return;
     }
     /** The gradient tool stays on for the next drag, until another tool is picked. */
-    drawMaskGradient(mask, drag.base, drag.kind, drag.from, drag.to, drag.opacity, hides);
-    redrawPrepared(drag.prep);
+    drag.grab = null;
+    paintGradientNow(drag);
     void canvasToDataUrl(mask).then((url) => recordMaskChange({ owner: drag.prep.owner, part: drag.prep.part, before: drag.before, after: { mask: url, hides } }, mask));
   };
   const cancelGradientDrag = () => finishGradientDrag(false);
@@ -3139,30 +3876,59 @@ export function Editor({
   useLayoutEffect(moveLassoRubber);
 
   /**
-   * Fills the closed lasso shape in the target mask, like one brush stroke:
-   * it shows or hides (Alt or `reverse` does the other one) at the brush
-   * opacity, with a clean edge.
+   * The closed lasso shape becomes the selection: a new one, or with Shift
+   * added to it, or with Alt taken from it. Nothing is filled; Alt+Backspace
+   * fills the selection.
    */
-  const fillLasso = (points: Point[], reverse: boolean) => {
+  const selectLasso = (points: Point[], subtract: boolean, add: boolean) => {
     setLassoPoints([]);
     lassoClickRef.current = null;
-    /** The Paint lasso fills the shape with the paint color. */
-    if (isPaintTool) {
-      if (points.length >= 3) void fillWithColor(points);
-      return;
-    }
+    if (points.length < 3) return;
+    selectShape((context) => {
+      points.forEach((point, index) => index ? context.lineTo(point.x, point.y) : context.moveTo(point.x, point.y));
+      context.closePath();
+    }, subtract ? "subtract" : add ? "add" : "replace");
+  };
+
+  /**
+   * A shape, traced in image pixels by `trace`, becomes the selection in
+   * `mode`. The canvas draws it smooth, so pixels on a slanted or curved
+   * edge are partly selected.
+   */
+  const selectShape = (trace: (context: CanvasRenderingContext2D) => void, mode: SelectMode) => {
+    const grid = selectionGrid();
+    const shape = createCanvas(grid.width, grid.height);
+    const context = shape.getContext("2d")!;
+    context.scale(grid.scale, grid.scale);
+    context.fillStyle = "#fff";
+    context.beginPath();
+    trace(context);
+    context.fill();
+    /** The canvas draws the shape smooth: pixels on a slanted edge are partly covered, and keep that level. */
+    const alpha = context.getImageData(0, 0, grid.width, grid.height).data;
+    const area = new Uint8Array(grid.width * grid.height);
+    for (let index = 0; index < area.length; index++) area[index] = alpha[index * 4 + 3];
+    const before = selectionRef.current;
+    changeSelection(makeSelection(combineSelection(before?.levels ?? null, area, mode)));
+  };
+
+  /**
+   * Fills the selection in the target mask, like one brush stroke: it shows
+   * or hides (as the brush does) at the brush opacity (Alt+Backspace).
+   */
+  const fillMaskSelection = (chosen: PixelSelection) => {
     const prep = maskPrepRef.current;
     const doc = documentRef.current;
     const node = doc.historyIndex;
-    if (!targetPart || points.length < 3 || !prep || prep.part !== targetPart || prep.owner !== (node > 0 ? doc.history[node - 1].id : BASE_OWNER)) return;
+    if (!targetPart || !prep || prep.part !== targetPart || prep.owner !== (node > 0 ? doc.history[node - 1].id : BASE_OWNER)) return;
     const before = partMaskState(doc, node, targetPart);
     let { mask, hides } = prepTarget(prep);
-    let shows = maskShows !== reverse;
+    let shows = maskShows;
     /** As with the brush, a mask that shows (or hides) everything can only be changed the other way. */
     const forced = forcedMaskMode(prep);
     if (forced !== null && forced !== shows) {
       shows = forced;
-      if (!reverse) setMaskShows(forced);
+      setMaskShows(forced);
     }
     if (!mask) {
       mask = createCanvas(width, height);
@@ -3171,11 +3937,8 @@ export function Editor({
     }
     const shape = createCanvas(width, height);
     const context = shape.getContext("2d")!;
-    context.fillStyle = "#fff";
-    context.beginPath();
-    points.forEach((point, index) => index ? context.lineTo(point.x, point.y) : context.moveTo(point.x, point.y));
-    context.closePath();
-    context.fill();
+    context.imageSmoothingEnabled = true;
+    context.drawImage(chosen.canvas, 0, 0, width, height);
     applyMaskStroke(mask, drawingCopy(mask), shape, maskOpacity / 100, shows !== hides);
     redrawPrepared(prep);
     const filled = mask;
@@ -3185,20 +3948,21 @@ export function Editor({
 
   /**
    * A lasso click adds a corner. With three corners or more, a click on the
-   * first corner or a double-click closes the shape and fills it.
+   * first corner or a double-click closes the shape and selects it (Shift
+   * adds to the selection, Alt takes from it).
    */
-  const lassoClick = (point: Point, reverse: boolean) => {
+  const lassoClick = (point: Point, reverse: boolean, add: boolean) => {
     const points = lassoPointsRef.current;
     const now = performance.now();
     const last = lassoClickRef.current;
     lassoClickRef.current = { time: now, point };
     const near = (a: Point, b: Point, reach: number) => Math.hypot(a.x - b.x, a.y - b.y) * cssScale <= reach;
     if (points.length >= 3 && near(point, points[0], LASSO_CLOSE_REACH)) {
-      fillLasso(points, reverse);
+      selectLasso(points, reverse, add);
       return;
     }
     if (points.length >= 3 && last && now - last.time < 400 && near(point, last.point, 4)) {
-      fillLasso(points, reverse);
+      selectLasso(points, reverse, add);
       return;
     }
     setLassoPoints([...points, point]);
@@ -3237,7 +4001,10 @@ export function Editor({
   const onPointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
     if (event.button !== 0 || resizeRef.current) return;
     if (clickSelectRef.current) {
-      addClickPoint(pointFromEvent(event), !event.altKey);
+      /** The Magic Wand: a click starts a new selection, Shift or Ctrl+click adds to it, and Alt+click takes away from it. */
+      const point = pointFromEvent(event);
+      if (clickSelectRef.current.engine === "wand") wandClick(point, event.altKey ? "subtract" : event.shiftKey || event.ctrlKey ? "add" : "replace");
+      else addClickPoint(point, !event.altKey);
       return;
     }
     /** A color picked with the color picker open closes the picker and starts the paint brush. */
@@ -3254,7 +4021,7 @@ export function Editor({
     }
     if (isMaskTool || isPaintTool) {
       /** Alt + click with the paint brush picks the color under the pointer. */
-      if (isPaintTool && !lasso && event.altKey) {
+      if (isPaintTool && brushLike && !eraser && event.altKey) {
         pickColorAt(pointFromEvent(event));
         return;
       }
@@ -3270,8 +4037,16 @@ export function Editor({
       const doc = documentRef.current;
       const node = doc.historyIndex;
       if (!prep || prep.part !== part || prep.owner !== (node > 0 ? doc.history[node - 1].id : BASE_OWNER)) return;
+      /** Rectangle and ellipse select: a drag draws the shape; Shift or Alt when letting go adds to the selection or takes from it. */
+      if (marquee) {
+        const point = pointFromEvent(event, false);
+        event.currentTarget.setPointerCapture(event.pointerId);
+        marqueeDragRef.current = { shape: marquee, start: point, current: point, even: false, centered: false, startX: event.clientX, startY: event.clientY };
+        setMarqueeDrag(null);
+        return;
+      }
       if (lasso) {
-        const point = pointFromEvent(event);
+        const point = pointFromEvent(event, false);
         /** Ctrl+click on a corner deletes it; the next corner takes its place in the shape. */
         if (event.ctrlKey) {
           const doomed = lassoCornerAt(point, true);
@@ -3285,15 +4060,45 @@ export function Editor({
         }
         const corner = lassoCornerAt(point);
         if (corner !== null) {
-          lassoDragRef.current = { index: corner, point, startX: event.clientX, startY: event.clientY, moved: false, reverse: event.altKey };
+          lassoDragRef.current = { index: corner, point, startX: event.clientX, startY: event.clientY, moved: false, reverse: event.altKey, add: event.shiftKey };
           event.currentTarget.setPointerCapture(event.pointerId);
           return;
         }
-        lassoClick(point, event.altKey);
+        lassoClick(point, event.altKey, event.shiftKey);
         return;
       }
-      const point = pointFromEvent(event);
+      const point = pointFromEvent(event, false);
       event.currentTarget.setPointerCapture(event.pointerId);
+      if (gradient) {
+        const open = gradientRef.current;
+        /**
+         * On a gradient being edited, a press grabs an end or a stop, or adds
+         * a stop on the line. A press anywhere else applies the gradient.
+         */
+        if (open?.editing) {
+          const hit = gradientHit(open, point);
+          setStopPicker(null);
+          if (!hit) {
+            finishGradientDrag(true);
+            return;
+          }
+          if (hit.what === "line") {
+            const stops = gradientStopsRef.current[open.target];
+            const offset = clampMiddleOffset(hit.offset);
+            addStop(open.target, stopAt(resolveClearStops(stops), offset));
+            open.grab = { what: "stop", index: stops.length - 1, startX: event.clientX, startY: event.clientY, moved: true, away: false };
+          } else {
+            open.grab = { what: hit.what, index: hit.index, startX: event.clientX, startY: event.clientY, moved: false, away: false };
+          }
+          return;
+        }
+        if (isPaintTool) {
+          const clip = selectionClip();
+          gradientRef.current = { prep, target: "paint", kind: gradient, from: point, to: point, before: {}, base: drawingCopy(prep.image), created: false, frame: null, editing: false, grab: null, clip };
+          moveGradientLine(point, point);
+          return;
+        }
+      }
       if (isPaintTool) {
         paintStrokeRef.current = {
           prep,
@@ -3302,7 +4107,9 @@ export function Editor({
           stroke: createCanvas(width, height),
           opacity: maskOpacity / 100,
           color: paintColor,
-          frame: null
+          frame: null,
+          clip: selectionClip(),
+          erase: eraser
         };
         paintColorSegment(point, point);
         return;
@@ -3320,7 +4127,7 @@ export function Editor({
           hides = false;
           setPrepTarget(prep, mask, hides);
         }
-        gradientRef.current = { prep, kind: gradient, from: point, to: point, before, base: drawingCopy(mask), created, opacity: maskOpacity / 100, frame: null };
+        gradientRef.current = { prep, target: "mask", kind: gradient, from: point, to: point, before, base: drawingCopy(mask), created, frame: null, editing: false, grab: null, clip: selectionClip() };
         moveGradientLine(point, point);
         return;
       }
@@ -3352,11 +4159,14 @@ export function Editor({
         base: drawingCopy(mask),
         stroke: createCanvas(width, height),
         opacity: maskOpacity / 100,
-        frame: null
+        frame: null,
+        clip: selectionClip()
       };
       paintMaskSegment(point, point);
       return;
     }
+    /** In Select, Ctrl+click selects the layer under the pointer, as in Photoshop; a plain click does nothing. */
+    if (!event.ctrlKey) return;
     pickLayerAt(pointFromEvent(event), event.clientX, event.clientY).catch((error) => onNotice({ tone: "error", message: `Could not find the layer at that point: ${String(error)}` }));
   };
 
@@ -3376,16 +4186,48 @@ export function Editor({
   };
 
   const onPointerMove = (event: ReactPointerEvent<HTMLDivElement>) => {
-    const point = pointFromEvent(event);
-    if (pickingColor) {
+    hoverPointRef.current = pointFromEvent(event, false);
+    /** The eyedropper reads the image, so its point stays on the image; a stroke in progress keeps painting. */
+    const eyedropper = pickingColor || (altPicking && !paintStrokeRef.current);
+    const point = pointFromEvent(event, eyedropper);
+    if (eyedropper) {
       moveBrushCursor(null);
       moveColorProbe(point);
+      return;
+    }
+    const marqueeMove = marqueeDragRef.current;
+    if (marqueeMove && event.currentTarget.hasPointerCapture(event.pointerId)) {
+      /**
+       * While dragging, Ctrl+Shift makes a square or circle and Ctrl+Alt
+       * draws from the center; Shift and Alt alone wait for the release.
+       */
+      marqueeMove.current = point;
+      marqueeMove.even = event.ctrlKey && event.shiftKey;
+      marqueeMove.centered = event.ctrlKey && event.altKey;
+      setMarqueeDrag({ ...marqueeBox(marqueeMove.start, point, marqueeMove.even, marqueeMove.centered), shape: marqueeMove.shape });
       return;
     }
     if (isMaskTool || isPaintTool) {
       const drag = gradientRef.current;
       if (drag) {
         if (!event.currentTarget.hasPointerCapture(event.pointerId)) return;
+        const grab = drag.grab;
+        if (drag.editing) {
+          if (!grab) return;
+          /** A few pixels of movement turn the press into a drag. */
+          if (!grab.moved && Math.hypot(event.clientX - grab.startX, event.clientY - grab.startY) < 3) return;
+          grab.moved = true;
+          if (grab.what === "from") drag.from = point;
+          else if (grab.what === "to") drag.to = point;
+          else {
+            const { offset, distance } = projectOnLine(drag.from, drag.to, point);
+            grab.away = distance * cssScale > STOP_REMOVE_DISTANCE;
+            changeStop(drag.target, grab.index, { offset: clampMiddleOffset(offset) });
+          }
+          showGradientEdit(drag);
+          drawGradientDrag(drag);
+          return;
+        }
         drag.to = point;
         moveGradientLine(drag.from, point);
         drawGradientDrag(drag);
@@ -3412,7 +4254,7 @@ export function Editor({
         if (freshCorner && Math.hypot(point.x - freshCorner.x, point.y - freshCorner.y) * cssScale > LASSO_GRAB_REACH) lassoFreshRef.current = null;
         hoverLasso(point);
       }
-      moveBrushCursor(gradient || lasso ? null : point);
+      moveBrushCursor(gradient || lasso || marquee ? null : point);
       const paintStroke = paintStrokeRef.current;
       if (paintStroke) {
         if (!event.currentTarget.hasPointerCapture(event.pointerId)) return;
@@ -3430,22 +4272,62 @@ export function Editor({
   };
 
   const onPointerUp = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const marqueeEnd = marqueeDragRef.current;
+    if (marqueeEnd) {
+      if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
+      marqueeDragRef.current = null;
+      setMarqueeDrag(null);
+      if (event.type !== "pointerup") return;
+      const box = marqueeBox(marqueeEnd.start, marqueeEnd.current, marqueeEnd.even, marqueeEnd.centered);
+      /** The keys held when letting go decide: Shift adds to the selection, Alt takes from it; with Ctrl they shaped the drag instead. */
+      const mode: SelectMode = event.ctrlKey ? "replace" : event.altKey ? "subtract" : event.shiftKey ? "add" : "replace";
+      /** A click without a drag drops the selection, as in Photoshop. */
+      if (Math.hypot(event.clientX - marqueeEnd.startX, event.clientY - marqueeEnd.startY) < 3 || box.width < 1 || box.height < 1) {
+        if (mode === "replace") changeSelection(null);
+        return;
+      }
+      selectShape((context) => {
+        if (marqueeEnd.shape === "rect") context.rect(box.x, box.y, box.width, box.height);
+        else context.ellipse(box.x + box.width / 2, box.y + box.height / 2, box.width / 2, box.height / 2, 0, 0, Math.PI * 2);
+      }, mode);
+      return;
+    }
     const lassoDrag = lassoDragRef.current;
     if (lassoDrag) {
       if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
       lassoDragRef.current = null;
       /** A press without movement is a click; after a drag, drawing goes on from the last corner. */
       if (!lassoDrag.moved) {
-        if (event.type === "pointerup") lassoClick(lassoDrag.point, lassoDrag.reverse);
+        if (event.type === "pointerup") lassoClick(lassoDrag.point, lassoDrag.reverse, lassoDrag.add);
       } else {
         lassoClickRef.current = null;
       }
-      hoverLasso(pointFromEvent(event));
+      hoverLasso(pointFromEvent(event, false));
       return;
     }
-    if (gradientRef.current) {
+    const gradientDrag = gradientRef.current;
+    if (gradientDrag) {
       if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
-      finishGradientDrag(event.type === "pointerup");
+      if (gradientDrag.editing) {
+        const grab = gradientDrag.grab;
+        gradientDrag.grab = null;
+        if (!grab) return;
+        /** A stop let go far from the line is removed; a click on a stop or an end opens its color. */
+        if (grab.what === "stop" && grab.away) removeStop(gradientDrag.target, grab.index);
+        else if (!grab.moved && event.type === "pointerup") setStopPicker(grab.index);
+        showGradientEdit(gradientDrag);
+        drawGradientDrag(gradientDrag);
+        return;
+      }
+      /** After the drag, the gradient stays open, so its ends and stops can change. */
+      const moved = Math.hypot(gradientDrag.to.x - gradientDrag.from.x, gradientDrag.to.y - gradientDrag.from.y) * cssScale >= 3;
+      if (event.type !== "pointerup" || !moved) {
+        finishGradientDrag(false);
+        return;
+      }
+      gradientDrag.editing = true;
+      moveGradientLine(null);
+      showGradientEdit(gradientDrag);
       return;
     }
     const paintStroke = paintStrokeRef.current;
@@ -3466,6 +4348,23 @@ export function Editor({
       void canvasToDataUrl(mask).then((url) => recordMaskChange({ owner: maskStroke.prep.owner, part: maskStroke.prep.part, before: maskStroke.before, after: { mask: url, hides } }, mask));
     }
   };
+  /**
+   * Presses, moves and releases in the empty work area around the image go
+   * to the lasso, gradient and brush tools too, so their points can lie
+   * outside the image. Events from the image itself are handled there; here
+   * they only bubble past, so they are left alone.
+   */
+  const reachesTool = (isMaskTool || isPaintTool) && !clickSelect && !pickingColor;
+  const onAreaPointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (reachesTool && event.target === event.currentTarget) onPointerDown(event);
+  };
+  const onAreaPointerMove = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (reachesTool && (event.currentTarget.hasPointerCapture(event.pointerId) || event.target === event.currentTarget)) onPointerMove(event);
+  };
+  const onAreaPointerUp = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) onPointerUp(event);
+  };
+
   const exportImage = async (exportSettings: SaveSettings) => {
     const maxWidth = Math.max(0, Math.floor(Number(exportSettings.maxWidth) || 0));
     const maxHeight = Math.max(0, Math.floor(Number(exportSettings.maxHeight) || 0));
@@ -3587,7 +4486,7 @@ export function Editor({
   const regenName = lastStep ? lastStep.name || `Layer ${imageDocument.historyIndex}` : "the original image";
   const regenerate = () => {
     if (!regenStep || !prompt.trim()) return;
-    if (skipRegenConfirm()) void retryLayer(regenStep.id, prompt);
+    if (!confirms("regenerate")) void retryLayer(regenStep.id, prompt);
     else {
       setRegenDontAsk(false);
       setConfirmRegen({ stepId: regenStep.id, instruction: prompt });
@@ -3595,9 +4494,7 @@ export function Editor({
   };
   const confirmRegenerate = () => {
     if (!confirmRegen) return;
-    if (regenDontAsk) {
-      try { localStorage.setItem(SKIP_REGEN_CONFIRM_KEY, "1"); } catch { /* The question comes back next time. */ }
-    }
+    if (regenDontAsk) setConfirms("regenerate", false);
     setConfirmRegen(null);
     void retryLayer(confirmRegen.stepId, confirmRegen.instruction);
   };
@@ -3605,38 +4502,117 @@ export function Editor({
   /** GPT Image models offered for edits: the 2.5 models, plus the current one if it is older. */
   const editModels = IMAGE_MODELS.filter((model) => model.id.startsWith("gpt-image-2.5") || model.id === settings.wholeModel);
 
-  /** The Mask tool in use: the brush, the polygon lasso, or a gradient. */
-  const maskToolKind: "brush" | "lasso" | "linear" | "radial" = lasso ? "lasso" : gradient ?? "brush";
+  /**
+   * A toolbar tool button acts when the mouse button goes down, so the tool
+   * shows as picked at once; Enter or Space (a click with no mouse) still works.
+   */
+  const onPress = (run: () => void) => ({
+    onPointerDown: (event: ReactPointerEvent<HTMLButtonElement>) => {
+      if (event.button === 0) run();
+    },
+    onClick: (event: { detail: number }) => {
+      if (event.detail === 0) run();
+    }
+  });
+  /** The Mask tool in use: the brush, the polygon lasso, rectangle or ellipse select, or a gradient. */
+  const maskToolKind: "brush" | "lasso" | "rect" | "ellipse" | "linear" | "radial" = lasso ? "lasso" : marquee ?? gradient ?? "brush";
   const selectMaskTool = (kind: typeof maskToolKind) => {
     setLasso(kind === "lasso");
     setGradient(kind === "linear" || kind === "radial" ? kind : null);
+    setMarquee(kind === "rect" || kind === "ellipse" ? kind : null);
   };
-  /** The four Mask tools, in toolbar order. Toolbar buttons have no tooltips; the tips below the image explain the tool in use. */
+  /** The Mask tools, in toolbar order, after the Magic Wand. Toolbar buttons have no tooltips; the tips below the image explain the tool in use. */
   const maskTools = [
-    { kind: "brush", label: "Brush", icon: <PaintBrush size={16} /> },
+    { kind: "rect", label: "Rectangle select", icon: <Selection size={16} /> },
+    { kind: "ellipse", label: "Ellipse select", icon: <CircleDashed size={16} /> },
     { kind: "lasso", label: "Polygon lasso", icon: <PolygonLassoIcon /> },
-    { kind: "linear", label: "Linear gradient", icon: <Gradient size={16} /> },
-    { kind: "radial", label: "Radial gradient", icon: <CircleDashed size={16} /> }
+    { kind: "brush", label: "Brush", icon: <PaintBrush size={16} /> },
+    { kind: "linear", label: "Linear gradient", icon: <LinearGradientIcon /> },
+    { kind: "radial", label: "Radial gradient", icon: <RadialGradientIcon /> }
   ] as const;
 
-  /** The Paint tool in use: the brush, or the polygon lasso that fills its shape. */
-  const paintKind: "brush" | "lasso" = lasso ? "lasso" : "brush";
+  /** The Paint tool in use: the brush, the eraser, the polygon lasso, rectangle or ellipse select, or a gradient. */
+  const paintKind: "brush" | "eraser" | "lasso" | "rect" | "ellipse" | "linear" | "radial" = lasso ? "lasso" : marquee ?? gradient ?? (eraser ? "eraser" : "brush");
   /** Picks a Paint tool; a click on the one in use turns the Paint tool off. */
   const selectPaintTool = (kind: typeof paintKind) => {
-    if (isPaintTool && paintKind === kind) {
+    if (isPaintTool && paintKind === kind && !clickSelect) {
       setTool("whole");
       return;
     }
-    if (clickSelect) cancelClickSelect();
+    /** Leaving the Magic Wand for another paint tool keeps its selection. */
+    if (clickSelectRef.current) cancelClickSelect();
     setTool("paint");
-    setGradient(null);
+    setGradient(kind === "linear" || kind === "radial" ? kind : null);
     setLasso(kind === "lasso");
+    setMarquee(kind === "rect" || kind === "ellipse" ? kind : null);
+    setEraser(kind === "eraser");
   };
+  /** The Paint tools in toolbar order, after Select and the Magic Wand. */
   const paintTools = [
+    { kind: "rect", label: "Rectangle select", icon: <Selection size={16} /> },
+    { kind: "ellipse", label: "Ellipse select", icon: <CircleDashed size={16} /> },
+    { kind: "lasso", label: "Paint lasso", icon: <PolygonLassoIcon /> },
     { kind: "brush", label: "Paint brush", icon: <PaintBrush size={16} /> },
-    { kind: "lasso", label: "Paint lasso", icon: <PolygonLassoIcon /> }
+    { kind: "eraser", label: "Eraser", icon: <Eraser size={16} /> },
+    { kind: "linear", label: "Linear gradient", icon: <LinearGradientIcon /> },
+    { kind: "radial", label: "Radial gradient", icon: <RadialGradientIcon /> }
   ] as const;
+  /**
+   * The Magic Wand in the Paint tool selects pixels of a like color in the
+   * image as it shows; Alt+Backspace fills the selection on the selected
+   * layer. A click on it while it is in use turns the Paint tool off.
+   */
+  const paintWandOn = isPaintTool && clickSelect?.engine === "wand";
+  const togglePaintWand = async () => {
+    if (paintWandOn) {
+      cancelClickSelect();
+      setTool("whole");
+      return;
+    }
+    if (clickSelectRef.current) cancelClickSelect();
+    const step = paintTarget();
+    if (!step) return;
+    setTool("paint");
+    await composeRef.current;
+    startWandSelect({ owner: step.id, part: PAINT_PART }, surface);
+  };
+  /**
+   * The start and end colors of the gradient in use, with a button that
+   * swaps them. Their space is always kept, invisible while no gradient is
+   * in use, so the centered tools do not move when a gradient is picked.
+   */
+  const gradientTarget: "mask" | "paint" = isMaskTool ? "mask" : "paint";
+  const renderGradientEnds = (shown: boolean) => {
+    const stops = gradientTarget === "mask" ? maskStops : paintGradientStops;
+    const last = stops.length - 1;
+    return (
+      <span className={`gradient-ends ${shown ? "" : "reserved"}`} aria-hidden={!shown}>
+        {gradientTarget === "mask" && <span className="swatch-label" aria-hidden="true"><span>Start/End Colors</span></span>}
+        {gradientTarget === "mask" && (
+          <ColorPicker grays label="Gradient start" pickFromImage={false} color={stops[0].color} onChange={(color) => changeStop("mask", 0, { color })} open={shown && swatchPicker === "start"} onOpenChange={(open) => setSwatchPicker(open ? "start" : null)} />
+        )}
+        <button className="gradient-swap" onClick={() => swapStops(gradientTarget)} aria-label="Swap start and end">
+          <ArrowsLeftRight size={14} weight="bold" />
+        </button>
+        <ColorPicker
+          grays={gradientTarget === "mask"}
+          label="Gradient end"
+          pickFromImage={false}
+          transparent={gradientTarget === "paint" && stops[last].alpha === 0}
+          onTransparentChange={gradientTarget === "paint" ? (transparent) => changeStop("paint", last, { alpha: transparent ? 0 : 1 }) : undefined}
+          alpha={gradientTarget === "paint" ? Math.round(stops[last].alpha * 100) : undefined}
+          onAlphaChange={gradientTarget === "paint" ? (alpha) => changeStop("paint", last, { alpha: alpha / 100 }) : undefined}
+          color={stops[last].color}
+          onChange={(color) => changeStop(gradientTarget, last, { color })}
+          open={shown && swatchPicker === "end"}
+          onOpenChange={(open) => setSwatchPicker(open ? "end" : null)}
+        />
+      </span>
+    );
+  };
 
+  /** A drag on the Magic Wand's tolerance: where it started and the tolerance then. Up raises it; 2 px is 1. */
+  const toleranceDragRef = useRef<{ pointerId: number; startY: number; startTolerance: number } | null>(null);
   /** A drag on the opacity: where it started and the opacity then. Up raises it; 2 px is 1%. */
   const opacityDragRef = useRef<{ pointerId: number; startY: number; startOpacity: number } | null>(null);
   /** A drag on the brush size: where it started and the radius then. Up makes the brush larger; 80 px doubles it. */
@@ -3658,7 +4634,7 @@ export function Editor({
   };
 
   /**
-   * The settings of the brush, lasso or gradient in use, one per row with its
+   * The settings of the brush or lasso in use, one per row with its
    * label before it: Size (brushes only), Opacity, then Tip (brushes only).
    * Brush Size and Opacity change by a drag up or down on their value.
    */
@@ -3674,7 +4650,6 @@ export function Editor({
             aria-valuemin={4}
             aria-valuemax={2000}
             aria-valuenow={brushRadius * 2}
-            data-help="Brush diameter in image pixels. Drag up or down to change it, or press [ or ]"
             onPointerDown={(event) => {
               if (event.button !== 0) return;
               event.currentTarget.setPointerCapture(event.pointerId);
@@ -3709,7 +4684,6 @@ export function Editor({
         aria-valuemin={1}
         aria-valuemax={100}
         aria-valuenow={maskOpacity}
-        data-help="Brush opacity, 1% to 100%. Drag up or down to change it, or press 1 to 9 and 0"
         onPointerDown={(event) => {
           if (event.button !== 0) return;
           event.currentTarget.setPointerCapture(event.pointerId);
@@ -3729,10 +4703,10 @@ export function Editor({
         <>
           <span className="brush-setting-label">Tip:</span>
           <span className="split-button brush-tip" role="radiogroup" aria-label="Brush tip">
-            <button role="radio" aria-checked={!brushPrecise} className={brushPrecise ? "" : "active"} onClick={() => { if (brushPrecise) toggleBrushPrecise(); }} data-help="Soft tip: the edge gets softer as the brush gets larger (P)">
+            <button role="radio" aria-checked={!brushPrecise} className={brushPrecise ? "" : "active"} onClick={() => { if (brushPrecise) toggleBrushPrecise(); }}>
               Soft
             </button>
-            <button role="radio" aria-checked={brushPrecise} className={brushPrecise ? "active" : ""} onClick={() => { if (!brushPrecise) toggleBrushPrecise(); }} data-help="Precise tip: a thin soft edge at every size (P)">
+            <button role="radio" aria-checked={brushPrecise} className={brushPrecise ? "active" : ""} onClick={() => { if (!brushPrecise) toggleBrushPrecise(); }}>
               Precise
             </button>
           </span>
@@ -3741,43 +4715,130 @@ export function Editor({
     </div>
   );
 
+  /** The Magic Wand's outline as an SVG path in screen pixels; it follows the zoom. */
+  const wandOutline = selection?.outline;
+  const wandScale = selection ? cssScale / selection.scale : 1;
+  /**
+   * Each loop is one closed path, so its dashes flow without a break. Steps
+   * smaller than a screen pixel are smoothed, so a slanted edge is one line.
+   */
+  const wandOutlinePath = useMemo(() => {
+    if (!wandOutline?.length) return "";
+    return wandOutline.map((loop) => {
+      const points = simplifyLoop(loop.map((value) => value * wandScale), 0.75);
+      let path = "";
+      for (let index = 0; index < points.length; index += 2) path += `${index ? "L" : "M"}${Math.round(points[index] * 10) / 10} ${Math.round(points[index + 1] * 10) / 10}`;
+      return `${path}Z`;
+    }).join("");
+  }, [wandOutline, wandScale]);
+  /** The Selection tips card: shown in the Mask, Paint and Select tips only while there is a selection. */
+  const selectionCard = selection ? (
+    <section className="shortcut-card">
+      <div className="shortcut-card-head">Selection</div>
+      <ul>
+        {isMaskTool && <li><kbd>alt</kbd> + <kbd>backspace</kbd> {brushHides ? "hide" : "show"} the selection</li>}
+        <li><kbd>CTRL</kbd> + <kbd>d</kbd> deselect</li>
+        <li><kbd>CTRL</kbd> + <kbd>i</kbd> invert</li>
+        <li><kbd>CTRL</kbd> + <kbd>x</kbd> cut (+ <kbd>shift</kbd>: all layers)</li>
+        <li><kbd>CTRL</kbd> + <kbd>c</kbd> copy, <kbd>CTRL</kbd> + <kbd>v</kbd> paste as a layer</li>
+      </ul>
+    </section>
+  ) : null;
+  /** The Mask tool has only grays, so it never samples colors: an open paint color picker closes. */
+  useEffect(() => {
+    if (isMaskTool && pickingColor) setPickingColor(false);
+  }, [isMaskTool, pickingColor]);
+  /** Pressing Alt shows the color preview where the pointer is; letting go brings the brush ring back there. */
+  useEffect(() => {
+    const point = hoverPointRef.current;
+    if (!point) return;
+    if (altPicking) {
+      moveBrushCursor(null);
+      moveColorProbe({ x: Math.max(0, Math.min(width, point.x)), y: Math.max(0, Math.min(height, point.y)) });
+    } else if (brushLike && !pickingColor) {
+      moveBrushCursor(point);
+    }
+  }, [altPicking]);
+  /**
+   * The tool settings drop-down sits centered under the button of the tool
+   * in use, kept inside the toolbar. It is measured after each render, and
+   * again when the window changes size.
+   */
+  const toolbarRef = useRef<HTMLDivElement>(null);
+  const toolSettingsRef = useRef<HTMLDivElement>(null);
+  const [settingsLeft, setSettingsLeft] = useState<number | null>(null);
+  const [, setLayoutTick] = useState(0);
+  useEffect(() => {
+    const onResize = () => setLayoutTick((tick) => tick + 1);
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, []);
+  useLayoutEffect(() => {
+    const bar = toolbarRef.current;
+    const panel = toolSettingsRef.current;
+    const active = bar?.querySelector<HTMLElement>(".tool-group button.active");
+    if (!bar || !panel || !active) {
+      if (settingsLeft !== null) setSettingsLeft(null);
+      return;
+    }
+    const barBox = bar.getBoundingClientRect();
+    const button = active.getBoundingClientRect();
+    const half = panel.offsetWidth / 2;
+    const left = Math.round(Math.min(barBox.width - half - 4, Math.max(half + 4, button.left + button.width / 2 - barBox.left)));
+    if (left !== settingsLeft) setSettingsLeft(left);
+  });
+  /** The pointer over the image, and over the work area while a tool can use it. */
+  const canvasCursor = pickingColor || altPicking ? EYEDROPPER_CURSOR : clickSelect ? (clickSelect.engine === "wand" ? (erasing ? WAND_SUBTRACT_CURSOR : shiftHeld ? WAND_ADD_CURSOR : WAND_CURSOR) : "crosshair") : brushLike ? "none" : isMaskTool || isPaintTool ? (lasso && lassoPoints.length && (zoomKeys && lassoOverCorner && !lassoDragRef.current ? TRASH_CURSOR : lassoCursor)) || "crosshair" : "default";
+
   return (
     <section className="editor-shell">
-      <div className="editor-toolbar">
-        <div className="toolbar-side" />
-        {/* The tools stay centered; the sides take the rest of the width. */}
-        <div className="toolbar-center">
+      <div className="editor-toolbar" ref={toolbarRef}>
+        {/* Two halves: the tools end at the middle of the toolbar, and the colors start there, so neither moves the other. */}
+        <div className="toolbar-side left">
           {isMaskTool && (
             <div className="tool-section" role="group" aria-label="Mask tools">
               <div className="tool-group icon-buttons mask-tool-picker" role="radiogroup" aria-label="Mask tool">
-                {maskTools.map(({ kind, label, icon }) => (
+                <span className="tool-group-label" aria-hidden="true">Select</span>
+                {/**
+                  * The Magic Wand selects pixels of a like color by clicks on the image, for the mask being painted;
+                  * a second click on it cancels it. Object (the local AI model, action "click-select") is hidden for now.
+                  */}
+                {targetPart && ([
+                  { engine: "wand", label: "Magic wand", action: "wand-select", icon: <MagicWand size={16} /> }
+                ] as const).map(({ engine, label, action, icon }) => (
                   <button
-                    key={kind}
+                    key={engine}
                     role="radio"
-                    aria-checked={maskToolKind === kind && !clickSelect}
+                    aria-checked={clickSelect?.engine === engine}
                     aria-label={label}
-                    className={maskToolKind === kind && !clickSelect ? "active" : ""}
-                    onClick={() => {
-                      if (clickSelect) cancelClickSelect();
-                      selectMaskTool(kind);
-                    }}
+                    className={clickSelect?.engine === engine ? "active" : ""}
+                    disabled={resize !== null}
+                    {...onPress(() => {
+                      const running = clickSelectRef.current;
+                      if (running) cancelClickSelect();
+                      if (running?.engine !== engine) void partAction(imageDocument.historyIndex, targetPart, action);
+                    })}
                   >
                     {icon}
                   </button>
                 ))}
-                {/* Magic selects an area by clicks on the image for the mask being painted; a second click cancels it. */}
-                {targetPart && (
-                  <button
-                    role="radio"
-                    aria-checked={clickSelect !== null}
-                    aria-label="Magic"
-                    className={clickSelect ? "active" : ""}
-                    disabled={resize !== null}
-                    onClick={() => clickSelect ? cancelClickSelect() : void partAction(imageDocument.historyIndex, targetPart, "click-select")}
-                  >
-                    <MagicWand size={16} />
-                  </button>
-                )}
+                {maskTools.map(({ kind, label, icon }) => (
+                  <Fragment key={kind}>
+                    {kind === "brush" && <span className="tool-group-label draw" aria-hidden="true">Draw</span>}
+                    <button
+                      role="radio"
+                      aria-checked={maskToolKind === kind && !clickSelect}
+                      aria-label={label}
+                      className={maskToolKind === kind && !clickSelect ? "active" : ""}
+                      {...onPress(() => {
+                        if (clickSelect) cancelClickSelect();
+                        selectMaskTool(kind);
+                      })}
+                    >
+                      {icon}
+                    </button>
+                  </Fragment>
+                ))}
               </div>
             </div>
           )}
@@ -3785,55 +4846,129 @@ export function Editor({
           {!isMaskTool && (
             <div className="tool-section" role="group" aria-label="Paint">
               <div className="tool-group icon-buttons paint-tool-picker" role="radiogroup" aria-label="Tool">
-                {/* Select: no tool, so a click on the image selects the layer under it. */}
+                <span className="tool-group-label" aria-hidden="true">Select</span>
+                {/* Select: no tool, so Ctrl+click on the image selects the layer under it. */}
                 <button
                   role="radio"
                   aria-checked={tool === "whole"}
                   aria-label="Select"
                   className={tool === "whole" ? "active" : ""}
-                  onClick={() => setTool("whole")}
+                  {...onPress(() => setTool("whole"))}
                 >
                   <Cursor size={16} />
                 </button>
+                <button
+                  role="radio"
+                  aria-checked={paintWandOn}
+                  aria-label="Magic wand"
+                  className={paintWandOn ? "active" : ""}
+                  disabled={resize !== null}
+                  {...onPress(() => void togglePaintWand())}
+                >
+                  <MagicWand size={16} />
+                </button>
                 {paintTools.map(({ kind, label, icon }) => (
-                  <button
-                    key={kind}
-                    role="radio"
-                    aria-checked={isPaintTool && paintKind === kind}
-                    aria-label={label}
-                    className={isPaintTool && paintKind === kind ? "active" : ""}
-                    disabled={resize !== null}
-                    onClick={() => selectPaintTool(kind)}
-                  >
-                    {icon}
-                  </button>
+                  <Fragment key={kind}>
+                    {kind === "brush" && <span className="tool-group-label draw" aria-hidden="true">Draw</span>}
+                    <button
+                      role="radio"
+                      aria-checked={isPaintTool && paintKind === kind && !clickSelect}
+                      aria-label={label}
+                      className={isPaintTool && paintKind === kind && !clickSelect ? "active" : ""}
+                      disabled={resize !== null}
+                      {...onPress(() => selectPaintTool(kind))}
+                    >
+                      {icon}
+                    </button>
+                  </Fragment>
                 ))}
               </div>
-              <ColorPicker color={paintColor} onChange={setPaintColor} open={pickingColor} onOpenChange={setPickingColor} />
+            </div>
+          )}
+        </div>
+        <div className="toolbar-side right">
+          {isMaskTool && (
+            <div className="tool-section" role="group" aria-label="Mask gradient colors">
+              {renderGradientEnds(gradient !== null && !clickSelect)}
+            </div>
+          )}
+          {!isMaskTool && (
+            <div className="tool-section" role="group" aria-label="Paint color">
+              {/* Both labels share one place; the one not in use is invisible, so its width is kept. */}
+              <span className="swatch-label" aria-hidden="true">
+                <span className={isPaintTool && gradient ? "hidden" : ""}>Color</span>
+                <span className={isPaintTool && gradient ? "" : "hidden"}>Start/End Colors</span>
+              </span>
+              <ColorPicker
+                color={paintColor}
+                onChange={setPaintColor}
+                open={pickingColor}
+                onOpenChange={setPickingColor}
+                label={isPaintTool && gradient ? "Gradient start" : "Paint color"}
+                transparent={isPaintTool && gradient !== null && paintStops[0].alpha === 0}
+                onTransparentChange={isPaintTool && gradient ? (transparent) => changeStop("paint", 0, { alpha: transparent ? 0 : 1 }) : undefined}
+                alpha={isPaintTool && gradient ? Math.round(paintStops[0].alpha * 100) : maskOpacity}
+                onAlphaChange={isPaintTool && gradient ? (alpha) => changeStop("paint", 0, { alpha: alpha / 100 }) : setMaskOpacity}
+                minAlpha={isPaintTool && gradient ? 0 : 1}
+              />
+              {renderGradientEnds(isPaintTool && gradient !== null)}
             </div>
           )}
         </div>
         {/* The settings of the tool in use drop down below the toolbar, so the tool buttons never move. */}
-        {(isMaskTool || isPaintTool) && (
-          <div className="tool-settings" role="group" aria-label={isMaskTool ? "Mask tool settings" : "Paint tool settings"}>
-            {isMaskTool && clickSelect ? (
+        {/* Gradients have no settings here: each stop sets its own color and opacity. */}
+        {(isMaskTool || isPaintTool) && (!gradient || clickSelect) && (
+          <div className="tool-settings" ref={toolSettingsRef} style={settingsLeft !== null ? { left: settingsLeft } : undefined} role="group" aria-label={isMaskTool ? "Mask tool settings" : "Paint tool settings"}>
+            {clickSelect ? (
               /** Magic: click the image to select an area, then apply it to the mask; Cancel goes back to the mask brush. */
               <div className="click-select-settings">
                 {clickSelect.busy ? <SpinnerGap className="spin" size={15} /> : null}
-                <span>Magic: click to add · Alt+click to remove · Ctrl+Z undoes a click</span>
-                <button className="click-select-apply" disabled={!clickSelect.mask} onClick={() => void applyClickSelect()} data-help="Apply to the mask (Enter)">
-                  <Check size={15} weight="bold" /> Apply
-                </button>
-                <button onClick={cancelClickSelect} data-help="Cancel (Esc)">
-                  <X size={15} weight="bold" /> Cancel
-                </button>
+                {clickSelect.engine === "wand" && (
+                  <div className="brush-settings">
+                    <span className="brush-setting-label">Tolerance:</span>
+                    <span
+                      className="brush-size-value"
+                      role="slider"
+                      aria-label="Tolerance"
+                      aria-valuemin={0}
+                      aria-valuemax={255}
+                      aria-valuenow={wandTolerance}
+                      onPointerDown={(event) => {
+                        if (event.button !== 0) return;
+                        event.currentTarget.setPointerCapture(event.pointerId);
+                        toleranceDragRef.current = { pointerId: event.pointerId, startY: event.clientY, startTolerance: wandTolerance };
+                      }}
+                      onPointerMove={(event) => {
+                        const drag = toleranceDragRef.current;
+                        if (!drag || drag.pointerId !== event.pointerId) return;
+                        setWandTolerance(drag.startTolerance + (drag.startY - event.clientY) / 2);
+                      }}
+                      onPointerUp={() => { toleranceDragRef.current = null; }}
+                      onPointerCancel={() => { toleranceDragRef.current = null; }}
+                    >
+                      {wandTolerance}
+                    </span>
+                    <label className="wand-contiguous">
+                      <input type="checkbox" checked={wandContiguous} onChange={(event) => setWandContiguous(event.target.checked)} />
+                      Contiguous
+                    </label>
+                  </div>
+                )}
+                {/* A paint selection has no buttons here: Ctrl+D deselects and Esc exits. */}
+                {clickSelect.target.part !== PAINT_PART && (
+                  <>
+                    <button className="click-select-apply" disabled={clickSelect.engine === "wand" ? !selection : !clickSelect.mask} onClick={() => void applyClickSelect()}>
+                      <Check size={15} weight="bold" /> Apply
+                    </button>
+                    <button onClick={cancelClickSelect}>
+                      <X size={15} weight="bold" /> Cancel
+                    </button>
+                  </>
+                )}
               </div>
             ) : brushSettings}
           </div>
         )}
-        <div className="toolbar-side right">
-          <div className="editor-toolbar-spacer" />
-        </div>
       </div>
       <div className="editor-body">
       <div className="editor-workspace-frame">
@@ -3847,7 +4982,18 @@ export function Editor({
           onAuxClick={(event) => event.preventDefault()}
           onScroll={rememberViewCenter}
         >
-          <div className="canvas-scroll-area" style={{ padding: `${panSpaceTop}px ${panSpaceX}px ${panSpaceBottom}px` }}>
+          <div
+            className="canvas-scroll-area"
+            style={{ padding: `${panSpaceTop}px ${panSpaceX}px ${panSpaceBottom}px`, ...(reachesTool ? { cursor: canvasCursor } : {}) }}
+            onPointerDown={onAreaPointerDown}
+            onPointerMove={onAreaPointerMove}
+            onPointerUp={onAreaPointerUp}
+            onPointerCancel={onAreaPointerUp}
+            onPointerLeave={() => {
+              hoverPointRef.current = null;
+              moveBrushCursor(null);
+            }}
+          >
             <div
               ref={stageRef}
               className={`canvas-stage ${displayScale >= 2 ? "pixelated" : ""} ${generating ? "generating" : ""} ${isMaskTool && targetPart ? `mask-editing ${brushHides ? "mask-hides" : "mask-shows"}` : ""}`}
@@ -3876,20 +5022,37 @@ export function Editor({
                   <section className="shortcut-card">
                     <div className="shortcut-card-head">
                       Tool:
-                      <span className={`shortcut-card-status ${maskToolKind !== "brush" || brushPrecise ? "precise-on" : ""}`}><strong>{maskToolKind === "lasso" ? "LASSO" : maskToolKind === "linear" ? "LINEAR GRADIENT" : maskToolKind === "radial" ? "RADIAL GRADIENT" : `${brushPrecise ? "PRECISE" : "SOFT"} BRUSH`}</strong></span>
+                      <span className={`shortcut-card-status ${maskToolKind !== "brush" || brushPrecise ? "precise-on" : ""}`}><strong>{maskToolKind === "lasso" ? "LASSO" : maskToolKind === "rect" ? "RECTANGLE SELECT" : maskToolKind === "ellipse" ? "ELLIPSE SELECT" : maskToolKind === "linear" ? "LINEAR GRADIENT" : maskToolKind === "radial" ? "RADIAL GRADIENT" : `${brushPrecise ? "PRECISE" : "SOFT"} BRUSH`}</strong></span>
                     </div>
                     {gradient ? (
                       <ul>
-                        <li><kbd>drag</kbd> draw the gradient</li>
-                        <li><kbd>1-9</kbd> opacity, <kbd>0</kbd> for 100%</li>
+                        {gradientEdit ? (
+                          <>
+                            <li><kbd>click</kbd> the line to add a stop, a stop to set its gray</li>
+                            <li><kbd>drag</kbd> a stop off the line to remove it</li>
+                            <li><kbd>enter</kbd>, the check, or a <kbd>click</kbd> away to apply, <kbd>esc</kbd> to cancel</li>
+                          </>
+                        ) : <li><kbd>drag</kbd> draw the gradient</li>}
                         <li><kbd>b</kbd> Switch to Brush tool</li>
+                      </ul>
+                    ) : marquee ? (
+                      <ul>
+                        <li><kbd>drag</kbd> draw {marquee === "rect" ? "a rectangle" : "an ellipse"}: new selection</li>
+                        <li><kbd>CTRL</kbd> + <kbd>SHIFT</kbd> (while dragging) {marquee === "rect" ? "square" : "circle"}</li>
+                        <li><kbd>CTRL</kbd> + <kbd>ALT</kbd> (while dragging) from the center</li>
+                        <li><kbd>SHIFT</kbd> (when letting go) add to selection</li>
+                        <li><kbd>ALT</kbd> (when letting go) subtract from selection</li>
+                        <li><kbd>click</kbd> deselect, <kbd>CTRL</kbd> + <kbd>z</kbd> undo last selection</li>
                       </ul>
                     ) : lasso ? (
                       <ul>
+                        <li><kbd>click</kbd> add a point or close shape</li>
+                        <li><kbd>SHIFT</kbd> (when closing) add to selection</li>
+                        <li><kbd>ALT</kbd> (when closing) subtract from selection</li>
+                        <li><kbd>CTRL</kbd> + <kbd>z</kbd> undo last selection</li>
                         <li><kbd>drag</kbd> move a point</li>
                         <li><kbd>CTRL</kbd> + <kbd>click</kbd> delete a point</li>
-                        <li><kbd>1-9</kbd> opacity, <kbd>0</kbd> for 100%</li>
-                        <li><kbd>b</kbd> Switch to Brush tool</li>
+                        <li><kbd>B</kbd> switch to Brush tool</li>
                       </ul>
                     ) : (
                       <ul>
@@ -3897,24 +5060,97 @@ export function Editor({
                         <li><kbd>[</kbd> <kbd>]</kbd> size</li>
                         <li><kbd>1-9</kbd> opacity, <kbd>0</kbd> for 100%</li>
                         <li><kbd>l</kbd> Switch to Lasso tool</li>
+                        <li><kbd>W</kbd> switch to Magic Wand</li>
                       </ul>
                     )}
                   </section>
+                  {selectionCard}
                 </div>
               )}
-              {isPaintTool && (
+              {clickSelect && ((isMaskTool && targetPart) || isPaintTool) && (
+                <div className="mask-shortcuts cards" role="group" aria-label="Magic shortcuts">
+                  <section className="shortcut-card">
+                    <div className="shortcut-card-head">
+                      Tool:
+                      <span className="shortcut-card-status precise-on"><strong>{clickSelect.engine === "wand" ? "MAGIC WAND" : "OBJECT (AI)"}</strong></span>
+                    </div>
+                    <ul>
+                      {clickSelect.engine === "wand" ? (
+                        <>
+                          <li><kbd>click</kbd> new selection</li>
+                          <li><kbd>SHIFT</kbd> + <kbd>click</kbd> add to selection</li>
+                          <li><kbd>ALT</kbd> + <kbd>click</kbd> subtract from selection</li>
+                          <li><kbd>CTRL</kbd> + <kbd>z</kbd> undo last selection</li>
+                          <li><kbd>CTRL</kbd> + <kbd>d</kbd> deselect all</li>
+                          <li><kbd>CTRL</kbd> + <kbd>i</kbd> invert the selection</li>
+                          {clickSelect.target.part === PAINT_PART ? (
+                            <>
+                              <li><kbd>ALT</kbd> + <kbd>BACKSPACE</kbd> fill selection with color</li>
+                              <li><kbd>ESC</kbd> {selection ? "deselect" : "exit to pointer"}</li>
+                            </>
+                          ) : (
+                            <>
+                              <li><kbd>ENTER</kbd> set the mask to the selection</li>
+                              <li><kbd>ESC</kbd> {selection ? "deselect" : "cancel"}</li>
+                            </>
+                          )}
+                        </>
+                      ) : (
+                        <>
+                          <li><kbd>click</kbd> add an area</li>
+                          <li><kbd>alt</kbd> + <kbd>click</kbd> remove an area</li>
+                          <li><kbd>CTRL</kbd> + <kbd>z</kbd> undo a click</li>
+                          <li><kbd>enter</kbd> apply, <kbd>esc</kbd> cancel</li>
+                        </>
+                      )}
+                    </ul>
+                  </section>
+                  {clickSelect.engine === "wand" && (
+                    <section className="shortcut-card">
+                      <div className="shortcut-card-head">Tips</div>
+                      <ul>
+                        <li>Adjust tolerance after selecting to fine-tune</li>
+                      </ul>
+                    </section>
+                  )}
+                </div>
+              )}
+              {isPaintTool && !clickSelect && (
                 <div className="mask-shortcuts cards" role="group" aria-label="Paint shortcuts">
                   <section className="shortcut-card">
                     <div className="shortcut-card-head">
                       Tool:
-                      <span className={`shortcut-card-status ${lasso || brushPrecise ? "precise-on" : ""}`}><strong>{lasso ? "LASSO" : `${brushPrecise ? "PRECISE" : "SOFT"} BRUSH`}</strong></span>
+                      <span className={`shortcut-card-status ${lasso || marquee || gradient || brushPrecise ? "precise-on" : ""}`}><strong>{lasso ? "LASSO" : marquee === "rect" ? "RECTANGLE SELECT" : marquee ? "ELLIPSE SELECT" : gradient === "radial" ? "RADIAL GRADIENT" : gradient ? "LINEAR GRADIENT" : `${brushPrecise ? "PRECISE" : "SOFT"} ${eraser ? "ERASER" : "BRUSH"}`}</strong></span>
                     </div>
-                    {lasso ? (
+                    {gradient ? (
                       <ul>
+                        {gradientEdit ? (
+                          <>
+                            <li><kbd>click</kbd> the line to add a stop, a stop to set its color</li>
+                            <li><kbd>drag</kbd> a stop off the line to remove it</li>
+                            <li><kbd>enter</kbd>, the check, or a <kbd>click</kbd> away to apply, <kbd>esc</kbd> to cancel</li>
+                          </>
+                        ) : <li><kbd>drag</kbd> draw the gradient</li>}
+                        <li><kbd>b</kbd> Switch to Brush tool</li>
+                      </ul>
+                    ) : marquee ? (
+                      <ul>
+                        <li><kbd>drag</kbd> draw {marquee === "rect" ? "a rectangle" : "an ellipse"}: new selection</li>
+                        <li><kbd>CTRL</kbd> + <kbd>SHIFT</kbd> (while dragging) {marquee === "rect" ? "square" : "circle"}</li>
+                        <li><kbd>CTRL</kbd> + <kbd>ALT</kbd> (while dragging) from the center</li>
+                        <li><kbd>SHIFT</kbd> (when letting go) add to selection</li>
+                        <li><kbd>ALT</kbd> (when letting go) subtract from selection</li>
+                        <li><kbd>click</kbd> deselect, <kbd>CTRL</kbd> + <kbd>z</kbd> undo last selection</li>
+                      </ul>
+                    ) : lasso ? (
+                      <ul>
+                        <li><kbd>click</kbd> add a point or close shape</li>
+                        <li><kbd>SHIFT</kbd> (when closing) add to selection</li>
+                        <li><kbd>ALT</kbd> (when closing) subtract from selection</li>
+                        <li><kbd>CTRL</kbd> + <kbd>z</kbd> undo last selection</li>
                         <li><kbd>drag</kbd> move a point</li>
                         <li><kbd>CTRL</kbd> + <kbd>click</kbd> delete a point</li>
-                        <li><kbd>1-9</kbd> opacity, <kbd>0</kbd> for 100%</li>
-                        <li><kbd>b</kbd> Switch to Brush tool</li>
+                        <li><kbd>B</kbd> switch to Brush tool</li>
                       </ul>
                     ) : (
                       <ul>
@@ -3922,17 +5158,20 @@ export function Editor({
                         <li><kbd>[</kbd> <kbd>]</kbd> size</li>
                         <li><kbd>1-9</kbd> opacity, <kbd>0</kbd> for 100%</li>
                         <li><kbd>l</kbd> Switch to Lasso tool</li>
+                        <li><kbd>W</kbd> switch to Magic Wand</li>
                       </ul>
                     )}
                   </section>
                   <section className="shortcut-card">
                     <div className="shortcut-card-head">Paint</div>
                     <ul>
-                      <li><kbd>alt</kbd> + <kbd>backspace</kbd> fill {lasso ? "the shape, or the layer" : "the layer"}</li>
-                      {!lasso && <li><kbd>alt</kbd> + <kbd>click</kbd> pick a color</li>}
+                      <li><kbd>alt</kbd> + <kbd>backspace</kbd> fill with color</li>
+                      {!selection && <li><kbd>CTRL</kbd> + <kbd>a</kbd> select all</li>}
+                      {brushLike && !eraser && <li><kbd>alt</kbd> + <kbd>click</kbd> pick a color</li>}
                       <li><kbd>esc</kbd> Exit paint</li>
                     </ul>
                   </section>
+                  {selectionCard}
                 </div>
               )}
               {resize && (
@@ -3961,16 +5200,27 @@ export function Editor({
                   <section className="shortcut-card">
                     <div className="shortcut-card-head">Layer</div>
                     <ul>
-                      <li><kbd>click</kbd> select a layer</li>
+                      <li><kbd>CTRL</kbd> + <kbd>click</kbd> select a layer</li>
+                      {!selection && <li><kbd>CTRL</kbd> + <kbd>a</kbd> select all</li>}
+                      <li><kbd>W</kbd> Magic Wand</li>
                       <li><kbd>m</kbd> Mask (add/edit)</li>
                       <li><kbd>CTRL</kbd> + <kbd>T</kbd> transform</li>
                       <li><kbd>CTRL</kbd> + <kbd>J</kbd> duplicate</li>
                       <li><kbd>del</kbd> delete</li>
                     </ul>
                   </section>
+                  {selectionCard}
                 </div>
               )}
               <canvas ref={layerMaskCanvasRef} className={`mask-preview ${isMaskTool ? "" : "hidden"}`} aria-hidden="true" />
+              {/* The rectangle or ellipse being dragged, as marching ants. */}
+              {marqueeDrag && (
+                <svg className="lasso-shape" width={width * cssScale} height={height * cssScale} aria-hidden="true">
+                  {(["lasso-edge-shadow", "lasso-edge"] as const).map((className) => marqueeDrag.shape === "rect"
+                    ? <rect key={className} className={className} x={marqueeDrag.x * cssScale} y={marqueeDrag.y * cssScale} width={marqueeDrag.width * cssScale} height={marqueeDrag.height * cssScale} />
+                    : <ellipse key={className} className={className} cx={(marqueeDrag.x + marqueeDrag.width / 2) * cssScale} cy={(marqueeDrag.y + marqueeDrag.height / 2) * cssScale} rx={(marqueeDrag.width / 2) * cssScale} ry={(marqueeDrag.height / 2) * cssScale} />)}
+                </svg>
+              )}
               {/* The lasso shape so far: its edges, a line to the pointer, and its corners; the first corner is larger, as the place to close it. */}
               {(isMaskTool || isPaintTool) && lasso && lassoPoints.length > 0 && (
                 <svg className="lasso-shape" width={width * cssScale} height={height * cssScale} aria-hidden="true">
@@ -3993,12 +5243,98 @@ export function Editor({
                 <circle className="gradient-line-end" r={5} />
                 <circle className="gradient-line-ring" />
               </svg>
+              {gradientEdit && (() => {
+                const stops = gradientEdit.target === "mask" ? maskStops : paintGradientStops;
+                const last = stops.length - 1;
+                const at = (point: Point) => ({ x: point.x * cssScale, y: point.y * cssScale });
+                const start = at(gradientEdit.from);
+                const end = at(gradientEdit.to);
+                const place = (index: number) => at(pointOnLine(gradientEdit.from, gradientEdit.to, index === 0 ? 0 : index === last ? 1 : stops[index].offset));
+                const pickerStop = stopPicker !== null ? stops[stopPicker] : undefined;
+                const pickerAt = stopPicker !== null && pickerStop ? place(stopPicker) : null;
+                return (
+                  <>
+                    <svg className="gradient-edit" width={width * cssScale} height={height * cssScale} aria-hidden="true">
+                      {gradientEdit.kind === "radial" && <circle className="gradient-line-ring" cx={start.x} cy={start.y} r={Math.hypot(end.x - start.x, end.y - start.y)} />}
+                      <line className="gradient-line-shadow" x1={start.x} y1={start.y} x2={end.x} y2={end.y} />
+                      <line className="gradient-line-main" x1={start.x} y1={start.y} x2={end.x} y2={end.y} />
+                      {stops.map((stop, index) => {
+                        const point = place(index);
+                        const isEnd = index === 0 || index === last;
+                        const className = `gradient-stop ${isEnd ? "end" : ""} ${gradientEdit.awayIndex === index ? "away" : ""} ${stopPicker === index ? "selected" : ""}`;
+                        return (
+                          <g key={index} className={className}>
+                            {isEnd
+                              ? <rect x={point.x - 7} y={point.y - 7} width={14} height={14} rx={3} fill={stop.color} />
+                              : <circle cx={point.x} cy={point.y} r={6} fill={stop.color} />}
+                            {stop.alpha === 0 && <line className="gradient-stop-clear" x1={point.x - 5} y1={point.y + 5} x2={point.x + 5} y2={point.y - 5} />}
+                          </g>
+                        );
+                      })}
+                    </svg>
+                    {/**
+                      * The check near the end point applies the gradient; it reminds that the gradient is not applied yet.
+                      * It sits past the end point, or beside it (either side), or before it: the first place inside the image.
+                      */}
+                    {(() => {
+                      const length = Math.hypot(end.x - start.x, end.y - start.y) || 1;
+                      const dx = (end.x - start.x) / length;
+                      const dy = (end.y - start.y) / length;
+                      const margin = GRADIENT_APPLY_GAP / 2 + 4;
+                      const imageWidth = width * cssScale;
+                      const imageHeight = height * cssScale;
+                      const inside = (point: Point) => point.x >= margin && point.x <= imageWidth - margin && point.y >= margin && point.y <= imageHeight - margin;
+                      const places = [[dx, dy], [-dy, dx], [dy, -dx], [-dx, -dy]].map(([x, y]) => ({ x: end.x + x * GRADIENT_APPLY_GAP, y: end.y + y * GRADIENT_APPLY_GAP }));
+                      const place = places.find(inside) ?? places[0];
+                      const left = Math.min(imageWidth - margin, Math.max(margin, place.x));
+                      const top = Math.min(imageHeight - margin, Math.max(margin, place.y));
+                      return (
+                        <button className="gradient-apply" style={{ left, top }} onPointerDown={(event) => event.stopPropagation()} onClick={() => finishGradientDrag(true)} aria-label="Apply gradient" data-help="Apply the gradient (Enter)">
+                          <Check size={16} weight="bold" />
+                        </button>
+                      );
+                    })()}
+                    {pickerStop && pickerAt && stopPicker !== null && (
+                      <div className="gradient-stop-picker" style={{ left: pickerAt.x, top: pickerAt.y + 10 }} onPointerDown={(event) => event.stopPropagation()}>
+                        <ColorPicker
+                          hideSwatch
+                          grays={gradientEdit.target === "mask"}
+                          label="Gradient stop"
+                          pickFromImage={false}
+                          color={pickerStop.color}
+                          onChange={(color) => changeStop(gradientEdit.target, stopPicker, { color })}
+                          open
+                          onOpenChange={(open) => { if (!open) setStopPicker(null); }}
+                          transparent={gradientEdit.target === "paint" && pickerStop.alpha === 0}
+                          onTransparentChange={gradientEdit.target === "paint" ? (transparent) => changeStop("paint", stopPicker, { alpha: transparent ? 0 : 1 }) : undefined}
+                          alpha={gradientEdit.target === "paint" ? Math.round(pickerStop.alpha * 100) : undefined}
+                          onAlphaChange={gradientEdit.target === "paint" ? (alpha) => changeStop("paint", stopPicker, { alpha: alpha / 100 }) : undefined}
+                        >
+                          {stopPicker > 0 && stopPicker < last && (
+                            <button className="color-remove" onClick={() => { removeStop(gradientEdit.target, stopPicker); setStopPicker(null); }}>Remove stop</button>
+                          )}
+                        </ColorPicker>
+                      </div>
+                    )}
+                  </>
+                );
+              })()}
+              {/* The selection's marching ants, in every tool. */}
+              {selection && (
+                <div className="click-select-layer" aria-hidden="true">
+                  <svg className="wand-outline" width={width * cssScale} height={height * cssScale}>
+                    <path className="lasso-edge-shadow" d={wandOutlinePath} />
+                    <path className="lasso-edge" d={wandOutlinePath} />
+                  </svg>
+                </div>
+              )}
               {clickSelect && (
                 <div className="click-select-layer" aria-hidden="true">
-                  {clickSelect.mask && (
+                  {/* Object shows its area in red; the Magic Wand's selection shows as marching ants above. */}
+                  {clickSelect.engine === "sam" && clickSelect.mask && (
                     <div className="click-select-mask" style={{ WebkitMaskImage: `url(${clickSelect.mask.src})`, maskImage: `url(${clickSelect.mask.src})` }} />
                   )}
-                  {clickSelect.points.map((point, index) => (
+                  {clickSelect.engine === "sam" && clickSelect.points.map((point, index) => (
                     <i
                       key={index}
                       className={`click-select-point ${point.include ? "include" : "exclude"}`}
@@ -4048,19 +5384,31 @@ export function Editor({
                           height: job.sent.height * cssScale
                         }}
                       />
-                      <button
-                        className="partial-capture"
-                        disabled={job.snapped === job.partialDataUrl}
-                        onPointerDown={(event) => event.stopPropagation()}
-                        onClick={() => void snapshotPartial(job)}
-                        data-help="Save this preview as a new layer before GPT Image replaces it"
-                      >
-                        <Camera size={15} weight="bold" /> {job.snapped === job.partialDataUrl ? "Captured" : "Capture"}
-                      </button>
+                      <div className="partial-actions">
+                        <button
+                          className="partial-capture"
+                          disabled={job.snapped === job.partialDataUrl}
+                          onPointerDown={(event) => event.stopPropagation()}
+                          onClick={() => void snapshotPartial(job)}
+                          data-help="Save this preview as a new layer before GPT Image replaces it"
+                        >
+                          <Camera size={15} weight="bold" /> {job.snapped === job.partialDataUrl ? "Captured" : "Capture"}
+                        </button>
+                        {(canCancel(job.stage) || canAbort(job.stage)) && (
+                          <button
+                            className="button secondary"
+                            onPointerDown={(event) => event.stopPropagation()}
+                            onClick={() => cancelJob(job.requestId)}
+                            data-help={canCancel(job.stage) ? undefined : "Stop waiting and discard this image. OpenAI still charges for it."}
+                          >
+                            <StopCircle size={15} weight="bold" /> {canCancel(job.stage) ? "Cancel" : "Abort"}
+                          </button>
+                        )}
+                      </div>
                     </div>
                   )}
                   <div className="selection-frame working" style={frameStyle(job.frame)}>
-                    <div className="selection-progress" role="status">
+                    {!job.partialDataUrl && <div className="selection-progress" role="status">
                       <SpinnerGap className="spin" size={22} />
                       <strong>
                         {stageLabel(job.stage, job.service)}
@@ -4077,27 +5425,28 @@ export function Editor({
                           <StopCircle size={15} weight="bold" /> {canCancel(job.stage) ? "Cancel" : "Abort"}
                         </button>
                       )}
-                    </div>
+                    </div>}
                   </div>
                 </div>
               ))}
               {brushLike && (
                 <div
                   ref={brushCursorRef}
-                  className={`brush-cursor ${brushHides ? "erasing" : ""} ${spaceHeld || panning ? "pan-hidden" : ""}`}
+                  className={`brush-cursor ${brushHides || (isPaintTool && eraser) ? "erasing" : ""} ${spaceHeld || panning || altPicking ? "pan-hidden" : ""}`}
                   aria-hidden="true"
                   style={{ left: 0, top: 0, width: brushDiameter, height: brushDiameter }}
                 />
               )}
-              {pickingColor && <div ref={colorProbeRef} className="color-probe" style={{ display: "none" }} aria-hidden="true" />}
+              {(pickingColor || altPicking) && <div ref={colorProbeRef} className="color-probe" style={{ display: "none" }} aria-hidden="true" />}
               <div
                 className="interaction-layer"
-                style={{ cursor: pickingColor ? EYEDROPPER_CURSOR : clickSelect ? "crosshair" : brushLike ? "none" : isMaskTool || isPaintTool ? (lasso && lassoPoints.length && (zoomKeys && lassoOverCorner && !lassoDragRef.current ? TRASH_CURSOR : lassoCursor)) || "crosshair" : "default" }}
+                style={{ cursor: canvasCursor }}
                 onPointerDown={onPointerDown}
                 onPointerMove={onPointerMove}
                 onPointerUp={onPointerUp}
                 onPointerCancel={onPointerUp}
                 onPointerLeave={() => {
+                  hoverPointRef.current = null;
                   moveBrushCursor(null);
                   moveColorProbe(null);
                 }}
@@ -4290,12 +5639,17 @@ export function Editor({
           >
             <div className="confirm-icon"><WarningCircle size={22} weight="fill" /></div>
             <div className="confirm-copy">
-              <h2 id="discard-steps-title">Delete {confirmDelete.length} layers?</h2>
-              <p>The selected layers are removed from the image and from the layers list. You can undo this from the message that follows.</p>
+              <h2 id="discard-steps-title">Delete {confirmDelete.length} Layers?</h2>
+              <p>Delete layers <strong>{confirmDelete.map((node) => imageDocument.history[node - 1]?.name || `Layer ${node}`).join(", ")}</strong>?</p>
+              <p>You can undo this if needed.</p>
+              <label className="confirm-check">
+                <input type="checkbox" checked={deleteDontAsk} onChange={(event) => setDeleteDontAsk(event.target.checked)} />
+                Don't show again
+              </label>
             </div>
             <div className="confirm-actions">
               <button autoFocus className="button secondary" onClick={() => setConfirmDelete(null)}>Cancel</button>
-              <button className="button danger" onClick={() => deleteLayers(confirmDelete)}>Delete {confirmDelete.length} layers</button>
+              <button className="button destructive" onClick={() => confirmDeleteLayers(confirmDelete)}><Trash size={16} weight="bold" /> Delete {confirmDelete.length} layers</button>
             </div>
           </div>
         </div>
@@ -4312,12 +5666,17 @@ export function Editor({
           >
             <div className="confirm-icon"><WarningCircle size={22} weight="fill" /></div>
             <div className="confirm-copy">
-              <h2 id="discard-step-title">Delete {imageDocument.history[confirmDelete[0] - 1].name || `Layer ${confirmDelete[0]}`}?</h2>
-              <p>“{imageDocument.history[confirmDelete[0] - 1].name || imageDocument.history[confirmDelete[0] - 1].prompt}” is removed from the image and from the layers list. You can undo this from the message that follows.</p>
+              <h2 id="discard-step-title">Delete Layer?</h2>
+              <p>Delete layer <strong>{imageDocument.history[confirmDelete[0] - 1].name || `Layer ${confirmDelete[0]}`}</strong>?</p>
+              <p>You can undo this if needed.</p>
+              <label className="confirm-check">
+                <input type="checkbox" checked={deleteDontAsk} onChange={(event) => setDeleteDontAsk(event.target.checked)} />
+                Don't show again
+              </label>
             </div>
             <div className="confirm-actions">
               <button autoFocus className="button secondary" onClick={() => setConfirmDelete(null)}>Cancel</button>
-              <button className="button danger" onClick={() => deleteLayers(confirmDelete)}>Delete layer</button>
+              <button className="button destructive" onClick={() => confirmDeleteLayers(confirmDelete)}><Trash size={16} weight="bold" /> Delete layer</button>
             </div>
           </div>
         </div>
@@ -4335,7 +5694,8 @@ export function Editor({
             <div className="confirm-icon"><WarningCircle size={22} weight="fill" /></div>
             <div className="confirm-copy">
               <h2 id="regenerate-confirm-title">Overwrite this layer by regenerating it from scratch?</h2>
-              <p>“{confirmRegenStep.name || confirmRegenStep.prompt}” is replaced by a new GPT Image result. The old layer comes back if it fails or you cancel.</p>
+              <p className="confirm-name">{confirmRegenStep.name || confirmRegenStep.prompt}</p>
+              <p>This layer is replaced by a new GPT Image result. The old layer comes back if it fails or you cancel.</p>
               {hasMaskOrAdjust(confirmRegenStep) && <p>Its layer mask and adjustments are removed, because they were made for the old image. Undo brings them back.</p>}
               <label className="confirm-check">
                 <input type="checkbox" checked={regenDontAsk} onChange={(event) => setRegenDontAsk(event.target.checked)} />
@@ -4370,9 +5730,11 @@ export function Editor({
                 onPointerLeave={() => setLayerPickHover((current) => current === node ? null : current)}
                 onFocus={() => setLayerPickHover(node)}
                 onBlur={() => setLayerPickHover((current) => current === node ? null : current)}
-                onClick={() => {
+                onClick={(event) => {
                   setLayerPick(null);
                   selectLayer(node);
+                  /** Ctrl+click also selects the layer's pixels, as Ctrl+click on its thumbnail in the layers panel does. */
+                  if (event.ctrlKey && node > 0) void partAction(node, "mask", "select-pixels");
                 }}
               >
                 <span className="layer-pick-thumb">{thumbnail && <img src={thumbnail} alt="" />}</span>

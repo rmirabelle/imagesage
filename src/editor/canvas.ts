@@ -359,12 +359,22 @@ export function layerThumbnail(layer: LayerCanvases, maxSide = 168) {
   return thumbnailOf(full, maxSide);
 }
 
+/** A canvas gradient along the line (linear), or out from `from` to the radius at `to` (radial), with these CSS color stops. */
+function canvasGradient(context: CanvasRenderingContext2D, kind: "linear" | "radial", from: Point, to: Point, stops: { offset: number; color: string }[]) {
+  const radius = Math.hypot(to.x - from.x, to.y - from.y);
+  const gradient = kind === "linear"
+    ? context.createLinearGradient(from.x, from.y, to.x, to.y)
+    : context.createRadialGradient(from.x, from.y, 0, from.x, from.y, Math.max(1, radius));
+  for (const stop of [...stops].sort((a, b) => a.offset - b.offset)) gradient.addColorStop(Math.min(1, Math.max(0, stop.offset)), stop.color);
+  return gradient;
+}
+
 /**
- * Writes a gradient into a mask: the part shows (or applies) fully at `from`
- * and not at all at `to`. A linear gradient runs along the line; a radial one
- * fades out from the center `from` to the radius at `to`. With `opacity`
+ * Writes a gradient into a mask. Each stop says how much the part shows (or
+ * applies) there, 0 to 1. A linear gradient runs along the line; a radial
+ * one goes out from the center `from` to the radius at `to`. With `opacity`
  * below 1, the gradient is mixed with `base`, the mask before the drag. For a
- * mask that `hides`, alpha means hidden, so the gradient runs the other way.
+ * mask that `hides`, alpha means hidden, so each stop is turned around.
  */
 export function drawMaskGradient(
   mask: HTMLCanvasElement,
@@ -372,16 +382,12 @@ export function drawMaskGradient(
   kind: "linear" | "radial",
   from: Point,
   to: Point,
+  stops: { offset: number; shows: number }[],
   opacity: number,
   hides: boolean
 ) {
   const context = mask.getContext("2d")!;
-  const radius = Math.hypot(to.x - from.x, to.y - from.y);
-  const gradient = kind === "linear"
-    ? context.createLinearGradient(from.x, from.y, to.x, to.y)
-    : context.createRadialGradient(from.x, from.y, 0, from.x, from.y, Math.max(1, radius));
-  gradient.addColorStop(0, hides ? "rgba(255,255,255,0)" : "#fff");
-  gradient.addColorStop(1, hides ? "#fff" : "rgba(255,255,255,0)");
+  const gradient = canvasGradient(context, kind, from, to, stops.map(({ offset, shows }) => ({ offset, color: `rgba(255,255,255,${hides ? 1 - shows : shows})` })));
   context.save();
   context.globalCompositeOperation = "copy";
   context.globalAlpha = 1 - opacity;
@@ -391,6 +397,46 @@ export function drawMaskGradient(
   context.globalAlpha = opacity;
   context.fillStyle = gradient;
   context.fillRect(0, 0, mask.width, mask.height);
+  context.restore();
+}
+
+/**
+ * Sets a layer image to `base` with a color gradient painted over it at
+ * `opacity`; transparent stops leave `base` showing. With `clip`, the
+ * gradient shows only where `clip.mask` (any size; it is stretched over the
+ * image) has alpha; `clip.scratch` is a canvas of the image size to draw in.
+ */
+export function drawPaintGradient(
+  image: HTMLCanvasElement,
+  base: HTMLCanvasElement,
+  kind: "linear" | "radial",
+  from: Point,
+  to: Point,
+  stops: { offset: number; color: string }[],
+  opacity: number,
+  clip?: { mask: HTMLCanvasElement; scratch: HTMLCanvasElement }
+) {
+  const context = image.getContext("2d")!;
+  context.save();
+  context.globalCompositeOperation = "copy";
+  context.drawImage(base, 0, 0);
+  context.globalCompositeOperation = "source-over";
+  context.globalAlpha = opacity;
+  if (clip) {
+    const scratch = clip.scratch.getContext("2d")!;
+    scratch.save();
+    scratch.globalCompositeOperation = "copy";
+    scratch.fillStyle = canvasGradient(scratch, kind, from, to, stops);
+    scratch.fillRect(0, 0, image.width, image.height);
+    scratch.globalCompositeOperation = "destination-in";
+    scratch.imageSmoothingEnabled = true;
+    scratch.drawImage(clip.mask, 0, 0, image.width, image.height);
+    scratch.restore();
+    context.drawImage(clip.scratch, 0, 0);
+  } else {
+    context.fillStyle = canvasGradient(context, kind, from, to, stops);
+    context.fillRect(0, 0, image.width, image.height);
+  }
   context.restore();
 }
 

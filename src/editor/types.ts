@@ -91,6 +91,25 @@ export interface EditStep {
   cost?: number;
   /** The area the tiles cover when it is not the selection square; a whole-image edit covers the whole image. */
   area?: Rect;
+  /** The layer before its transforms, so Transform can bring back pixels moved past the image edge. */
+  transformSource?: TransformSource;
+}
+
+/**
+ * A transformed layer's pixels and masks from before its first transform
+ * (PNG data URLs; adjustment masks by adjustment id), the total transform
+ * since then, and `made`: a short fingerprint of the layer and masks that
+ * total transform drew. A later change to the layer (paint, a cut, a mask
+ * stroke) no longer matches `made`, so the next transform starts again from
+ * the layer as it is.
+ */
+export interface TransformSource {
+  layer: string;
+  layerMask?: string;
+  adjustMasks?: Record<string, string>;
+  /** A point (px, py) moves to (a·px − b·py + x, b·px + a·py + y). */
+  transform: { a: number; b: number; x: number; y: number };
+  made: string;
 }
 
 /** The kinds of layer adjustment. */

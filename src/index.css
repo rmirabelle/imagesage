@@ -194,7 +194,6 @@ select option:disabled { color: #777d8e; }
 /* The OpenAI status sits at the right of the title bar, before the window controls. */
 .titlebar-end { display: flex; align-items: center; padding-right: 8px; }
 .titlebar-end .ai-status { height: 26px; }
-.editor-toolbar-spacer { flex: 1; }
 /* A tooltip for an element with a data-help text. */
 .tooltip {
   position: fixed;
@@ -410,7 +409,8 @@ select option:disabled { color: #777d8e; }
   /* A fixed height, so the toolbar does not grow when the mask brush controls appear. */
   height: 44px;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  /* Two equal halves: the tools at the right of the left half, the colors at the left of the right half. */
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   align-items: center;
   gap: 8px;
   padding: 6px 10px;
@@ -418,7 +418,7 @@ select option:disabled { color: #777d8e; }
   background: #292d38;
 }
 .tool-group { display: flex; gap: 4px; }
-/* The settings of the tool in use: a panel that drops down from the middle of the toolbar, over the image area. */
+/* The settings of the tool in use: a panel that drops down over the image area, centered under the tool's button (the Editor sets `left`). */
 .editor-toolbar { position: relative; }
 .tool-settings {
   position: absolute;
@@ -435,9 +435,9 @@ select option:disabled { color: #777d8e; }
   background: #292d38;
   box-shadow: 0 6px 16px rgba(0,0,0,.35);
 }
-.toolbar-side, .toolbar-center { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.toolbar-side { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.toolbar-side.left { justify-content: flex-end; }
 .toolbar-side.right { justify-content: flex-start; }
-.toolbar-center > .tool-section + .tool-section { margin-left: 20px; }
 /* A labeled toolbar group: the label sits before the boxed buttons. */
 .tool-section { display: flex; align-items: center; gap: 8px; }
 .tool-section > .tool-group {
@@ -535,6 +535,8 @@ select option:disabled { color: #777d8e; }
 /* Like the + Adjustment button: dashed, solid on hover. */
 .steps-tool:hover:not(:disabled) { border-style: solid; color: #ffffff; background: var(--panel-raised); }
 .steps-tool:disabled { cursor: default; opacity: .6; }
+/* Snapshot makes a layer from what shows, so it has a solid border, not the dashed one of the "new" buttons. */
+.steps-tool.solid { border-style: solid; }
 /* Collapsed, the panel is a thin strip; a click anywhere on it expands the panel. */
 .steps-panel.collapsed { width: 30px; }
 .steps-expand {
@@ -837,7 +839,8 @@ select option:disabled { color: #777d8e; }
   /* The top and bottom leave room for the mask name or image size above the image. */
   padding: 46px 24px 32px;
 }
-.canvas-stage { position: relative; flex: 0 0 auto; box-shadow: 0 12px 38px rgba(0,0,0,.55); }
+/* The image's own area: a subtle checkerboard shows where it is transparent; the work area's dots start outside it. */
+.canvas-stage { position: relative; flex: 0 0 auto; box-shadow: 0 12px 38px rgba(0,0,0,.55); background: repeating-conic-gradient(#ffffff 0% 25%, #cccccc 0% 50%) 0 0 / 16px 16px; }
 /* While a mask is being edited, a bright blue dashed line runs just outside the image. */
 .canvas-stage.mask-editing { outline: 2px dashed var(--secondary); }
 /* The line is green while the brush shows and red while it hides, like the mode in the tips below the image. */
@@ -958,12 +961,21 @@ select option:disabled { color: #777d8e; }
   color: #4b76f7;
   background: rgba(75,118,247,.1);
 }
-.confirm-copy h2 { margin: 0 0 5px; color: #f4f4f5; font-size: 16px; font-weight: 700; }
-.confirm-copy p { margin: 0; color: #a7abb7; font-size: 12px; line-height: 1.5; }
+.confirm-copy h2 { margin: 0 0 12px; color: var(--secondary); font-size: 16px; font-weight: 700; }
+.confirm-copy p { margin: 0 0 10px; color: #a7abb7; font-size: 12px; line-height: 1.5; }
+.confirm-copy p:last-child { margin-bottom: 0; }
+/* The layer a confirmation is about, on the first line of the text: body size, white and bold. */
+/* A name inside the text (such as the layer to delete) is white and bold too. */
+.confirm-copy p strong { color: #ffffff; font-weight: 700; overflow-wrap: anywhere; }
+.confirm-copy p.confirm-name { color: #ffffff; font-weight: 700; overflow-wrap: anywhere; }
 .confirm-dialog .rename-row { grid-column: 1 / -1; grid-template-columns: 52px minmax(0, 1fr); gap: 14px; margin-top: 4px; }
-.confirm-actions { grid-column: 1 / -1; display: flex; justify-content: flex-end; gap: 8px; margin-top: 7px; }
+/* The buttons reach into the dialog padding, toward the bottom-right corner; the padding itself stays the same. */
+.confirm-actions { grid-column: 1 / -1; display: flex; justify-content: flex-end; gap: 8px; margin: 10px -10px -10px 0; }
 .button.danger { color: #261516; background: #f87171; }
 .button.danger:hover { background: #fb9292; }
+/* A button that removes work, in the dark red of the Regenerate button. */
+.button.destructive { color: #ffffff; background: #9f1d1d; }
+.button.destructive:hover { background: #b92525; }
 
 .about-dialog-overlay {
   position: fixed;
@@ -1227,7 +1239,7 @@ select option:disabled { color: #777d8e; }
 .notice {
   position: fixed;
   z-index: 100;
-  /* With an image open, App puts each message near the top of the image (left, top and transform). With no image open, it sits in the middle of the window. */
+  /* With an image open, App puts each message in the top-right corner of the work area (`.notice.corner` in `.notice-frame`). With no image open, it sits in the middle of the window. */
   top: 50%;
   left: 50%;
   transform: translate(-50%, -50%);
@@ -1267,6 +1279,20 @@ select option:disabled { color: #777d8e; }
 .file-task-card > svg { flex: 0 0 auto; color: var(--accent); }
 .file-task-card span { min-width: 0; overflow-wrap: anywhere; line-height: 1.4; }
 @keyframes file-task-in { from { opacity: 0; } to { opacity: 1; } }
+/* The work area's frame for messages: it hides what is outside it, so a message comes out of the work area's right edge. Only the message takes clicks. */
+.notice-frame { position: fixed; z-index: 100; overflow: hidden; pointer-events: none; }
+.notice.corner { position: absolute; top: 16px; right: 16px; left: auto; transform: none; max-width: calc(100% - 32px); pointer-events: auto; }
+/* Messages in the corner slide in from the right and, when closed, out to the right again, with a strong ease in and out. Elsewhere they fade out. */
+.notice.corner { animation: notice-slide-in 420ms cubic-bezier(.83, 0, .17, 1); }
+.notice.leaving { pointer-events: none; animation: notice-fade-out 420ms cubic-bezier(.83, 0, .17, 1) forwards; }
+.notice.corner.leaving { animation: notice-slide-out 420ms cubic-bezier(.83, 0, .17, 1) forwards; }
+@keyframes notice-slide-in { from { opacity: 0; transform: translateX(calc(100% + 16px)); } to { opacity: 1; transform: none; } }
+@keyframes notice-slide-out { from { opacity: 1; transform: none; } to { opacity: 0; transform: translateX(calc(100% + 16px)); } }
+@keyframes notice-fade-out { to { opacity: 0; } }
+@media (prefers-reduced-motion: reduce) {
+  .notice.corner, .notice.leaving, .notice.corner.leaving { animation: none; }
+  .notice.leaving { opacity: 0; }
+}
 .notice.success { border-color: rgba(75,118,247,.4); color: #dbe5ff; }
 .notice.success > svg { color: var(--accent); }
 .notice.error { border-color: rgba(248,113,113,.45); color: #fecaca; }
@@ -1687,7 +1713,7 @@ select option:disabled { color: #777d8e; }
 /* The bounds of a layer during Transform; the workspace handles the pointer and sets the cursor. */
 .transform-frame { position: absolute; z-index: 8; inset: 0; overflow: visible; pointer-events: none; }
 .transform-frame-shadow { fill: none; stroke: rgba(0,0,0,.6); stroke-width: 3; }
-.transform-frame-line { fill: none; stroke: #ffffff; stroke-width: 1; }
+.transform-frame-line { fill: none; stroke: #808080; stroke-width: 1; }
 .transform-handle { fill: var(--secondary); stroke: #20323b; stroke-width: 1; }
 .transform-actions { position: absolute; z-index: 9; display: flex; gap: 4px; transform: translateX(-100%); }
 .transform-actions button { width: 30px; height: 30px; display: grid; place-items: center; border: 1px solid #454b5b; border-radius: 7px; color: #d9dce3; background: #242832; box-shadow: 0 4px 14px rgba(0,0,0,.5); cursor: pointer; }
@@ -1731,11 +1757,11 @@ select option:disabled { color: #777d8e; }
 .selection-progress .button { min-height: 28px; margin-top: 4px; font-size: 11px; }
 .partial-preview { position: absolute; z-index: 3; overflow: hidden; pointer-events: none; }
 .partial-preview img { position: absolute; display: block; max-width: none; opacity: .92; }
-/* Capture sits inset at the top left of the preview and saves it as a layer. */
+/* Capture (saves the preview as a layer) and Cancel or Abort sit inset at the top left of the preview; the progress box is gone then, so the preview shows clear. */
+.partial-actions { position: absolute; left: 10px; top: 10px; display: flex; align-items: center; gap: 8px; }
+/* Cancel or Abort looks like the one in the progress box. */
+.partial-actions .button { min-height: 28px; font-size: 11px; pointer-events: auto; }
 .partial-capture {
-  position: absolute;
-  left: 10px;
-  top: 10px;
   display: flex;
   align-items: center;
   gap: 6px;
@@ -1793,11 +1819,21 @@ select option:disabled { color: #777d8e; }
 /* Regenerate overwrites a layer, so it is deep red. */
 .primary-action.regenerate-action { background: #9f1d1d; }
 .primary-action.regenerate-action:hover:not(:disabled) { background: #b92525; }
-.confirm-check { display: flex; align-items: center; gap: 7px; margin-top: 10px; color: #c4c8d2; font-size: 12px; cursor: pointer; }
+.confirm-check { display: flex; align-items: center; gap: 7px; margin-top: 14px; color: #c4c8d2; font-size: 12px; cursor: pointer; }
 .doc-tab-busy { flex: 0 0 auto; color: var(--accent-hover); }
 
 /* Settings and new-image dialogs */
-.new-image-dialog { width: min(720px, 100%); }
+.new-image-dialog { width: min(600px, 100%); }
+.new-image-layout { min-height: 0; }
+.new-image-pane { gap: 14px; }
+/* The shape of the new image; its longest side is always the same length. */
+.new-image-preview { display: flex; align-items: center; justify-content: center; }
+.new-image-preview-shape {
+  border: 1px solid var(--accent);
+  border-radius: 3px;
+  background: repeating-conic-gradient(#2a2e39 0% 25%, #232630 0% 50%) 0 0 / 12px 12px;
+}
+.new-image-preview-size { margin: 0; color: #c4c8d2; font-size: 12px; font-variant-numeric: tabular-nums; text-align: center; }
 .settings-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
 .settings-field { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
 .settings-field > span:first-child { color: #c4c8d2; font-size: 11.5px; font-weight: 650; }
@@ -1948,6 +1984,8 @@ select option:disabled { color: #777d8e; }
 .settings-key-status code { color: #c3d0fc; font-family: "Cascadia Mono", Consolas, monospace; font-size: 11.5px; }
 .settings-key-actions { display: flex; gap: 6px; margin-left: auto; }
 .settings-help { color: #7f8595; font-size: 11px; line-height: 1.45; }
+/* A setting that is on or off: a check box before its label. */
+.settings-toggle { display: flex; align-items: center; gap: 9px; color: #d9dce3; font-size: 12.5px; cursor: pointer; }
 .settings-link { padding: 0; border: 0; color: var(--secondary); background: transparent; font: inherit; text-decoration: underline; cursor: pointer; }
 .settings-link:hover { color: var(--secondary-hover); }
 @media (max-width: 640px) {
@@ -1975,13 +2013,19 @@ select option:disabled { color: #777d8e; }
 .brush-setting-label { color: #8c91a1; font-size: 11px; font-weight: 600; white-space: nowrap; }
 .brush-setting-label:not(:first-child) { margin-left: 10px; }
 /* The brush size and opacity: a hand over the value; drag up or down to change it. */
-.brush-size-value { min-width: 48px; padding: 3px 4px; border: 1px solid #454b5b; border-radius: 4px; color: #d4d7df; font-size: 11px; text-align: center; font-variant-numeric: tabular-nums; cursor: grab; touch-action: none; user-select: none; }
+/* A value that changes by a drag up or down shows the up-and-down cursor. */
+.brush-size-value { min-width: 48px; padding: 3px 4px; border: 1px solid #454b5b; border-radius: 4px; color: #d4d7df; font-size: 11px; text-align: center; font-variant-numeric: tabular-nums; cursor: ns-resize; touch-action: none; user-select: none; }
 .brush-size-value:hover { background: rgba(255,255,255,.06); }
-.brush-size-value:active { cursor: grabbing; }
 /* Soft | Precise: two joined buttons; the one in use is filled dark, the other is not filled. */
 .split-button.brush-tip button { color: #8c91a1; background: transparent; }
 .split-button.brush-tip button.active { color: #ffffff; background: #1d2029; }
 /* The polygon lasso icon: its picture is a mask filled with the text color. */
+/* The radial gradient icon: a circle with a 1px outline, the text color in the middle fading to clear at the edge. */
+.radial-gradient-icon { display: inline-grid; place-items: center; flex: 0 0 auto; }
+.radial-gradient-icon > span { width: 13px; height: 13px; border: 1px solid currentColor; border-radius: 50%; background: radial-gradient(circle, currentColor, transparent 75%); }
+/* The linear gradient icon: a box with a 1px outline that fades from the text color to clear. */
+.linear-gradient-icon { display: inline-grid; place-items: center; flex: 0 0 auto; }
+.linear-gradient-icon > span { width: 13px; height: 13px; border: 1px solid currentColor; border-radius: 3px; background: linear-gradient(to right, currentColor, transparent); }
 .polygon-lasso-icon {
   display: inline-block;
   flex: 0 0 auto;
@@ -1997,11 +2041,47 @@ select option:disabled { color: #777d8e; }
 .tool-group.paint-tool-picker button { width: 32px; min-height: 32px; border: 1px solid var(--border); border-radius: 7px; background: rgba(255,255,255,.025); }
 .tool-group.mask-tool-picker button:hover:not(:disabled),
 .tool-group.paint-tool-picker button:hover:not(:disabled) { background: rgba(255,255,255,.07); }
+/* SELECT before the selection tools and DRAW before the drawing tools, in the style of the color label; DRAW also sets the two groups apart. */
+.tool-group-label { align-self: center; margin-right: 2px; color: #7f8595; font-size: 10px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; white-space: nowrap; }
+.tool-group-label.draw { margin-left: 12px; }
 .tool-group.mask-tool-picker button.active,
 .tool-group.paint-tool-picker button.active { border-color: transparent; color: #ffffff; background: var(--accent); }
 .color-picker-anchor { position: relative; display: flex; margin-left: 8px; }
 .paint-swatch { width: 28px; height: 28px; border: 2px solid #1d2029; border-radius: 6px; box-shadow: 0 0 0 1px #5a6072; cursor: pointer; }
 .paint-swatch:hover, .paint-swatch.open { box-shadow: 0 0 0 1px var(--accent-hover); }
+/* A transparent color: a checkerboard. */
+.paint-swatch.clear { background: repeating-conic-gradient(#d4d6dc 0% 25%, #ffffff 0% 50%) 0 0 / 10px 10px; }
+/* The label before the paint color: "Color", or "Start/End Colors" with the gradient. Both take the same cell, right-aligned next to the swatch. */
+.swatch-label { display: grid; justify-items: end; margin-left: 8px; color: #7f8595; font-size: 10px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; white-space: nowrap; }
+.swatch-label > span { grid-area: 1 / 1; }
+.swatch-label > .hidden { visibility: hidden; }
+.swatch-label + .color-picker-anchor { margin-left: 0; }
+/* In the Mask tool the label sits inside the gradient colors, which have no gap, so it gets the same 8px space as in Paint. */
+.gradient-ends > .swatch-label + .color-picker-anchor { margin-left: 8px; }
+/* The gradient's colors keep their space while hidden, so the centered tools never move. */
+/* It cancels the toolbar group gap, so the swap button has the same space on both sides. */
+.gradient-ends { display: flex; align-items: center; margin-left: -8px; }
+.gradient-ends.reserved { visibility: hidden; }
+/* The button between the gradient's start and end colors swaps them. */
+.gradient-swap { display: grid; place-items: center; width: 16px; height: 28px; margin: 0 2px; padding: 0; border: 0; border-radius: 5px; color: #9ca1af; background: transparent; cursor: pointer; }
+.gradient-swap:hover { color: #ffffff; background: rgba(255,255,255,.07); }
+.gradient-swap + .color-picker-anchor { margin-left: 0; }
+/* A picker without a swatch (a gradient stop on the image) opens centered below its anchor point. */
+.color-picker-anchor.no-swatch { width: 0; height: 0; margin: 0; }
+.color-picker-anchor.no-swatch .color-picker { top: 0; left: 0; transform: translateX(-50%); }
+/* Gray only: no wheel, one slider. */
+.color-picker.grays .color-fields { width: 190px; grid-template-columns: 34px 1fr auto; }
+/* Extra controls under the sliders, such as Transparent. */
+.color-extra { grid-column: 1 / -1; display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.color-check { display: flex; align-items: center; gap: 6px; color: #c4c8d2; font-size: 11.5px; cursor: pointer; }
+/* Transparent comes first: when it is on, the color settings are grayed out and a checkerboard covers the wheel. */
+.color-transparent { grid-column: 1 / -1; }
+.color-field.disabled > * { opacity: .35; }
+.color-field.disabled input { cursor: default; }
+.color-wheel-clear { position: absolute; inset: 0; border-radius: 50%; background: repeating-conic-gradient(#ffffff 0% 25%, #cccccc 0% 50%) 0 0 / 12px 12px; pointer-events: none; }
+.color-picker.transparent .color-wheel canvas { cursor: default; }
+.color-remove { padding: 4px 9px; border: 1px solid #454b5b; border-radius: 5px; color: #edf0f5; background: #1d2029; font-size: 11px; cursor: pointer; }
+.color-remove:hover { border-color: #f87171; color: #ffffff; }
 /* The color picker opens below the swatch: the wheel on the left, the HSB sliders on the right. */
 .color-picker {
   position: absolute;
@@ -2018,22 +2098,31 @@ select option:disabled { color: #777d8e; }
   background: var(--panel-raised);
   box-shadow: 0 12px 32px rgba(0, 0, 0, .5);
 }
-/* The wheel casts a strong black glow onto the panel. */
-.color-wheel { position: relative; flex: 0 0 auto; line-height: 0; }
-.color-wheel canvas { border-radius: 50%; box-shadow: 0 0 14px 4px rgba(0, 0, 0, .95), 0 0 4px 1px #000000; cursor: crosshair; touch-action: none; }
+.color-wheel { position: relative; flex: 0 0 auto; margin-bottom: 10px; border-radius: 50%; box-shadow: 0 0 0 1px #000000; line-height: 0; }
+/* The thin black ring is on the frame around the wheel, so it stays solid when the wheel shows a see-through color. */
+.color-wheel canvas { border-radius: 50%; cursor: crosshair; touch-action: none; }
 .color-wheel-marker { position: absolute; width: 14px; height: 14px; margin: -7px 0 0 -7px; border: 2px solid #ffffff; border-radius: 50%; box-shadow: 0 0 0 1px rgba(0,0,0,.7); pointer-events: none; }
 /* The wheel's section fills the left of the panel from top to bottom (over the panel padding), a little darker, with a line on its right. */
 .color-wheel-section {
   align-self: stretch;
   display: flex;
+  flex-direction: column;
   align-items: center;
   justify-content: center;
+  gap: 12px;
   margin: -14px 0 -46px -14px;
   padding: 0 22px;
   border-right: 1px solid #454b5b;
   border-radius: 9px 0 0 9px;
   background: #292c37;
 }
+/* Quick color chips: above the wheel, or the first row of a gray-only picker. */
+/* One strip of small chips: they share one outline and the lines between them. */
+.color-chips { display: flex; overflow: hidden; border: 1px solid #5a6072; border-radius: 4px; }
+.color-fields > .color-chips { grid-column: 1 / -1; justify-self: start; }
+.color-chip { width: 16px; height: 16px; padding: 0; border: 0; border-radius: 0; cursor: pointer; }
+.color-chip + .color-chip { border-left: 1px solid #5a6072; }
+.color-chip:hover { box-shadow: inset 0 0 0 1px var(--accent-hover); }
 .color-fields { width: 210px; display: grid; grid-template-columns: 30px 1fr auto; align-items: center; gap: 10px 8px; }
 .color-field { display: contents; }
 .color-field label { color: #8c91a1; font-size: 11px; font-weight: 700; }
@@ -2055,8 +2144,6 @@ select option:disabled { color: #777d8e; }
   color: #edf0f5;
   /* The blue of the selected layer. */
   background: #333a52;
-  /* An inner shadow inside the top and left edges, so the button looks pressed into the corner. */
-  box-shadow: inset 2px 2px 5px rgba(0, 0, 0, .45);
   font-size: 12px;
   font-weight: 800;
   cursor: pointer;
@@ -2067,6 +2154,17 @@ select option:disabled { color: #777d8e; }
 /* No layer shows under the pointer: an empty, dashed circle. */
 .color-probe.empty { border-style: dashed; background: transparent; }
 .gradient-line { position: absolute; z-index: 6; inset: 0; overflow: visible; pointer-events: none; }
+/* The gradient being edited: the line, square ends and round stops in their colors. The workspace handles the pointer. */
+.gradient-edit { position: absolute; z-index: 7; inset: 0; overflow: visible; pointer-events: none; }
+.gradient-stop rect, .gradient-stop circle { stroke: #ffffff; stroke-width: 2; filter: drop-shadow(0 0 1.5px rgba(0,0,0,.9)); }
+.gradient-stop.selected rect, .gradient-stop.selected circle { stroke: var(--accent-hover); stroke-width: 2.5; }
+/* A stop dragged off the line fades; letting go removes it. */
+.gradient-stop.away { opacity: .3; }
+.gradient-stop-clear { stroke: #f87171; stroke-width: 2; }
+.gradient-stop-picker { position: absolute; z-index: 9; width: 0; height: 0; }
+/* The round check past the gradient's end point applies it, in the color of Transform's Apply. */
+.gradient-apply { position: absolute; z-index: 9; width: 28px; height: 28px; margin: -14px 0 0 -14px; display: grid; place-items: center; padding: 0; border: 0; border-radius: 50%; color: #000000; background: var(--secondary); box-shadow: 0 4px 14px rgba(0,0,0,.5); cursor: pointer; }
+.gradient-apply:hover { background: var(--secondary-hover); }
 .gradient-line-shadow { stroke: rgba(0,0,0,.6); stroke-width: 3.5; }
 .gradient-line-main { stroke: #ffffff; stroke-width: 1.5; }
 .gradient-line-start { fill: #ffffff; stroke: #000000; stroke-width: 1.5; }
@@ -2169,6 +2267,10 @@ select option:disabled { color: #777d8e; }
 
 /* Click to select: the selected area in red over the image, the clicks as dots, and a bar to apply or cancel. */
 .click-select-layer { position: absolute; z-index: 7; inset: 0; pointer-events: none; }
+/* The Magic Wand's selection edge: marching ants, as on the lasso. */
+.wand-outline { position: absolute; inset: 0; overflow: visible; pointer-events: none; }
+/* The Magic Wand's Contiguous switch, after its Tolerance value. */
+.wand-contiguous { display: flex; align-items: center; gap: 6px; margin-left: 6px; color: #c4c8d2; font-size: 12px; cursor: pointer; white-space: nowrap; }
 .click-select-mask { position: absolute; inset: 0; background: rgba(255, 51, 102, .5); -webkit-mask-size: 100% 100%; mask-size: 100% 100%; -webkit-mask-repeat: no-repeat; mask-repeat: no-repeat; }
 .click-select-point { position: absolute; width: 10px; height: 10px; margin: -5px 0 0 -5px; border: 2px solid #ffffff; border-radius: 50%; box-shadow: 0 0 0 1px rgba(0,0,0,.6); }
 .click-select-point.include { background: #22c55e; }

@@ -14,6 +14,8 @@ const MUSIC_KEY = "imagesage.slideshow-music";
 const IMAGE_MUSIC_KEY = "imagesage.slideshow-music-by-image";
 /** The newest choices kept in that map; older ones are dropped. */
 const IMAGE_MUSIC_LIMIT = 200;
+/** The video shape picked last: "vertical" for 9:16, anything else for the image's own shape. */
+const SHAPE_KEY = "imagesage.slideshow-shape";
 type ImageMusic = { track: string; start: number };
 /** A music choice that is an audio file on this PC: this prefix, then its path. */
 const FILE_PREFIX = "file:";
@@ -71,6 +73,7 @@ type TrackLoad = { id: string; progress: number | null; requestId: string };
 /** Settings for the video slideshow: the title in its title box, and the music. */
 export function SlideshowDialog({ defaultTitle, stages, imageKeys, onCancel, onExport }: Props) {
   const [title, setTitle] = useState(defaultTitle);
+  const [vertical, setVertical] = useState(() => readStored(SHAPE_KEY) === "vertical");
   /** Seconds each layer shows; by default the video fits in 90 seconds. */
   const [layerSeconds, setLayerSeconds] = useState(() => defaultLayerSeconds(stages, true));
   /** The seconds box's text while the user types in it; null shows `layerSeconds`. */
@@ -200,7 +203,8 @@ export function SlideshowDialog({ defaultTitle, stages, imageKeys, onCancel, onE
   const submit = () => {
     if (busy || (trackId && !music)) return;
     storeImageMusic(imageKeys, { track: music ? trackId : "", start: music ? start : 0 });
-    onExport({ title, music: music ? { buffer: music.buffer, start } : null, layerSeconds });
+    try { localStorage.setItem(SHAPE_KEY, vertical ? "vertical" : "image"); } catch { /* Remembering is a convenience only. */ }
+    onExport({ title, music: music ? { buffer: music.buffer, start } : null, layerSeconds, vertical });
   };
 
   return (
@@ -220,6 +224,13 @@ export function SlideshowDialog({ defaultTitle, stages, imageKeys, onCancel, onE
           <label className="form-row">
             <span className="form-row-label">Title</span>
             <input className="settings-input" value={title} autoFocus onChange={(event) => setTitle(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") submit(); }} spellCheck={false} />
+          </label>
+          <label className="form-row" data-help="Vertical puts the whole image in the middle of a 1080 by 1920 video, over a blurred copy of it. Use it for Instagram Reels and other phone feeds.">
+            <span className="form-row-label">Shape</span>
+            <select value={vertical ? "vertical" : "image"} onChange={(event) => setVertical(event.target.value === "vertical")}>
+              <option value="image">Same as the image</option>
+              <option value="vertical">Vertical 9:16, blurred background</option>
+            </select>
           </label>
           <label className="form-row" data-help={`Seconds each layer shows, ${MIN_LAYER_SECONDS} to ${MAX_LAYER_SECONDS}. The first value fits the video in 90 seconds.`}>
             <span className="form-row-label">Seconds per layer</span>

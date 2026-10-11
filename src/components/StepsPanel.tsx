@@ -58,6 +58,10 @@ export type PartAction =
   | "resize"
   | "duplicate"
   | "click-select"
+  | "wand-select"
+  | "select-pixels"
+  | "select-pixels-add"
+  | "select-pixels-subtract"
   | "mask-copy"
   | "mask-paste"
   | "mask-unlink"
@@ -754,10 +758,21 @@ export const StepsPanel = memo(function StepsPanel({ documentId, hasBase, origin
       return true;
     };
     if (!step) return <span className="steps-thumb">{image}</span>;
+    /**
+     * Ctrl+click on the thumbnail (not its mask) selects the layer's pixels,
+     * as in Photoshop: with Shift it adds them to the selection, with Alt it
+     * takes them away. It does not change the selected layer.
+     */
+    const selectPixels = (event: { ctrlKey: boolean; shiftKey: boolean; altKey: boolean; stopPropagation: () => void }) => {
+      if (!event.ctrlKey) return;
+      event.stopPropagation();
+      if (clickEndsDrag() || disabled) return;
+      onPartAction(node, "mask", event.altKey ? "select-pixels-subtract" : event.shiftKey ? "select-pixels-add" : "select-pixels");
+    };
     /** A layer without a mask: a + button where the mask will show selects the layer and opens the layer mask menu (Add, Magic, Paste). */
     if (!step.layerMask) {
       return (
-        <span className="steps-thumb">
+        <span className="steps-thumb" onClick={selectPixels}>
           {image}
           {/* A span, not a button: the layer row around it is already a button. */}
           <span
@@ -781,7 +796,7 @@ export const StepsPanel = memo(function StepsPanel({ documentId, hasBase, origin
     }
     const targeted = node === current && maskTarget === "mask";
     return (
-      <span className="steps-thumb">
+      <span className="steps-thumb" onClick={selectPixels}>
         {image}
         <span
           className={`thumb-mask ${targeted ? "target" : ""} ${targeted && maskRedShown ? "red" : ""}`}
@@ -959,7 +974,7 @@ Click to show its progress on the image.`}>
           New Layer
         </button>
         <button
-          className="steps-tool"
+          className="steps-tool solid"
           disabled={disabled}
           onClick={onSnapshot}
           data-help="Snapshot: a new top layer of all visible layers combined (Ctrl+Alt+S)"
