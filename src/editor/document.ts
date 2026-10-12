@@ -127,7 +127,15 @@ const parseAdjustment = (value: unknown, fallbackId: string): Adjustment | undef
     };
   }
   if (value.kind === "blur") {
-    return { id, kind: "blur", value: Math.max(0, optionalAdjustNumber(value.value, 100) ?? 0), ...flags };
+    const angle = optionalAdjustNumber(value.angle, 90);
+    return {
+      id,
+      kind: "blur",
+      value: Math.max(0, optionalAdjustNumber(value.value, 300) ?? 0),
+      ...(value.motion === true ? { motion: true } : {}),
+      ...(angle ? { angle } : {}),
+      ...flags
+    };
   }
   if (value.kind === "contrast") {
     const percent = (field: unknown, fallback: number) => {

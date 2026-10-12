@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { combineSelection, marqueeBox, invertSelection, selectionBounds, selectionContours, simplifyLoop, smoothEdge, wandArea } from "./magicWand";
+import { combineSelection, featherSelection, marqueeBox, invertSelection, selectionBounds, selectionContours, simplifyLoop, smoothEdge, wandArea } from "./magicWand";
 
 /**
  * A 4 × 1 image: red, red, blue, red. The last red does not touch the first
@@ -64,5 +64,20 @@ describe("magic wand", () => {
   it("finds the box around the selection", () => {
     expect(selectionBounds(new Uint8Array([0, 1, 1, 0]), 2, 2)).toEqual({ x: 0, y: 0, width: 2, height: 2 });
     expect(selectionBounds(new Uint8Array(4), 2, 2)).toBeNull();
+  });
+
+  it("feathers the edge of a selection and keeps it whole at the image edge", () => {
+    /** The left half of a 20 × 1 strip is selected. */
+    const half = new Uint8Array(20);
+    half.fill(255, 0, 10);
+    const soft = featherSelection(half, 20, 1, 4);
+    expect(soft[0]).toBe(255);
+    expect(soft[19]).toBe(0);
+    expect(soft[8]).toBeGreaterThan(128);
+    expect(soft[8]).toBeLessThan(255);
+    expect(soft[11]).toBeGreaterThan(0);
+    expect(soft[11]).toBeLessThan(128);
+    for (let index = 1; index < 20; index++) expect(soft[index]).toBeLessThanOrEqual(soft[index - 1]);
+    expect([...featherSelection(half, 20, 1, 0)]).toEqual([...half]);
   });
 });

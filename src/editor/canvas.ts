@@ -1,5 +1,6 @@
 import { colorizeFilterIds, colorizeTables, parseColorizeFilterId } from "./colorize";
 import { contrastFilterIds, contrastTable, parseContrastFilterId } from "./contrast";
+import { motionBlurFilterIds, motionBlurSteps, parseMotionBlurFilterId } from "./motionBlur";
 import { parseSharpenFilterId, sharpenFilterIds } from "./sharpen";
 import { pathBetween } from "./history";
 import type { BlendMode, EditStep, Point, Rect } from "./types";
@@ -155,6 +156,32 @@ export function ensureSvgFilters(filter: string) {
         <feComponentTransfer in="sharp"><feFuncA type="table" tableValues="${OPAQUE_FIX}"/></feComponentTransfer>`
       : `${blur}
         <feComposite in="SourceGraphic" in2="blur" operator="arithmetic" k1="0" k2="${(1 + params.amount).toFixed(3)}" k3="-${amount}" k4="0"/>`;
+    filterHost.appendChild(element);
+  }
+  for (const id of motionBlurFilterIds(filter)) {
+    if (window.document.getElementById(id)) continue;
+    const params = parseMotionBlurFilterId(id);
+    if (!params) continue;
+    if (!filterHost) {
+      filterHost = window.document.createElementNS(SVG_NS, "svg");
+      filterHost.setAttribute("aria-hidden", "true");
+      filterHost.setAttribute("style", "position:absolute;width:0;height:0;overflow:hidden;pointer-events:none");
+      window.document.body.appendChild(filterHost);
+    }
+    /** Each step averages the image with a moved copy of itself (see `motionBlurSteps`); the last move centers the blur. */
+    const { steps, center } = motionBlurSteps(params);
+    let input = "SourceGraphic";
+    const parts = steps.map(({ dx, dy }, index) => {
+      const part = `<feOffset in="${input}" dx="${dx.toFixed(3)}" dy="${dy.toFixed(3)}" result="moved${index}"/>
+        <feComposite in="${input}" in2="moved${index}" operator="arithmetic" k1="0" k2="0.5" k3="0.5" k4="0" result="mixed${index}"/>`;
+      input = `mixed${index}`;
+      return part;
+    });
+    const element = window.document.createElementNS(SVG_NS, "filter");
+    element.setAttribute("id", id);
+    element.setAttribute("color-interpolation-filters", "sRGB");
+    element.innerHTML = `${parts.join("\n")}
+      <feOffset in="${input}" dx="${center.dx.toFixed(3)}" dy="${center.dy.toFixed(3)}"/>`;
     filterHost.appendChild(element);
   }
   for (const id of colorizeFilterIds(filter)) {

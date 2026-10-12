@@ -96,7 +96,7 @@ import { sharpenPixels } from "../editor/resample";
 import { confirms, setConfirms } from "../lib/confirmations";
 import { LinearGradientIcon } from "./LinearGradientIcon";
 import { RadialGradientIcon } from "./RadialGradientIcon";
-import { combineSelection, DEFAULT_WAND_TOLERANCE, marqueeBox, invertSelection, selectedHalf, selectionBounds, selectionContours, simplifyLoop, smoothEdge, wandArea, type SelectMode, type WandClick } from "../editor/magicWand";
+import { combineSelection, DEFAULT_WAND_TOLERANCE, featherSelection, marqueeBox, invertSelection, selectedHalf, selectionBounds, selectionContours, simplifyLoop, smoothEdge, wandArea, type SelectMode, type WandClick } from "../editor/magicWand";
 import {
   clampMiddleOffset,
   DEFAULT_MASK_STOPS,
@@ -637,6 +637,9 @@ const BRUSH_PRECISE_KEY = "imagesage.brush-precise";
 const PAINT_COLOR_KEY = "imagesage.paint-color";
 const WAND_TOLERANCE_KEY = "imagesage.wand-tolerance";
 const WAND_CONTIGUOUS_KEY = "imagesage.wand-contiguous";
+const WAND_FEATHER_KEY = "imagesage.wand-feather";
+/** The largest Magic Wand feather, in image pixels. */
+const MAX_WAND_FEATHER = 250;
 /** The `part` of a layer prepared for the Paint tool: the layer's own pixels, not a mask. */
 const PAINT_PART = "paint-pixels";
 /** The soft edge of a precise brush, in image pixels, at every brush size; a soft brush blurs by 30% of its radius. */
@@ -892,8 +895,18 @@ export function Editor({
     setWandContiguousState(next);
     writeStored(WAND_CONTIGUOUS_KEY, next ? "1" : "0");
   };
-  const wandSettingsRef = useRef({ tolerance: wandTolerance, contiguous: wandContiguous });
-  wandSettingsRef.current = { tolerance: wandTolerance, contiguous: wandContiguous };
+  /** How many image pixels the edge of each new wand area fades over; 0 keeps a sharp edge. */
+  const [wandFeather, setWandFeatherState] = useState(() => {
+    const stored = Number(readStored(WAND_FEATHER_KEY));
+    return Number.isFinite(stored) ? Math.max(0, Math.min(MAX_WAND_FEATHER, Math.round(stored))) : 0;
+  });
+  const setWandFeather = (next: number) => {
+    const value = Math.max(0, Math.min(MAX_WAND_FEATHER, Math.round(next)));
+    setWandFeatherState(value);
+    writeStored(WAND_FEATHER_KEY, String(value));
+  };
+  const wandSettingsRef = useRef({ tolerance: wandTolerance, contiguous: wandContiguous, feather: wandFeather });
+  wandSettingsRef.current = { tolerance: wandTolerance, contiguous: wandContiguous, feather: wandFeather };
   /** A mask has been copied, so the mask menus offer Paste. */
   const [canPasteMask, setCanPasteMask] = useState(() => maskClipboard !== null);
   useEffect(() => {
@@ -1781,11 +1794,12 @@ export function Editor({
     setClickSelect({ engine: "wand", pixels, target, key: crypto.randomUUID(), scale: grid.scale, width, height, points: [], mask: null, busy: false });
   };
 
-  /** The selection after a Magic Wand click in `mode`, with the current Tolerance and Contiguous. */
+  /** The selection after a Magic Wand click in `mode`, with the current Tolerance, Contiguous and Feather. */
   const wandResult = (pixels: ImageData, click: WandClick, mode: SelectMode, before: PixelSelection | null) => {
-    const { tolerance, contiguous } = wandSettingsRef.current;
-    /** The wand selects whole pixels; their edge is then smoothed, as Photoshop's Anti-alias does. */
-    const area = smoothEdge(wandArea(pixels.data, pixels.width, pixels.height, click.x, click.y, tolerance, contiguous).map((bit) => bit ? 255 : 0), pixels.width, pixels.height);
+    const { tolerance, contiguous, feather } = wandSettingsRef.current;
+    /** The wand selects whole pixels; their edge is then smoothed, as Photoshop's Anti-alias does, and softened by Feather. */
+    const smooth = smoothEdge(wandArea(pixels.data, pixels.width, pixels.height, click.x, click.y, tolerance, contiguous).map((bit) => bit ? 255 : 0), pixels.width, pixels.height);
+    const area = feather ? featherSelection(smooth, pixels.width, pixels.height, feather * selectionGrid().scale) : smooth;
     return makeSelection(combineSelection(before?.levels ?? null, area, mode));
   };
 
@@ -1799,7 +1813,7 @@ export function Editor({
     setClickSelect({ ...session, last: { click, mode, before } });
   };
 
-  /** A new Tolerance or Contiguous makes the Magic Wand's last click again. */
+  /** A new Tolerance, Contiguous or Feather makes the Magic Wand's last click again. */
   useEffect(() => {
     const session = clickSelectRef.current;
     if (session?.engine !== "wand" || !session.pixels || !session.last) return;
@@ -1807,7 +1821,7 @@ export function Editor({
     const top = maskUndoRef.current[maskUndoRef.current.length - 1];
     if (top && "kind" in top && top.kind === "selection") top.after = next;
     setSelection(next);
-  }, [wandTolerance, wandContiguous]);
+  }, [wandTolerance, wandContiguous, wandFeather]);
 
   /** Asks the model for the mask of Object's clicks and shows it. */
   const updateClickMask = async (session: ClickSelect, points: SamPoint[]) => {
@@ -1857,33 +1871,6 @@ export function Editor({
       : isMaskTool && session.target.owner === owner && session.target.part === targetPart;
     if (!kept) cancelClickSelect();
   }, [clickSelect, imageDocument.historyIndex, isMaskTool, isPaintTool, targetPart]);
-
-  /**
-   * The Mask tool on a layer or adjustment without a mask adds one at once,
-   * so the layers panel shows it: an empty mask that hides nothing, so the
-   * image does not change. It happens once per mask the tool is turned to,
-   * so Ctrl+Z can take it away again.
-   */
-  const ensuredMaskRef = useRef<string | null>(null);
-  useEffect(() => {
-    if (!isMaskTool || !targetPart) {
-      ensuredMaskRef.current = null;
-      return;
-    }
-    const doc = documentRef.current;
-    const node = doc.historyIndex;
-    const step = node > 0 ? doc.history[node - 1] : null;
-    const owner = step ? step.id : BASE_OWNER;
-    const key = `${doc.id}:${owner}:${targetPart}`;
-    if (ensuredMaskRef.current === key) return;
-    ensuredMaskRef.current = key;
-    /** The original image of an older document has no layer mask of its own. */
-    if (targetPart === "mask" && !step) return;
-    const before = partMaskState(doc, node, targetPart);
-    if (before.mask) return;
-    const mask = createCanvas(width, height);
-    void canvasToDataUrl(mask).then((url) => recordMaskChange({ owner, part: targetPart, before, after: { mask: url, hides: true } }, mask));
-  }, [isMaskTool, targetPart, imageDocument.historyIndex, imageDocument.id]);
 
   /** A new image size (crop or canvas size) ends the selection; it was made for the old size. */
   useEffect(() => {
@@ -2353,7 +2340,9 @@ export function Editor({
         /** A layer can have several adjustments, even of the same kind, each with its own mask. */
         const added = newAdjustment(action === "add-brightness" ? "brightness" : action === "add-contrast" ? "contrast" : action === "add-blur" ? "blur" : action === "add-opacity" ? "opacity" : action === "add-sharpen" ? "sharpen" : "hueSaturation");
         commitAdjust(current, node, [...(adjust ?? []), added]);
-        pick(added.id);
+        /** The new adjustment has no mask, so the Mask tool turns off; Add mask in its menu starts one. */
+        if (node !== current.historyIndex) selectLayer(node);
+        if (isMaskTool) setTool("whole");
         return;
       }
       case "add-mask": {
@@ -2514,16 +2503,18 @@ export function Editor({
       }
       case "adjust-duplicate": {
         /**
-         * A copy of the adjustment, with its values and its own copy of the
-         * mask (not linked), goes right after it on the same layer. Ctrl+Z
-         * removes it.
+         * A copy of the adjustment, with its values, goes right after it on
+         * the same layer. Its mask, if any, is a linked copy: the original
+         * keeps its link id or gets a new one, which the copy shares. Ctrl+Z
+         * removes the copy and puts back the original's old link.
          */
         if (!adjustment) return;
-        const { maskLink: _link, ...rest } = adjustment;
-        const copy: Adjustment = { ...rest, id: newAdjustmentId(), ...(adjustment.label ? { label: `${adjustment.label} copy` } : {}) };
+        const link = adjustment.mask ? adjustment.maskLink ?? newMaskLink() : undefined;
+        const original: Adjustment = link ? { ...adjustment, maskLink: link } : adjustment;
+        const copy: Adjustment = { ...original, id: newAdjustmentId(), ...(adjustment.label ? { label: `${adjustment.label} copy` } : {}) };
         const list = adjustList(adjust);
         const at = list.findIndex((item) => item.id === adjustment.id);
-        const after = [...list.slice(0, at + 1), copy, ...list.slice(at + 1)];
+        const after = [...list.slice(0, at), original, copy, ...list.slice(at + 1)];
         maskUndoRef.current.push({ kind: "adjust", owner, before: adjust, after });
         maskRedoRef.current = [];
         commitAdjust(current, node, after);
@@ -2869,6 +2860,17 @@ export function Editor({
     if (!adjustment || adjustment.kind !== "sharpen" || !adjustment.colorSharpen === brightnessOnly) return;
     const { colorSharpen: _color, ...rest } = adjustment;
     commitAdjust(current, node, replaceAdjustment(adjust, id, brightnessOnly ? rest : { ...rest, colorSharpen: true }));
+  };
+
+  /** Turns Motion on or off for a Blur adjustment; the angle is kept, so it comes back with Motion. */
+  const setBlurMotion = (node: number, id: string, motion: boolean) => {
+    const current = documentRef.current;
+    if (node > current.history.length) return;
+    const adjust = adjustOf(current, node);
+    const adjustment = findAdjustment(adjust, id);
+    if (!adjustment || adjustment.kind !== "blur" || Boolean(adjustment.motion) === motion) return;
+    const { motion: _motion, ...rest } = adjustment;
+    commitAdjust(current, node, replaceAdjustment(adjust, id, motion ? { ...rest, motion: true } : rest));
   };
 
   /** Turns Colorize on or off for a Hue/Saturation adjustment of a layer, the original image included. */
@@ -4575,8 +4577,8 @@ export function Editor({
   }, [command]);
 
   /** Stable handlers for the memoized layers panel; each calls the latest version of its function. */
-  const panelActionsRef = useRef({ selectLayer, selectMany, toggleLayerVisible, setAllLayersVisible, snapshotVisible, addBlankLayer, requestDelete, renameLayer, moveLayerTo, partAction, setAdjustmentValue, setAdjustmentColorize, setAdjustmentLabel, requestAdjustRename, setSharpenBrightnessOnly });
-  panelActionsRef.current = { selectLayer, selectMany, toggleLayerVisible, setAllLayersVisible, snapshotVisible, addBlankLayer, requestDelete, renameLayer, moveLayerTo, partAction, setAdjustmentValue, setAdjustmentColorize, setAdjustmentLabel, requestAdjustRename, setSharpenBrightnessOnly };
+  const panelActionsRef = useRef({ selectLayer, selectMany, toggleLayerVisible, setAllLayersVisible, snapshotVisible, addBlankLayer, requestDelete, renameLayer, moveLayerTo, partAction, setAdjustmentValue, setAdjustmentColorize, setAdjustmentLabel, requestAdjustRename, setSharpenBrightnessOnly, setBlurMotion });
+  panelActionsRef.current = { selectLayer, selectMany, toggleLayerVisible, setAllLayersVisible, snapshotVisible, addBlankLayer, requestDelete, renameLayer, moveLayerTo, partAction, setAdjustmentValue, setAdjustmentColorize, setAdjustmentLabel, requestAdjustRename, setSharpenBrightnessOnly, setBlurMotion };
   const panelHandlers = useMemo(() => ({
     /** A plain click in the layers list selects one layer and ends a group. */
     onSelect: (node: number) => {
@@ -4595,6 +4597,7 @@ export function Editor({
     onAdjustValue: (node: number, id: string, field: AdjustmentField, value: number) => panelActionsRef.current.setAdjustmentValue(node, id, field, value),
     onAdjustColorize: (node: number, id: string, colorize: boolean) => panelActionsRef.current.setAdjustmentColorize(node, id, colorize),
     onSharpenBrightnessOnly: (node: number, id: string, brightnessOnly: boolean) => panelActionsRef.current.setSharpenBrightnessOnly(node, id, brightnessOnly),
+    onBlurMotion: (node: number, id: string, motion: boolean) => panelActionsRef.current.setBlurMotion(node, id, motion),
     onAdjustRename: (node: number, id: string) => panelActionsRef.current.requestAdjustRename(node, id),
     onMaskDeselect: () => setTool("whole")
   }), []);
@@ -4747,6 +4750,7 @@ export function Editor({
 
   /** A drag on the Magic Wand's tolerance: where it started and the tolerance then. Up raises it; 2 px is 1. */
   const toleranceDragRef = useRef<{ pointerId: number; startY: number; startTolerance: number } | null>(null);
+  const featherDragRef = useRef<{ pointerId: number; startY: number; startFeather: number } | null>(null);
   /** A drag on the opacity: where it started and the opacity then. Up raises it; 2 px is 1%. */
   const opacityDragRef = useRef<{ pointerId: number; startY: number; startOpacity: number } | null>(null);
   /** A drag on the brush size: where it started and the radius then. Up makes the brush larger; 80 px doubles it. */
@@ -5081,6 +5085,29 @@ export function Editor({
                       onPointerCancel={() => { toleranceDragRef.current = null; }}
                     >
                       {wandTolerance}
+                    </span>
+                    <span className="brush-setting-label">Feather:</span>
+                    <span
+                      className="brush-size-value"
+                      role="slider"
+                      aria-label="Feather"
+                      aria-valuemin={0}
+                      aria-valuemax={MAX_WAND_FEATHER}
+                      aria-valuenow={wandFeather}
+                      onPointerDown={(event) => {
+                        if (event.button !== 0) return;
+                        event.currentTarget.setPointerCapture(event.pointerId);
+                        featherDragRef.current = { pointerId: event.pointerId, startY: event.clientY, startFeather: wandFeather };
+                      }}
+                      onPointerMove={(event) => {
+                        const drag = featherDragRef.current;
+                        if (!drag || drag.pointerId !== event.pointerId) return;
+                        setWandFeather(drag.startFeather + (drag.startY - event.clientY) / 2);
+                      }}
+                      onPointerUp={() => { featherDragRef.current = null; }}
+                      onPointerCancel={() => { featherDragRef.current = null; }}
+                    >
+                      {wandFeather} px
                     </span>
                     <label className="wand-contiguous">
                       <input type="checkbox" checked={wandContiguous} onChange={(event) => setWandContiguous(event.target.checked)} />

@@ -120,6 +120,8 @@ interface Props {
   onAdjustColorize: (node: number, id: string, colorize: boolean) => void;
   /** Sets whether a Sharpen adjustment sharpens brightness only, or each color. */
   onSharpenBrightnessOnly: (node: number, id: string, brightnessOnly: boolean) => void;
+  /** Turns Motion on or off for a Blur adjustment. */
+  onBlurMotion: (node: number, id: string, motion: boolean) => void;
   /** Opens the Rename dialog of an adjustment, where it gets a label for its chip. */
   onAdjustRename: (node: number, id: string) => void;
 }
@@ -208,32 +210,35 @@ const AdjustmentIcon = ({ adjustment, size }: { adjustment: Pick<Adjustment, "ki
     : adjustment.kind === "sharpen" ? <Sparkle size={size} weight="bold" />
     : <Sun size={size} weight="bold" />;
 
-/** One slider row: the name on the left, the slider, and the number. */
-function AdjustmentRow({ id, label, min, max, unit, neutral, withSign, decimals, log = false, value, disabled, onChange }: { id: string; label: string; min: number; max: number; unit: string; neutral: number; withSign: boolean; decimals?: number; log?: boolean; value: number; disabled: boolean; onChange: (value: number) => void }) {
+/** One slider row: the name on the left, the slider, and the number. With `lead`, `lead` is on the left and the name sits just before the slider. */
+function AdjustmentRow({ id, label, min, max, unit, neutral, withSign, decimals, log = false, value, disabled, onChange, lead }: { id: string; label: string; min: number; max: number; unit: string; neutral: number; withSign: boolean; decimals?: number; log?: boolean; value: number; disabled: boolean; onChange: (value: number) => void; lead?: ReactNode }) {
   const [draft, setDraft] = useState<number | null>(null);
   const shown = draft ?? value;
   const change = (next: number) => {
     setDraft(next);
     onChange(next);
   };
+  /** A log-scale slider moves through places 0 to LOG_SLIDER_STEPS; the value is worked out from the place. */
+  const slider = (
+    <input
+      id={id}
+      type="range"
+      min={log ? 0 : min}
+      max={log ? LOG_SLIDER_STEPS : max}
+      step={1}
+      value={log ? logSliderPosition(shown, min, max) : shown}
+      disabled={disabled}
+      onChange={(event) => change(log ? logSliderValue(Number(event.target.value), min, max) : Number(event.target.value))}
+      onDoubleClick={() => change(neutral)}
+      onPointerUp={(event) => { setDraft(null); event.currentTarget.blur(); }}
+      onKeyUp={() => setDraft(null)}
+      onBlur={() => setDraft(null)}
+    />
+  );
   return (
     <div className="layer-adjust-row">
-      <label htmlFor={id}>{label}</label>
-      {/* A log-scale slider moves through places 0 to LOG_SLIDER_STEPS; the value is worked out from the place. */}
-      <input
-        id={id}
-        type="range"
-        min={log ? 0 : min}
-        max={log ? LOG_SLIDER_STEPS : max}
-        step={1}
-        value={log ? logSliderPosition(shown, min, max) : shown}
-        disabled={disabled}
-        onChange={(event) => change(log ? logSliderValue(Number(event.target.value), min, max) : Number(event.target.value))}
-        onDoubleClick={() => change(neutral)}
-        onPointerUp={(event) => { setDraft(null); event.currentTarget.blur(); }}
-        onKeyUp={() => setDraft(null)}
-        onBlur={() => setDraft(null)}
-      />
+      {lead ?? <label htmlFor={id}>{label}</label>}
+      {lead ? <span className="layer-adjust-inline"><label htmlFor={id}>{label}</label>{slider}</span> : slider}
       <output htmlFor={id}>{withSign ? signed(shown) : formatAdjustNumber(shown, decimals)}{unit}</output>
     </div>
   );
@@ -268,10 +273,26 @@ function SliderPopover({ children }: { children: ReactNode }) {
   return <div ref={ref} className="layer-adjust-popover" onPointerDown={(event) => event.stopPropagation()}>{children}</div>;
 }
 
-function AdjustmentSliders({ node, adjustment, disabled, onChange, onColorize, onBrightnessOnly }: { node: number; adjustment: Adjustment; disabled: boolean; onChange: (node: number, id: string, field: AdjustmentField, value: number) => void; onColorize: (node: number, id: string, colorize: boolean) => void; onBrightnessOnly: (node: number, id: string, brightnessOnly: boolean) => void }) {
+function AdjustmentSliders({ node, adjustment, disabled, onChange, onColorize, onBrightnessOnly, onMotion }: { node: number; adjustment: Adjustment; disabled: boolean; onChange: (node: number, id: string, field: AdjustmentField, value: number) => void; onColorize: (node: number, id: string, colorize: boolean) => void; onBrightnessOnly: (node: number, id: string, brightnessOnly: boolean) => void; onMotion: (node: number, id: string, motion: boolean) => void }) {
+  const fields = adjustmentFields(adjustment);
+  /** Blur's Angle shows in the Motion row, next to its checkbox. */
+  const angle = fields.find(({ field }) => field === "angle");
+  const motionId = `layer-adjust-${node}-${adjustment.id}-motion`;
+  const motionCheck = (
+    <label className="layer-adjust-motion" htmlFor={motionId}>
+      <input
+        id={motionId}
+        type="checkbox"
+        checked={Boolean(adjustment.motion)}
+        disabled={disabled}
+        onChange={(event) => { onMotion(node, adjustment.id, event.target.checked); event.currentTarget.blur(); }}
+      />
+      Motion
+    </label>
+  );
   return (
     <div className="layer-adjust-sliders">
-      {adjustmentFields(adjustment).map(({ field, label, min, max, unit, neutral, signed: withSign, decimals, log }) => (
+      {fields.filter(({ field }) => field !== "angle").map(({ field, label, min, max, unit, neutral, signed: withSign, decimals, log }) => (
         <AdjustmentRow
           key={`${adjustment.colorize ? "colorize-" : ""}${field}`}
           id={`layer-adjust-${node}-${adjustment.id}-${field}`}
@@ -287,6 +308,24 @@ function AdjustmentSliders({ node, adjustment, disabled, onChange, onColorize, o
           disabled={disabled}
           onChange={(value) => onChange(node, adjustment.id, field, value)}
         />
+      ))}
+      {/* Motion blurs along one line, as Photoshop's Motion Blur; Radius becomes Distance and Angle shows next to the checkbox. */}
+      {adjustment.kind === "blur" && (angle ? (
+        <AdjustmentRow
+          id={`layer-adjust-${node}-${adjustment.id}-angle`}
+          label={angle.label}
+          min={angle.min}
+          max={angle.max}
+          unit={angle.unit}
+          neutral={angle.neutral}
+          withSign={angle.signed}
+          value={adjustmentNumber(adjustment, "angle")}
+          disabled={disabled}
+          onChange={(value) => onChange(node, adjustment.id, "angle", value)}
+          lead={motionCheck}
+        />
+      ) : (
+        <div className="layer-adjust-row" data-help="Motion: blur along one line, as if the camera moved">{motionCheck}</div>
       ))}
       {/* Colorize gives every pixel one hue; the sliders then set that hue and its strength. */}
       {adjustment.kind === "hueSaturation" && (
@@ -326,7 +365,7 @@ function AdjustmentSliders({ node, adjustment, disabled, onChange, onColorize, o
  * adjustment; clicking a chip makes it the Mask tool's target, and its arrow
  * opens its options.
  */
-export const StepsPanel = memo(function StepsPanel({ documentId, hasBase, origin, baseAdjust, history, current, maskTarget, maskRedShown, canPasteMask, pending, thumbnails, disabled, groupIds, onSelect, onSelectMany, onToggleVisible, onShowAll, onSnapshot, onNewLayer, onDelete, onMaskDeselect, onRename, onMove, onPartAction, onAdjustValue, onAdjustColorize, onAdjustRename, onSharpenBrightnessOnly }: Props) {
+export const StepsPanel = memo(function StepsPanel({ documentId, hasBase, origin, baseAdjust, history, current, maskTarget, maskRedShown, canPasteMask, pending, thumbnails, disabled, groupIds, onSelect, onSelectMany, onToggleVisible, onShowAll, onSnapshot, onNewLayer, onDelete, onMaskDeselect, onRename, onMove, onPartAction, onAdjustValue, onAdjustColorize, onAdjustRename, onSharpenBrightnessOnly, onBlurMotion }: Props) {
   /** The top layer is listed first, like a stack; the original image is at the bottom. */
   const nodes = Array.from({ length: history.length + (hasBase ? 1 : 0) }, (_, node) => history.length - node);
   const layerCount = nodes.length;
@@ -721,6 +760,7 @@ export const StepsPanel = memo(function StepsPanel({ documentId, hasBase, origin
                     onChange={onAdjustValue}
                     onColorize={onAdjustColorize}
                     onBrightnessOnly={onSharpenBrightnessOnly}
+                    onMotion={onBlurMotion}
                   />
                 </SliderPopover>
               )}

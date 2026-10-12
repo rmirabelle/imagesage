@@ -734,6 +734,10 @@ select option:disabled { color: #777d8e; }
 .layer-adjust-row label { color: #8c91a1; font-size: 11px; font-weight: 600; }
 .layer-adjust-row input[type="range"] { width: 100%; accent-color: var(--accent); }
 .layer-adjust-check input[type="checkbox"] { grid-column: span 2; justify-self: start; }
+.layer-adjust-row .layer-adjust-motion { display: flex; align-items: center; gap: 6px; cursor: pointer; white-space: nowrap; }
+.layer-adjust-motion input[type="checkbox"] { margin: 0; }
+.layer-adjust-inline { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.layer-adjust-inline input[type="range"] { flex: 1; min-width: 0; }
 .layer-adjust-row output { color: #ffffff; font-size: 11px; font-variant-numeric: tabular-nums; text-align: right; }
 .steps-menu {
   position: fixed;
@@ -2089,7 +2093,6 @@ select option:disabled { color: #777d8e; }
 .color-transparent { grid-column: 1 / -1; }
 .color-field.disabled > * { opacity: .35; }
 .color-field.disabled input { cursor: default; }
-.color-wheel-clear { position: absolute; inset: 0; border-radius: 50%; background: repeating-conic-gradient(#ffffff 0% 25%, #cccccc 0% 50%) 0 0 / 12px 12px; pointer-events: none; }
 .color-picker.transparent .color-wheel canvas { cursor: default; }
 .color-remove { padding: 4px 9px; border: 1px solid #454b5b; border-radius: 5px; color: #edf0f5; background: #1d2029; font-size: 11px; cursor: pointer; }
 .color-remove:hover { border-color: #f87171; color: #ffffff; }
@@ -2109,9 +2112,9 @@ select option:disabled { color: #777d8e; }
   background: var(--panel-raised);
   box-shadow: 0 12px 32px rgba(0, 0, 0, .5);
 }
-.color-wheel { position: relative; flex: 0 0 auto; margin-bottom: 10px; border-radius: 50%; box-shadow: 0 0 0 1px #000000; line-height: 0; }
-/* The thin black ring is on the frame around the wheel, so it stays solid when the wheel shows a see-through color. */
-.color-wheel canvas { border-radius: 50%; cursor: crosshair; touch-action: none; }
+/* The canvas draws the wheel's round edge and its thin black ring; CSS round clipping gives jagged edges. */
+.color-wheel { position: relative; flex: 0 0 auto; margin-bottom: 10px; line-height: 0; }
+.color-wheel canvas { cursor: crosshair; touch-action: none; }
 .color-wheel-marker { position: absolute; width: 14px; height: 14px; margin: -7px 0 0 -7px; border: 2px solid #ffffff; border-radius: 50%; box-shadow: 0 0 0 1px rgba(0,0,0,.7); pointer-events: none; }
 /* The wheel's section fills the left of the panel from top to bottom (over the panel padding), a little darker, with a line on its right. */
 .color-wheel-section {

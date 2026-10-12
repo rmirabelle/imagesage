@@ -1,5 +1,6 @@
 import { colorizeFilterUrl } from "./colorize";
 import { contrastFilterUrl, type ContrastParams } from "./contrast";
+import { motionBlurFilterUrl } from "./motionBlur";
 import { sharpenFilterUrl } from "./sharpen";
 import type { Adjustment, AdjustmentKind, LayerAdjust } from "./types";
 
@@ -49,7 +50,7 @@ export const adjustList = (adjust: LayerAdjust | undefined): LayerAdjust => Arra
 export const ADJUSTMENT_LABELS: Record<AdjustmentKind, string> = { brightness: "Brightness", contrast: "Contrast", hueSaturation: "Hue/Saturation", opacity: "Opacity", blur: "Blur", sharpen: "Sharpen" };
 
 /** A number an adjustment keeps. */
-export type AdjustmentField = "value" | "hue" | "saturation" | "lightness" | "pivot" | "curve" | "color" | "radius";
+export type AdjustmentField = "value" | "hue" | "saturation" | "lightness" | "pivot" | "curve" | "color" | "radius" | "angle";
 
 /**
  * The sliders of each kind of adjustment: which number, its name, its range,
@@ -73,7 +74,7 @@ export const ADJUSTMENT_FIELDS: Record<AdjustmentKind, { field: AdjustmentField;
     { field: "lightness", label: "Lightness", min: -100, max: 100, unit: "", neutral: 0, signed: true }
   ],
   opacity: [{ field: "value", label: "Opacity", min: 0, max: 100, unit: "%", neutral: 100, signed: false }],
-  blur: [{ field: "value", label: "Radius", min: 0, max: 100, unit: " px", neutral: 0, signed: false }],
+  blur: [{ field: "value", label: "Radius", min: 0, max: 300, unit: " px", neutral: 0, signed: false }],
   /** Only Amount changes the image by itself; Radius sets the size of the edges it works on. */
   sharpen: [
     { field: "value", label: "Amount", min: 0, max: 500, unit: "%", neutral: 0, signed: false },
@@ -99,9 +100,17 @@ export const COLORIZE_FIELDS: typeof ADJUSTMENT_FIELDS[AdjustmentKind] = [
   { field: "lightness", label: "Lightness", min: -100, max: 100, unit: "", neutral: 0, signed: true }
 ];
 
-/** The sliders of one adjustment; Colorize changes the ranges of Hue/Saturation. */
-export const adjustmentFields = (adjustment: Pick<Adjustment, "kind" | "colorize">) =>
-  adjustment.kind === "hueSaturation" && adjustment.colorize ? COLORIZE_FIELDS : ADJUSTMENT_FIELDS[adjustment.kind];
+/** Blur with Motion on: Radius becomes Distance, the length of the blur line, and Angle sets its direction. */
+export const MOTION_BLUR_FIELDS: typeof ADJUSTMENT_FIELDS[AdjustmentKind] = [
+  { field: "value", label: "Distance", min: 0, max: 300, unit: " px", neutral: 0, signed: false },
+  { field: "angle", label: "Angle", min: -90, max: 90, unit: "°", neutral: 0, signed: true }
+];
+
+/** The sliders of one adjustment; Colorize changes the ranges of Hue/Saturation, and Motion the sliders of Blur. */
+export const adjustmentFields = (adjustment: Pick<Adjustment, "kind" | "colorize" | "motion">) =>
+  adjustment.kind === "hueSaturation" && adjustment.colorize ? COLORIZE_FIELDS
+    : adjustment.kind === "blur" && adjustment.motion ? MOTION_BLUR_FIELDS
+      : ADJUSTMENT_FIELDS[adjustment.kind];
 
 /** One number of an adjustment; a number it does not keep is its neutral value, or 0. */
 export const adjustmentNumber = (adjustment: Adjustment, field: AdjustmentField) =>
@@ -177,7 +186,10 @@ export function adjustmentFilter(adjustment?: Adjustment): string | null {
     ].filter(Boolean);
     return parts.length ? parts.join(" ") : null;
   }
-  if (adjustment.kind === "blur") return adjustment.value > 0 ? `blur(${adjustment.value}px)` : null;
+  if (adjustment.kind === "blur") {
+    if (adjustment.value <= 0) return null;
+    return adjustment.motion ? motionBlurFilterUrl({ distance: adjustment.value, angle: adjustmentNumber(adjustment, "angle") }) : `blur(${adjustment.value}px)`;
+  }
   if (adjustment.kind === "sharpen") {
     return adjustment.value > 0
       ? sharpenFilterUrl({ amount: adjustment.value / 100, radius: adjustmentNumber(adjustment, "radius") / 10, brightnessOnly: !adjustment.colorSharpen })

@@ -131,7 +131,9 @@ export type AdjustmentKind = "brightness" | "contrast" | "hueSaturation" | "opac
  * gray it pushes away from (0 to 100), `curve` as how much the change rolls off
  * near black and white instead of clipping (0 to 100), and `color` as how much
  * it works on each color instead of on brightness only (0 to 100). Blur uses
- * `value` as its radius in image pixels (0 to 100).
+ * `value` as its radius in image pixels (0 to 300); with `motion`, `value` is
+ * the length of a blur along one line instead, at `angle` (-90 to 90 degrees,
+ * 0 is level).
  * For the others, 0 is no change. `off` keeps it
  * but does not use it. `mask` is a PNG whose alpha is where the adjustment
  * applies (with `maskHides`, where it does not); no mask means it applies to
@@ -152,6 +154,9 @@ export interface Adjustment {
    */
   radius?: number;
   colorSharpen?: boolean;
+  /** Blur along one line, at `angle`, as Photoshop's Motion Blur. */
+  motion?: boolean;
+  angle?: number;
   /** A name the user gave the adjustment; its chip shows it in place of the numbers. */
   label?: string;
   pivot?: number;

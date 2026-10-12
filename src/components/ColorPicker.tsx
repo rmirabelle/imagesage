@@ -109,7 +109,11 @@ export function ColorPicker({ color, onChange, open, onOpenChange: setOpen, labe
     onChange(hsbToHex(value));
   };
 
-  /** The wheel at the current brightness: hues around it, white in the middle. */
+  /**
+   * The wheel at the current brightness: hues around it, white in the middle.
+   * The canvas draws all of it, the checkerboard and the thin black ring too,
+   * so the edge is one smooth circle (CSS round clipping gives jagged edges).
+   */
   useLayoutEffect(() => {
     const canvas = wheelRef.current;
     if (!open || !canvas || grays) return;
@@ -121,24 +125,45 @@ export function ColorPicker({ color, onChange, open, onOpenChange: setOpen, labe
     }
     const context = canvas.getContext("2d")!;
     const center = size / 2;
+    const ring = ratio;
+    const radius = center - ring / 2;
+    const disc = (fill: string | CanvasGradient | CanvasPattern) => {
+      context.fillStyle = fill;
+      context.beginPath();
+      context.arc(center, center, radius, 0, Math.PI * 2);
+      context.fill();
+    };
     context.clearRect(0, 0, size, size);
-    context.save();
+    if (transparent || alpha !== undefined) {
+      const square = Math.max(1, Math.round(4 * ratio));
+      const tile = document.createElement("canvas");
+      tile.width = tile.height = square * 2;
+      const tileContext = tile.getContext("2d")!;
+      tileContext.fillStyle = "#ffffff";
+      tileContext.fillRect(0, 0, square * 2, square * 2);
+      tileContext.fillStyle = "#cccccc";
+      tileContext.fillRect(square, 0, square, square);
+      tileContext.fillRect(0, square, square, square);
+      disc(context.createPattern(tile, "repeat")!);
+    }
+    if (!transparent) {
+      context.globalAlpha = alpha !== undefined ? alpha / 100 : 1;
+      const hues = context.createConicGradient(-Math.PI / 2, center, center);
+      for (let hue = 0; hue <= 360; hue += 30) hues.addColorStop(hue / 360, hsbToHex({ h: hue, s: 100, b: 100 }));
+      disc(hues);
+      const white = context.createRadialGradient(center, center, 0, center, center, radius);
+      white.addColorStop(0, "#ffffff");
+      white.addColorStop(1, "rgba(255,255,255,0)");
+      disc(white);
+      disc(`rgba(0,0,0,${1 - hsb.b / 100})`);
+      context.globalAlpha = 1;
+    }
+    context.lineWidth = ring;
+    context.strokeStyle = "#000000";
     context.beginPath();
-    context.arc(center, center, center, 0, Math.PI * 2);
-    context.clip();
-    const hues = context.createConicGradient(-Math.PI / 2, center, center);
-    for (let hue = 0; hue <= 360; hue += 30) hues.addColorStop(hue / 360, hsbToHex({ h: hue, s: 100, b: 100 }));
-    context.fillStyle = hues;
-    context.fillRect(0, 0, size, size);
-    const white = context.createRadialGradient(center, center, 0, center, center, center);
-    white.addColorStop(0, "#ffffff");
-    white.addColorStop(1, "rgba(255,255,255,0)");
-    context.fillStyle = white;
-    context.fillRect(0, 0, size, size);
-    context.fillStyle = `rgba(0,0,0,${1 - hsb.b / 100})`;
-    context.fillRect(0, 0, size, size);
-    context.restore();
-  }, [hsb.b, open, grays]);
+    context.arc(center, center, radius, 0, Math.PI * 2);
+    context.stroke();
+  }, [hsb.b, open, grays, transparent, alpha]);
 
   /** A click outside closes the picker; a click on the image picks a color instead. Esc closes it. */
   useEffect(() => {
@@ -229,11 +254,11 @@ export function ColorPicker({ color, onChange, open, onOpenChange: setOpen, labe
           {/* The wheel's section: the left part of the panel, top to bottom, a little darker, with the wheel in its middle. */}
           {!grays && <div className="color-wheel-section">
             {chips}
-            {/* With an opacity, the wheel is as see-through as the color, over a checkerboard. */}
-            <div className="color-wheel" style={alpha !== undefined ? { background: CHECKERS, borderRadius: "50%" } : undefined}>
+            {/* With an opacity, the canvas draws the wheel as see-through as the color, over a checkerboard. */}
+            <div className="color-wheel">
               <canvas
                 ref={wheelRef}
-                style={{ width: WHEEL_SIZE, height: WHEEL_SIZE, opacity: alpha !== undefined ? alpha / 100 : 1 }}
+                style={{ width: WHEEL_SIZE, height: WHEEL_SIZE }}
                 onPointerDown={(event) => {
                   if (transparent) return;
                   event.currentTarget.setPointerCapture(event.pointerId);
@@ -244,15 +269,13 @@ export function ColorPicker({ color, onChange, open, onOpenChange: setOpen, labe
                 }}
                 aria-label="Color wheel"
               />
-              {transparent
-                ? <span className="color-wheel-clear" aria-hidden="true" />
-                : (
-                  <span
-                    className="color-wheel-marker"
-                    style={{ left: WHEEL_SIZE / 2 + Math.cos(angle) * markerRadius, top: WHEEL_SIZE / 2 + Math.sin(angle) * markerRadius, background: hex }}
-                    aria-hidden="true"
-                  />
-                )}
+              {!transparent && (
+                <span
+                  className="color-wheel-marker"
+                  style={{ left: WHEEL_SIZE / 2 + Math.cos(angle) * markerRadius, top: WHEEL_SIZE / 2 + Math.sin(angle) * markerRadius, background: hex }}
+                  aria-hidden="true"
+                />
+              )}
             </div>
           </div>}
           {/* OK fills the bottom-right corner of the panel; the panel's rounded corner is its corner. */}

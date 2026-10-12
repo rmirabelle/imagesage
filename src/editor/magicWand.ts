@@ -240,6 +240,39 @@ export function smoothEdge(levels: Uint8Array, width: number, height: number): U
 }
 
 /**
+ * Softens the edge of a selection, as Photoshop's Feather does: the levels
+ * are blurred (three box blurs, close to a Gaussian blur), so the edge fades
+ * from fully selected to unselected over about `radius` pixels on each side.
+ * Pixels past the image edge count as the nearest edge pixel, so a selection
+ * that touches the image edge stays whole there.
+ */
+export function featherSelection(levels: Uint8Array, width: number, height: number, radius: number): Uint8Array {
+  if (radius <= 0) return levels.slice();
+  /** Three box blurs of half width `box` together blur with a spread (sigma) of about radius / 2. */
+  const sigma = radius / 2;
+  const box = Math.max(1, Math.round((Math.sqrt(1 + 4 * sigma * sigma) - 1) / 2));
+  let values = Float32Array.from(levels);
+  let scratch = new Float32Array(levels.length);
+  /** One box blur along a line of `count` values from `start`, `step` apart, into `scratch`. */
+  const blurLine = (start: number, step: number, count: number) => {
+    const at = (index: number) => values[start + Math.min(count - 1, Math.max(0, index)) * step];
+    let sum = 0;
+    for (let index = -box; index <= box; index++) sum += at(index);
+    for (let index = 0; index < count; index++) {
+      scratch[start + index * step] = sum / (box * 2 + 1);
+      sum += at(index + box + 1) - at(index - box);
+    }
+  };
+  for (let pass = 0; pass < 3; pass++) {
+    for (let y = 0; y < height; y++) blurLine(y * width, 1, width);
+    [values, scratch] = [scratch, values];
+    for (let x = 0; x < width; x++) blurLine(x, width, height);
+    [values, scratch] = [scratch, values];
+  }
+  return Uint8Array.from(values, (value) => Math.round(value));
+}
+
+/**
  * The box of a rectangle or ellipse selection dragged from `start` to
  * `current`. With `even` (Shift held), its sides are equal: a square or a
  * circle; with `centered` (Alt held), `start` is its center instead of a corner.
