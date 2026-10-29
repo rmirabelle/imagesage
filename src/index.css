@@ -1999,6 +1999,12 @@ select option:disabled { color: #777d8e; }
 .settings-key-status code { color: #c3d0fc; font-family: "Cascadia Mono", Consolas, monospace; font-size: 11.5px; }
 .settings-key-actions { display: flex; gap: 6px; margin-left: auto; }
 .settings-help { color: #7f8595; font-size: 11px; line-height: 1.45; }
+/* Local engine model files: a wider label column, so "Free memory after" fits on one line. */
+.local-files .form-row { grid-template-columns: 116px minmax(0, 1fr); }
+.local-idle { display: flex; align-items: center; gap: 9px; color: #9298a7; font-size: 12px; }
+.local-idle .settings-input { width: 80px; }
+.local-negative { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; }
+.local-negative textarea { min-height: 76px; resize: vertical; line-height: 1.4; }
 /* A setting that is on or off: a check box before its label. */
 .settings-toggle { display: flex; align-items: center; gap: 9px; color: #d9dce3; font-size: 12.5px; cursor: pointer; }
 .settings-link { padding: 0; border: 0; color: var(--secondary); background: transparent; font: inherit; text-decoration: underline; cursor: pointer; }

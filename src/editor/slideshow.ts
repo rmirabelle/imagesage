@@ -184,6 +184,40 @@ export function slideshowSegments(stages: number, intro: boolean, layerSeconds =
   return segments;
 }
 
+/**
+ * The standard slideshow: each picture once, from the original image to the
+ * final image, with no names and no overlay. The first frame is the original
+ * image; each next picture crossfades in over CROSSFADE seconds, then shows
+ * alone for the chosen seconds. The end fades to black as in the other style.
+ */
+export const CROSSFADE = 2;
+/** The seconds a slide shows alone by default, and the range the user can choose. */
+export const SLIDE_SECONDS = 3;
+export const MIN_SLIDE_SECONDS = 1;
+export const MAX_SLIDE_SECONDS = 10;
+
+/** The video style: "story" has the title box, names, flashes and the return to the original; "standard" shows each picture once. */
+export type SlideshowStyle = "story" | "standard";
+
+/** The standard slideshow's segments for `stages` pictures; each shows alone for `slideSeconds`. */
+export function standardSegments(stages: number, slideSeconds = defaultSlideSeconds(stages)): Segment[] {
+  return Array.from({ length: Math.max(1, stages) }, (_, picture) => {
+    const fade = picture === 0 ? 0 : CROSSFADE;
+    return { picture, duration: fade + slideSeconds, fade, throughBlack: false, labelLead: 0, flashes: 0, label: null, labelFor: 0, overlay: null };
+  });
+}
+
+/**
+ * The seconds each slide shows alone unless the user chooses: SLIDE_SECONDS,
+ * or less so the video fits in MAX_VIDEO_SECONDS, but not below
+ * MIN_SLIDE_SECONDS. It is rounded down to a tenth of a second.
+ */
+export function defaultSlideSeconds(stages: number) {
+  const count = Math.max(1, stages);
+  const fit = (MAX_VIDEO_SECONDS - FADE_OUT - CROSSFADE * (count - 1)) / count;
+  return Math.floor(Math.min(SLIDE_SECONDS, Math.max(MIN_SLIDE_SECONDS, fit)) * 10 + 1e-6) / 10;
+}
+
 /** Seconds the music takes to fade in, so a track cut mid-song does not start abruptly. */
 export const MUSIC_FADE_IN = 1;
 

@@ -5,7 +5,18 @@ import { cancelAiRequest } from "../lib/ai";
 import { formatMegabytes } from "../lib/models";
 import { AUDIO_FILE_EXTENSIONS, decodeAudioFile, decodeTrack, downloadTrack, listTracks, type TrackInfo } from "../lib/music";
 import type { SlideshowOptions } from "../lib/slideshowVideo";
-import { defaultLayerSeconds, MAX_LAYER_SECONDS, MIN_LAYER_SECONDS, slideshowDuration, slideshowSegments } from "../editor/slideshow";
+import {
+  defaultLayerSeconds,
+  defaultSlideSeconds,
+  MAX_LAYER_SECONDS,
+  MAX_SLIDE_SECONDS,
+  MIN_LAYER_SECONDS,
+  MIN_SLIDE_SECONDS,
+  slideshowDuration,
+  slideshowSegments,
+  standardSegments,
+  type SlideshowStyle
+} from "../editor/slideshow";
 import { MusicPicker } from "./MusicPicker";
 
 /** The music picked last in any image: the choice for an image that has no video yet. */
@@ -16,6 +27,13 @@ const IMAGE_MUSIC_KEY = "imagesage.slideshow-music-by-image";
 const IMAGE_MUSIC_LIMIT = 200;
 /** The video shape picked last: "vertical" for 9:16, anything else for the image's own shape. */
 const SHAPE_KEY = "imagesage.slideshow-shape";
+/** The video style picked last: "standard", or anything else for the story style. */
+const STYLE_KEY = "imagesage.slideshow-style";
+/** What each style's video shows, for the dialog's header. */
+const STYLE_TEXT: Record<SlideshowStyle, string> = {
+  story: "Opens on the final image with a title box, shows the original image and each visible layer with its name, then the original image again, and closes as the final image fades in over it. MP4, up to 1080p.",
+  standard: "Shows the original image, then each visible layer once, in order, with a 2-second crossfade between them. No names and no title box. MP4, up to 1080p."
+};
 type ImageMusic = { track: string; start: number };
 /** A music choice that is an audio file on this PC: this prefix, then its path. */
 const FILE_PREFIX = "file:";
@@ -74,17 +92,25 @@ type TrackLoad = { id: string; progress: number | null; requestId: string };
 export function SlideshowDialog({ defaultTitle, stages, imageKeys, onCancel, onExport }: Props) {
   const [title, setTitle] = useState(defaultTitle);
   const [vertical, setVertical] = useState(() => readStored(SHAPE_KEY) === "vertical");
-  /** Seconds each layer shows; by default the video fits in 90 seconds. */
+  const [style, setStyle] = useState<SlideshowStyle>(() => readStored(STYLE_KEY) === "standard" ? "standard" : "story");
+  const standard = style === "standard";
+  /** Seconds each layer shows in the story style; by default the video fits in 90 seconds. */
   const [layerSeconds, setLayerSeconds] = useState(() => defaultLayerSeconds(stages, true));
-  /** The seconds box's text while the user types in it; null shows `layerSeconds`. */
+  /** Seconds each slide shows alone in the standard style, after its crossfade. */
+  const [slideSeconds, setSlideSeconds] = useState(() => defaultSlideSeconds(stages));
+  const seconds = standard ? slideSeconds : layerSeconds;
+  const setSeconds = standard ? setSlideSeconds : setLayerSeconds;
+  const minSeconds = standard ? MIN_SLIDE_SECONDS : MIN_LAYER_SECONDS;
+  const maxSeconds = standard ? MAX_SLIDE_SECONDS : MAX_LAYER_SECONDS;
+  /** The seconds box's text while the user types in it; null shows `seconds`. */
   const [secondsDraft, setSecondsDraft] = useState<string | null>(null);
   /** How long the video runs, in seconds: the music box is this long. */
-  const videoSeconds = slideshowDuration(slideshowSegments(stages, true, layerSeconds));
+  const videoSeconds = slideshowDuration(standard ? standardSegments(stages, slideSeconds) : slideshowSegments(stages, true, layerSeconds));
   /** Typed text that is a number goes into the range at one decimal; other text keeps the old value. */
   const commitSecondsDraft = () => {
     const typed = Number(secondsDraft);
     if (secondsDraft !== null && secondsDraft.trim() && Number.isFinite(typed)) {
-      setLayerSeconds(Math.round(Math.min(MAX_LAYER_SECONDS, Math.max(MIN_LAYER_SECONDS, typed)) * 10) / 10);
+      setSeconds(Math.round(Math.min(maxSeconds, Math.max(minSeconds, typed)) * 10) / 10);
     }
     setSecondsDraft(null);
   };
@@ -203,8 +229,11 @@ export function SlideshowDialog({ defaultTitle, stages, imageKeys, onCancel, onE
   const submit = () => {
     if (busy || (trackId && !music)) return;
     storeImageMusic(imageKeys, { track: music ? trackId : "", start: music ? start : 0 });
-    try { localStorage.setItem(SHAPE_KEY, vertical ? "vertical" : "image"); } catch { /* Remembering is a convenience only. */ }
-    onExport({ title, music: music ? { buffer: music.buffer, start } : null, layerSeconds, vertical });
+    try {
+      localStorage.setItem(SHAPE_KEY, vertical ? "vertical" : "image");
+      localStorage.setItem(STYLE_KEY, style);
+    } catch { /* Remembering is a convenience only. */ }
+    onExport({ style, title, music: music ? { buffer: music.buffer, start } : null, layerSeconds: seconds, vertical });
   };
 
   return (
@@ -214,7 +243,7 @@ export function SlideshowDialog({ defaultTitle, stages, imageKeys, onCancel, onE
           <div className="save-dialog-title-icon"><FilmStrip size={22} weight="duotone" /></div>
           <div>
             <h2 id="slideshow-title">Export video slideshow</h2>
-            <p>Opens on the final image with a title box, shows the original image and each visible layer with its name, then the original image again, and closes as the final image fades in over it. MP4, up to 1080p.</p>
+            <p>{STYLE_TEXT[style]}</p>
           </div>
           <button className="save-dialog-close" onClick={onCancel} aria-label="Close" data-help="Close">
             <X size={18} />
@@ -222,9 +251,18 @@ export function SlideshowDialog({ defaultTitle, stages, imageKeys, onCancel, onE
         </header>
         <div className="save-dialog-body slideshow-body">
           <label className="form-row">
-            <span className="form-row-label">Title</span>
-            <input className="settings-input" value={title} autoFocus onChange={(event) => setTitle(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") submit(); }} spellCheck={false} />
+            <span className="form-row-label">Style</span>
+            <select value={style} onChange={(event) => { setStyle(event.target.value === "standard" ? "standard" : "story"); setSecondsDraft(null); }}>
+              <option value="story">Story: title box, layer names</option>
+              <option value="standard">Standard: crossfades only</option>
+            </select>
           </label>
+          {!standard && (
+            <label className="form-row">
+              <span className="form-row-label">Title</span>
+              <input className="settings-input" value={title} autoFocus onChange={(event) => setTitle(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") submit(); }} spellCheck={false} />
+            </label>
+          )}
           <label className="form-row" data-help="Vertical puts the whole image in the middle of a 1080 by 1920 video, over a blurred copy of it. Use it for Instagram Reels and other phone feeds.">
             <span className="form-row-label">Shape</span>
             <select value={vertical ? "vertical" : "image"} onChange={(event) => setVertical(event.target.value === "vertical")}>
@@ -232,21 +270,26 @@ export function SlideshowDialog({ defaultTitle, stages, imageKeys, onCancel, onE
               <option value="vertical">Vertical 9:16, blurred background</option>
             </select>
           </label>
-          <label className="form-row" data-help={`Seconds each layer shows, ${MIN_LAYER_SECONDS} to ${MAX_LAYER_SECONDS}. The first value fits the video in 90 seconds.`}>
-            <span className="form-row-label">Seconds per layer</span>
+          <label
+            className="form-row"
+            data-help={standard
+              ? `Seconds each slide shows alone after its 2-second crossfade, ${MIN_SLIDE_SECONDS} to ${MAX_SLIDE_SECONDS}. The first value fits the video in 90 seconds, up to 3 seconds per slide.`
+              : `Seconds each layer shows, ${MIN_LAYER_SECONDS} to ${MAX_LAYER_SECONDS}. The first value fits the video in 90 seconds.`}
+          >
+            <span className="form-row-label">{standard ? "Seconds per slide" : "Seconds per layer"}</span>
             <span className="slideshow-seconds">
               <input
                 className="settings-input"
                 type="number"
-                min={MIN_LAYER_SECONDS}
-                max={MAX_LAYER_SECONDS}
+                min={minSeconds}
+                max={maxSeconds}
                 step={0.1}
-                value={secondsDraft ?? layerSeconds.toFixed(1)}
+                value={secondsDraft ?? seconds.toFixed(1)}
                 onChange={(event) => {
                   setSecondsDraft(event.target.value);
                   /** The spinner arrows give a whole value at once, so the video length follows them. */
                   const typed = Number(event.target.value);
-                  if (event.target.value.trim() && typed >= MIN_LAYER_SECONDS && typed <= MAX_LAYER_SECONDS) setLayerSeconds(Math.round(typed * 10) / 10);
+                  if (event.target.value.trim() && typed >= minSeconds && typed <= maxSeconds) setSeconds(Math.round(typed * 10) / 10);
                 }}
                 onBlur={commitSecondsDraft}
                 onKeyDown={(event) => { if (event.key === "Enter") event.currentTarget.blur(); }}
@@ -282,7 +325,7 @@ export function SlideshowDialog({ defaultTitle, stages, imageKeys, onCancel, onE
               </div>
             </div>
           )}
-          <p className="slideshow-note">The title box also says "made with Image Sage™" with the app icon, and the app version.</p>
+          {!standard && <p className="slideshow-note">The title box also says "made with Image Sage™" with the app icon, and the app version.</p>}
         </div>
         <footer className="save-dialog-actions">
           <button className="button secondary" onClick={onCancel}>Cancel</button>

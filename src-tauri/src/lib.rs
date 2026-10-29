@@ -2,6 +2,7 @@ mod browse;
 mod credentials;
 mod document;
 mod files;
+mod local;
 mod openai;
 mod pricing;
 mod recovery;
@@ -83,7 +84,9 @@ pub fn run() {
         .manage(PendingOpenDocument(Mutex::new(initial_document)))
         .manage(requests::AiRequests::default())
         .manage(sam::SamModel::default())
+        .manage(local::LocalEngine::default())
         .setup(|app| {
+            local::watch_idle(app.state::<local::LocalEngine>().inner().clone());
             restore_main_window(app.handle());
             Ok(())
         })
@@ -107,6 +110,12 @@ pub fn run() {
             credentials::open_api_keys_page,
             openai::ai_generate,
             openai::ai_edit_whole,
+            local::local_status,
+            local::local_config_set,
+            local::local_find_models,
+            local::local_engine_download,
+            local::local_load,
+            local::local_generate,
             pricing::fetch_prices,
             spend::spend_record,
             recovery::recovery_save,

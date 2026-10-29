@@ -58,13 +58,17 @@ import { ADJUSTMENT_LABELS, adjustList, adjustmentFields, setColorize, newAdjust
 import {
   wholeImageSize
 } from "../editor/region";
+import { localImageSize } from "../editor/localSize";
 import type { Adjustment, BlendMode, EditStep, LayerAdjust, LayerPart, MaskImage, Point, Rect, SentRegion, TransformSource } from "../editor/types";
 import {
   CANCELLED_MESSAGE,
   canAbort,
-  canCancel,
   cancelAiRequest,
   IMAGE_MODELS,
+  isLocalModel,
+  jobCanCancel,
+  LOCAL_MODELS,
+  LOCAL_STEPS,
   editWholeImage,
   generateImage,
   qualitiesFor,
@@ -603,6 +607,9 @@ interface Props {
   /** OpenAI is connected; every edit needs it. */
   openaiConnected: boolean;
   onRequestOpenAiSettings: () => void;
+  /** The local engine is installed and its model files are set, so local models can make new images. */
+  localReady: boolean;
+  onRequestLocalSettings: () => void;
   onSettingsChange: (settings: AiSettings) => void;
   onCommit: (id: string, patch: Partial<Pick<ImageDocument, "base" | "baseAdjust" | "history" | "historyIndex" | "surface">>, markDirty?: boolean) => void;
   onBusyChange: (id: string, busy: boolean) => void;
@@ -688,6 +695,8 @@ export function Editor({
   settings,
   openaiConnected,
   onRequestOpenAiSettings,
+  localReady,
+  onRequestLocalSettings,
   onSettingsChange,
   onCommit,
   onBusyChange,
@@ -964,7 +973,8 @@ export function Editor({
     setJobs((list) => list.filter((item) => item.requestId !== requestId));
     onBusyChange(documentId, runningRef.current > 0);
   }, [onBusyChange]);
-  const wholeSize = wholeImageSize(width, height);
+  const localChosen = isLocalModel(settings.wholeModel);
+  const wholeSize = localChosen ? localImageSize(width, height) : wholeImageSize(width, height);
   const lastStep = imageDocument.historyIndex > 0 ? imageDocument.history[imageDocument.historyIndex - 1] : null;
   /** The selected layer's adjustments; the original image keeps its own on the document. */
   const selectedAdjust = lastStep ? lastStep.adjust : imageDocument.baseAdjust;
@@ -1568,8 +1578,9 @@ export function Editor({
   /**
    * Edits the whole image with GPT Image (the visible layers, or `from`); the
    * result is a new top layer, or replaces layer `replaceId`. On an empty
-   * canvas, GPT Image generates the image from the prompt alone. `choice`
-   * overrides the model and quality of the prompt bar.
+   * canvas, GPT Image generates the image from the prompt alone. A local model
+   * always generates from the prompt alone, never edits. `choice` overrides
+   * the model and quality of the prompt bar.
    */
   const runWholeEdit = useCallback(async (instruction: string, from?: HTMLCanvasElement, replaceId?: string, choice?: { model: string; quality: string }) => {
     const current = documentRef.current;
@@ -1578,34 +1589,43 @@ export function Editor({
       onNotice({ tone: "error", message: "Apply (Enter) or cancel (Esc) the transform first." });
       return;
     }
-    if (!openaiConnected) {
-      onRequestOpenAiSettings();
+    const model = choice?.model ?? settings.wholeModel;
+    const quality = choice?.quality ?? settings.wholeQuality;
+    const local = isLocalModel(model);
+    if (local ? !localReady : !openaiConnected) {
+      if (local) onRequestLocalSettings();
+      else onRequestOpenAiSettings();
       return;
     }
     const imageWidth = current.surface.width;
     const imageHeight = current.surface.height;
-    const size = wholeImageSize(imageWidth, imageHeight);
+    const size = local ? localImageSize(imageWidth, imageHeight) : wholeImageSize(imageWidth, imageHeight);
     if (!size) {
-      onNotice({ tone: "error", message: "GPT Image cannot edit an image wider or taller than 3:1." });
+      onNotice({ tone: "error", message: local ? "Chroma1-HD cannot make an image wider or taller than 4:1." : "GPT Image cannot edit an image wider or taller than 3:1." });
       return;
     }
     const area: Rect = { x: 0, y: 0, width: imageWidth, height: imageHeight };
     const sent: SentRegion = { ...area, margin: 0, requestWidth: size.width, requestHeight: size.height };
     const sizeText = `${size.width}x${size.height}`;
-    const model = choice?.model ?? settings.wholeModel;
-    const quality = choice?.quality ?? settings.wholeQuality;
     const requestId = crypto.randomUUID();
-    setNow(Date.now());
-    startJob(current.id, { requestId, frame: area, sent, service: "OpenAI", stage: null, progress: null, partialDataUrl: null, startedAt: Date.now(), prompt: instruction.trim(), replaceId, model, quality });
+    const startedAt = Date.now();
+    setNow(startedAt);
+    startJob(current.id, { requestId, frame: area, sent, service: local ? "Local" : "OpenAI", stage: null, progress: null, partialDataUrl: null, startedAt, prompt: instruction.trim(), replaceId, model, quality });
     onNotice(null);
     try {
       await composeRef.current;
       const work = cloneCanvas(from ?? current.surface);
-      const empty = opaqueBounds(work) === null;
+      /** A local model always makes a new image from the prompt alone, as a new layer over the image. */
+      const generate = local || opaqueBounds(work) === null;
       const onProgress = (progress: AiProgress) => {
-        updateJob(requestId, (existing) => ({ ...existing, stage: progress.stage, partialDataUrl: progress.partialDataUrl ?? existing.partialDataUrl }));
+        updateJob(requestId, (existing) => ({
+          ...existing,
+          stage: progress.stage,
+          progress: progress.progress ?? existing.progress,
+          partialDataUrl: progress.partialDataUrl ?? existing.partialDataUrl
+        }));
       };
-      const result = empty
+      const result = generate
         ? await generateImage(requestId, { prompt: instruction.trim(), model, quality, size: sizeText }, onProgress)
         : await editWholeImage(requestId, { prompt: instruction.trim(), model, quality, size: sizeText, imagePng: await buildWholeUpload(work, size.width, size.height) }, onProgress);
       const resultImage = await loadImage(result.dataUrl);
@@ -1614,9 +1634,9 @@ export function Editor({
       workContext.imageSmoothingQuality = "high";
       workContext.clearRect(0, 0, imageWidth, imageHeight);
       workContext.drawImage(resultImage, 0, 0, imageWidth, imageHeight);
-      const cost = openAiActualCost(result.usage, model);
-      recordSpend(cost);
-      if (!empty) learnWholeEditInput(result.usage, model, sizeText);
+      const cost = local ? null : openAiActualCost(result.usage, model);
+      if (!local) recordSpend(cost);
+      if (!generate) learnWholeEditInput(result.usage, model, sizeText);
       const step: EditStep = {
         id: requestId,
         prompt: instruction.trim(),
@@ -1632,10 +1652,12 @@ export function Editor({
         ...(!replaceId && documentRef.current.base === "" && !documentRef.current.history.length ? { name: ORIGINAL_LAYER_NAME } : {})
       };
       const replaced = appendStep(step, work, replaceId);
-      const estimateText = formatUsd(estimateOpenAiImage(model, quality, sizeText, instruction.length));
+      const costText = local
+        ? `Made on this computer in ${Math.round((Date.now() - startedAt) / 1000)} s.`
+        : cost !== null ? `Charged ${formatUsd(cost)}.` : `Estimated cost ${formatUsd(estimateOpenAiImage(model, quality, sizeText, instruction.length))}.`;
       onNotice({
         tone: "success",
-        message: `${replaced ? `Layer replaced${hasMaskOrAdjust(replaced) ? "; its mask and adjustments were removed" : ""}.` : empty ? "Image generated." : "Whole image edited."} ${cost !== null ? `Charged ${formatUsd(cost)}.` : `Estimated cost ${estimateText}.`}`,
+        message: `${replaced ? `Layer replaced${hasMaskOrAdjust(replaced) ? "; its mask and adjustments were removed" : ""}.` : generate ? "Image generated." : "Whole image edited."} ${costText}`,
         ...(replaced ? { action: { label: "Undo", run: () => undoReplace(replaced, step.id) } } : {})
       });
     } catch (error) {
@@ -1644,7 +1666,7 @@ export function Editor({
     } finally {
       endJob(current.id, requestId);
     }
-  }, [appendStep, endJob, onCommit, onNotice, onRequestOpenAiSettings, openaiConnected, settings, startJob, undoReplace, updateJob]);
+  }, [appendStep, endJob, localReady, onCommit, onNotice, onRequestLocalSettings, onRequestOpenAiSettings, openaiConnected, settings, startJob, undoReplace, updateJob]);
 
   /** A new image from a prompt: generate it once, as the first layer, when the tab opens. */
   const startedGenerationRef = useRef(false);
@@ -4622,7 +4644,7 @@ export function Editor({
   const regenStep = lastStep && lastStep.model !== IMPORTED_MODEL && lastStep.model !== ORIGINAL_COPY_MODEL && lastStep.model !== SNAPSHOT_MODEL && lastStep.model !== BLANK_MODEL ? lastStep : undefined;
   const regenName = lastStep ? lastStep.name || `Layer ${imageDocument.historyIndex}` : "the original image";
   const regenerate = () => {
-    if (!regenStep || !prompt.trim()) return;
+    if (localChosen || !regenStep || !prompt.trim()) return;
     if (!confirms("regenerate")) void retryLayer(regenStep.id, prompt);
     else {
       setRegenDontAsk(false);
@@ -4636,8 +4658,14 @@ export function Editor({
     void retryLayer(confirmRegen.stepId, confirmRegen.instruction);
   };
   const confirmRegenStep = confirmRegen ? imageDocument.history.find((item) => item.id === confirmRegen.stepId) : undefined;
-  /** GPT Image models offered for edits: the 2.5 models, plus the current one if it is older. */
-  const editModels = IMAGE_MODELS.filter((model) => model.id.startsWith("gpt-image-2.5") || model.id === settings.wholeModel);
+  /**
+   * Models in the prompt bar: the GPT Image 2.5 models (plus the current one if
+   * it is older), and the local models for new images when the engine is ready.
+   */
+  const editModels = [
+    ...IMAGE_MODELS.filter((model) => model.id.startsWith("gpt-image-2.5") || model.id === settings.wholeModel),
+    ...LOCAL_MODELS.filter((model) => localReady || model.id === settings.wholeModel)
+  ];
 
   /**
    * A toolbar tool button acts when the mouse button goes down, so the tool
@@ -5556,14 +5584,14 @@ export function Editor({
                         >
                           <Camera size={15} weight="bold" /> {job.snapped === job.partialDataUrl ? "Captured" : "Capture"}
                         </button>
-                        {(canCancel(job.stage) || canAbort(job.stage)) && (
+                        {(jobCanCancel(job.stage, job.service) || canAbort(job.stage)) && (
                           <button
                             className="button secondary"
                             onPointerDown={(event) => event.stopPropagation()}
                             onClick={() => cancelJob(job.requestId)}
-                            data-help={canCancel(job.stage) ? undefined : "Stop waiting and discard this image. OpenAI still charges for it."}
+                            data-help={jobCanCancel(job.stage, job.service) ? undefined : "Stop waiting and discard this image. OpenAI still charges for it."}
                           >
-                            <StopCircle size={15} weight="bold" /> {canCancel(job.stage) ? "Cancel" : "Abort"}
+                            <StopCircle size={15} weight="bold" /> {jobCanCancel(job.stage, job.service) ? "Cancel" : "Abort"}
                           </button>
                         )}
                       </div>
@@ -5577,14 +5605,14 @@ export function Editor({
                         {job.progress !== null && (job.stage === "generating" || job.stage === "encoding") && ` ${Math.round(job.progress * 100)}%`}
                       </strong>
                       <span>{formatElapsed(now - job.startedAt)}</span>
-                      {(canCancel(job.stage) || canAbort(job.stage)) && (
+                      {(jobCanCancel(job.stage, job.service) || canAbort(job.stage)) && (
                         <button
                           className="button secondary"
                           onPointerDown={(event) => event.stopPropagation()}
                           onClick={() => cancelJob(job.requestId)}
-                          data-help={canCancel(job.stage) ? undefined : "Stop waiting and discard this image. OpenAI still charges for it."}
+                          data-help={jobCanCancel(job.stage, job.service) ? undefined : "Stop waiting and discard this image. OpenAI still charges for it."}
                         >
-                          <StopCircle size={15} weight="bold" /> {canCancel(job.stage) ? "Cancel" : "Abort"}
+                          <StopCircle size={15} weight="bold" /> {jobCanCancel(job.stage, job.service) ? "Cancel" : "Abort"}
                         </button>
                       )}
                     </div>}
@@ -5664,8 +5692,8 @@ export function Editor({
             status: `${stageLabel(job.stage, job.service)}${job.progress !== null && (job.stage === "generating" || job.stage === "encoding") ? ` ${Math.round(job.progress * 100)}%` : ""}`,
             prompt: job.prompt,
             note: `${formatElapsed(now - job.startedAt)}${replaced ? ` · replaces ${replaced.name || "a layer"}` : ""}`,
-            onCancel: canCancel(job.stage) || canAbort(job.stage) ? () => cancelJob(job.requestId) : undefined,
-            aborts: !canCancel(job.stage),
+            onCancel: jobCanCancel(job.stage, job.service) || canAbort(job.stage) ? () => cancelJob(job.requestId) : undefined,
+            aborts: !jobCanCancel(job.stage, job.service),
             selected: job.requestId === selectedJob,
             onSelect: () => setSelectedJob(job.requestId),
             ...(job.replaceId ? { replaces: job.replaceId } : {})
@@ -5700,21 +5728,26 @@ export function Editor({
           <div className="prompt-options">
             <select
               aria-label="Edit model"
-              data-help="The GPT Image model that edits the whole image."
+              data-help="The model for the prompt. GPT Image edits the whole image or makes a new one; a local model makes new images only, on this computer, for free."
               value={settings.wholeModel}
              
-              onChange={(event) => onSettingsChange({ ...settings, wholeModel: event.target.value })}
+              onChange={(event) => {
+                const wholeModel = event.target.value;
+                const wholeQuality = qualitiesFor(wholeModel).includes(settings.wholeQuality) ? settings.wholeQuality : "high";
+                onSettingsChange({ ...settings, wholeModel, wholeQuality });
+              }}
             >
               {editModels.map((model) => <option key={model.id} value={model.id}>{model.label}</option>)}
             </select>
               <select
-                aria-label="GPT Image edit quality"
-                data-help="Higher quality costs more and takes longer."
+                aria-label="Quality"
+                data-help={localChosen ? "More steps take longer and add detail." : "Higher quality costs more and takes longer."}
                 value={qualitiesFor(settings.wholeModel).includes(settings.wholeQuality) ? settings.wholeQuality : "high"}
                
                 onChange={(event) => onSettingsChange({ ...settings, wholeQuality: event.target.value })}
               >
                 {qualitiesFor(settings.wholeModel).map((quality) => {
+                  if (localChosen) return <option key={quality} value={quality}>{quality} · {LOCAL_STEPS[quality]} steps</option>;
                   const size = wholeSize && `${wholeSize.width}x${wholeSize.height}`;
                   return (
                     <option key={quality} value={quality}>
@@ -5729,15 +5762,17 @@ export function Editor({
               className="primary-action"
               disabled={!wholeSize || !prompt.trim()}
               onClick={submit}
-              data-help="Send the image to GPT Image. The result is a new layer (Ctrl+Enter)"
+              data-help={localChosen ? "Make a new image on this computer. The result is a new layer (Ctrl+Enter)" : "Send the image to GPT Image. The result is a new layer (Ctrl+Enter)"}
             >
               <MagicWand size={17} weight="bold" /> Generate
             </button>
             <button
               className="primary-action regenerate-action"
-              disabled={!wholeSize || !regenStep || !prompt.trim()}
+              disabled={localChosen || !wholeSize || !regenStep || !prompt.trim()}
               onClick={regenerate}
-              data-help={regenStep
+              data-help={localChosen
+                ? "A local model only adds new layers. Choose a GPT Image model to regenerate a layer."
+                : regenStep
                 ? `Regenerate ${regenName} with this prompt (Ctrl+Shift+Enter). The result replaces the layer and keeps its name; its mask and adjustments are removed. The old layer comes back if it fails or you cancel.`
                 : `Select a layer made by AI to regenerate it. ${lastStep ? `${regenName} was not made by AI.` : ""}`}
             >

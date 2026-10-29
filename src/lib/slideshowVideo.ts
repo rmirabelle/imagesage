@@ -1,5 +1,5 @@
 import { ArrayBufferTarget, Muxer } from "mp4-muxer";
-import { musicGain, SLIDESHOW_FPS, slideshowDuration, slideshowFrame, slideshowFrameCount, slideshowSegments, VERTICAL_VIDEO } from "../editor/slideshow";
+import { musicGain, SLIDESHOW_FPS, slideshowDuration, slideshowFrame, slideshowFrameCount, slideshowSegments, standardSegments, VERTICAL_VIDEO, type SlideshowStyle } from "../editor/slideshow";
 import { MUSIC_SAMPLE_RATE } from "./music";
 import { getAppVersion } from "./updater";
 
@@ -16,8 +16,10 @@ export interface SlideshowMusic {
  * blurred, enlarged copy of it that fills the rest.
  */
 export interface SlideshowOptions {
+  style: SlideshowStyle;
   title: string;
   music: SlideshowMusic | null;
+  /** Seconds per layer in the story style; seconds per slide, after its crossfade, in the standard style. */
   layerSeconds: number;
   vertical: boolean;
 }
@@ -341,8 +343,10 @@ export async function encodeSlideshow(
   const backgrounds = options.vertical ? stages.map((stage) => blurredBackground(stage, width, height)) : null;
   /** The top of the picture in a vertical video, where its name sits above it. */
   const pictureTop = options.vertical ? Math.round((height - stages[0].height) / 2) : undefined;
-  const overlay = await introOverlay(width, height, options.title, scale);
-  const segments = slideshowSegments(stages.length, true, options.layerSeconds);
+  const standard = options.style === "standard";
+  /** The standard style has no title box, so its overlay is never made. */
+  const overlay = standard ? null : await introOverlay(width, height, options.title, scale);
+  const segments = standard ? standardSegments(stages.length, options.layerSeconds) : slideshowSegments(stages.length, true, options.layerSeconds);
   const config = await pickCodec(width, height);
   const audioConfig = options.music ? await pickAudioConfig() : null;
   const muxer = new Muxer({
@@ -390,7 +394,7 @@ export async function encodeSlideshow(
       context.globalAlpha = 1;
     }
     if (shot.label !== null) drawLabel(context, shot.label === "final" ? "Final image" : names[shot.label] ?? "", shot.labelAlpha, width, scale, pictureTop);
-    if (shot.overlay > 0) {
+    if (overlay && shot.overlay > 0) {
       context.globalAlpha = shot.overlay;
       context.drawImage(overlay, 0, 0);
       context.globalAlpha = 1;

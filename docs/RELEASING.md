@@ -83,6 +83,20 @@ needs a new `model-*` release and new constants there.
   github.com/facebookresearch/sam2), encoder and decoder exported by
   `tools/model/export_sam2.py`. Used by click to select (`sam.rs`).
 
+## Local image engine (optional)
+
+Settings → Local downloads stable-diffusion.cpp's `sd-server.exe` (Windows
+CUDA 12 build) and its CUDA runtime, about 0.9 GB, from the upstream releases
+at github.com/leejet/stable-diffusion.cpp. The upstream project keeps its old
+releases, so nothing is mirrored here. `src-tauri/src/local.rs` pins the build
+(`ENGINE_BUILD`) and each zip's URL, size and SHA-256 (from the GitHub API's
+asset `digest`). The zips unpack into `%LOCALAPPDATA%\<app>\engines\<build>`.
+
+To move to a newer build: take the `win-cuda12-x64` and `cudart` assets of the
+new release, update `ENGINE_BUILD` and `ENGINE_ZIPS`, and generate one image
+with Chroma before release. The model files are the user's own (for example
+from ComfyUI); the app never downloads them.
+
 ## Slideshow music
 
 The video slideshow's music tracks download on first use from `music-*`

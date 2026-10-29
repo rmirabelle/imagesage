@@ -1,6 +1,6 @@
 [package]
 name = "imagesage"
-version = "0.10.0"
+version = "0.11.0"
 description = "Generate images with OpenAI and refine them one region at a time"
 authors = ["Rob Mirabelle"]
 edition = "2021"
@@ -34,6 +34,9 @@ tauri-plugin-single-instance = "2"
 windows = { version = "0.61.3", features = [
   "Win32_Foundation",
   "Win32_System_DataExchange",
+  "Win32_Security",
+  "Win32_System_JobObjects",
+  "Win32_System_Threading",
   "Win32_System_Memory",
   "Win32_System_Ole",
   "Win32_UI_HiDpi",

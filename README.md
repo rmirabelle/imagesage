@@ -35,6 +35,7 @@ Image Sage.
 ### Create and edit with AI
 
 - **New from prompt** — Generate a new image using GPT
+- **Local Chroma1-HD (optional)** — make new images on your own computer, free and offline, with Chroma1-HD and your own model files (for example from ComfyUI). Set it up in **Settings → Local**: the engine downloads once, and you can choose the sampler, the scheduler, and the negative prompt. Each image becomes a new layer; edits still use GPT Image.
 - **Open** - Choose your own image to start with
 - **Edit the image** - Use professional image editing tools
 - **Send multiple edit generations at once** — send a new edit while others still run. Each one shows a waiting row in the layers list, with its progress and a Cancel button, and becomes a layer when it arrives.
@@ -62,7 +63,7 @@ Image Sage.
 - **`.imagesage` documents** keep the original image, every layer, mask, and adjustment, and the prompts. Double-click a document to open it.
 - **Automatic recovery** — two seconds after a change, unsaved work is copied to the app's data folder. After a crash or restart, Image Sage offers to restore it.
 - **Export** the combined image as PNG or JPEG, with an optional largest width and height.
-- **Video slideshow** — export an MP4 (1080p) that shows the original image, then each visible layer fading in with its name.
+- **Video slideshow** — export an MP4 (1080p) that shows the original image, then each visible layer fading in with its name. The **Standard** style shows each picture once, in order, with 2-second crossfades and no names or title box.
 - **Tabs** — open several images at once.
 
 ### Workspace
@@ -106,6 +107,7 @@ Image Sage.
 
 - Windows 10 or 11 (64-bit).
 - An **OpenAI API key** for creating and editing images.
+- Optional, for local Chroma: an NVIDIA graphics card (24 GB or more of graphics memory works best) and Chroma1-HD's model files.
 
 Enter the key in **Settings** (the OpenAI button at the top right of the app). When no key is saved, Settings has a link to the OpenAI API keys page.
 

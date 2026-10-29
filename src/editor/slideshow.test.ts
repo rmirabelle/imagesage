@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
+  CROSSFADE,
+  defaultSlideSeconds,
+  MIN_SLIDE_SECONDS,
+  SLIDE_SECONDS,
+  standardSegments,
   FADE_OUT,
   FINAL_FADE,
   FINAL_HOLD,
@@ -134,6 +139,24 @@ describe("slideshow", () => {
     expect(musicGain(60, 60, 200)).toBe(0);
     expect(musicGain(40 - FADE_OUT / 2, 60, 40)).toBeCloseTo(0.5);
     expect(musicGain(45, 60, 40)).toBe(0);
+  });
+
+  it("in the standard style, shows each picture once, with crossfades and no names", () => {
+    const segments = standardSegments(4, 3);
+    expect(segments.map((segment) => segment.picture)).toEqual([0, 1, 2, 3]);
+    expect(slideshowDuration(segments)).toBeCloseTo(3 * 4 + CROSSFADE * 3 + FADE_OUT);
+    expect(slideshowFrame(segments, 0)).toEqual({ from: 0, to: 0, mix: 1, label: null, labelAlpha: 0, overlay: 0, black: 0 });
+    const crossing = slideshowFrame(segments, 3 + CROSSFADE / 2);
+    expect(crossing).toMatchObject({ from: 0, to: 1, label: null, labelAlpha: 0, overlay: 0, black: 0 });
+    expect(crossing.mix).toBeCloseTo(0.5);
+    expect(slideshowFrame(segments, 3 + CROSSFADE + 1)).toMatchObject({ from: 0, to: 1, mix: 1 });
+    expect(slideshowFrame(segments, slideshowDuration(segments) - 0.01)).toMatchObject({ to: 3, mix: 1 });
+  });
+
+  it("by default fits the standard style in the longest video, but not below the shortest slide time", () => {
+    expect(defaultSlideSeconds(4)).toBe(SLIDE_SECONDS);
+    expect(slideshowDuration(standardSegments(20))).toBeLessThanOrEqual(MAX_VIDEO_SECONDS);
+    expect(defaultSlideSeconds(500)).toBe(MIN_SLIDE_SECONDS);
   });
 
   it("with an intro, shows the overlay again after the final image rests", () => {

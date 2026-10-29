@@ -1,20 +1,23 @@
-import { CheckCircle, GearSix, PencilSimple, SpinnerGap, Trash, WarningCircle, X } from "@phosphor-icons/react";
+import { CheckCircle, Cpu, GearSix, PencilSimple, SpinnerGap, Trash, WarningCircle, X } from "@phosphor-icons/react";
 import { OpenAiMark } from "./BrandLogos";
+import { LocalPanel } from "./LocalPanel";
 import { useEffect, useState } from "react";
 import { confirms, setConfirms, type Confirmation } from "../lib/confirmations";
 import {
   clearApiKey,
   openApiKeysPage,
   saveApiKey,
+  localReady,
   testApiKey,
   type ApiKeyStatus,
   type KeyStatuses,
+  type LocalStatus,
   type Provider
 } from "../lib/ai";
 
-/** "new" is the OpenAI key; "general" holds the app's own settings. */
-export type SettingsSection = "new" | "general";
-type KeySection = Exclude<SettingsSection, "general">;
+/** "new" is the OpenAI key; "local" is the optional local engine; "general" holds the app's own settings. */
+export type SettingsSection = "new" | "local" | "general";
+type KeySection = Exclude<SettingsSection, "general" | "local">;
 
 interface Props {
   statuses: KeyStatuses;
@@ -22,6 +25,8 @@ interface Props {
   generateModel: string;
   initialSection: SettingsSection;
   onStatusChange: (provider: Provider, status: ApiKeyStatus) => void;
+  localStatus: LocalStatus | null;
+  onLocalStatusChange: (status: LocalStatus) => void;
   onClose: () => void;
 }
 
@@ -187,12 +192,13 @@ function GeneralPanel() {
   );
 }
 
-export function ConnectDialog({ statuses, generateModel, initialSection, onStatusChange, onClose }: Props) {
+export function ConnectDialog({ statuses, generateModel, initialSection, onStatusChange, localStatus, onLocalStatusChange, onClose }: Props) {
   const [section, setSection] = useState<SettingsSection>(initialSection);
   const [workingCount, setWorkingCount] = useState(0);
   const working = workingCount > 0;
   const onWorkingChange = (next: boolean) => setWorkingCount((count) => Math.max(0, count + (next ? 1 : -1)));
-  const copy = section === "general" ? null : SECTIONS[section];
+  const copy = section === "general" || section === "local" ? null : SECTIONS[section];
+  const localNote = !localStatus?.engineInstalled ? "Not installed" : localReady(localStatus) ? "Ready" : "Choose model files";
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -240,6 +246,18 @@ export function ConnectDialog({ statuses, generateModel, initialSection, onStatu
               );
             })}
             <button
+              className={section === "local" ? "active" : ""}
+              aria-current={section === "local" ? "page" : undefined}
+              onClick={() => setSection("local")}
+            >
+              <Cpu size={20} />
+              <span>
+                <strong>Local</strong>
+                <small>{localNote}</small>
+              </span>
+              <i className={`settings-nav-dot ${localReady(localStatus) ? "connected" : ""}`} aria-hidden="true" />
+            </button>
+            <button
               className={section === "general" ? "active" : ""}
               aria-current={section === "general" ? "page" : undefined}
               onClick={() => setSection("general")}
@@ -253,7 +271,9 @@ export function ConnectDialog({ statuses, generateModel, initialSection, onStatu
           </nav>
 
           <div className="settings-pane">
-            {copy && section !== "general" ? (
+            {section === "local" ? (
+              <LocalPanel status={localStatus} onStatusChange={onLocalStatusChange} onWorkingChange={onWorkingChange} />
+            ) : copy && section !== "general" ? (
               <>
                 <div className="settings-pane-intro">
                   <h3><OpenAiMark size={22} /> {copy.label}</h3>

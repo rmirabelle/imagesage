@@ -7,6 +7,7 @@ use tokio::task::AbortHandle;
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
+const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(3 * 60 * 60);
 const MAX_REQUEST_IMAGE_BYTES: usize = 50 * 1024 * 1024;
 const CANCELLED: &str = "The request was cancelled.";
 
@@ -75,6 +76,16 @@ pub fn client() -> Result<reqwest::Client, String> {
     reqwest::Client::builder()
         .user_agent(concat!("ImageSage/", env!("CARGO_PKG_VERSION")))
         .timeout(REQUEST_TIMEOUT)
+        .connect_timeout(CONNECT_TIMEOUT)
+        .build()
+        .map_err(|error| format!("Could not start the network client: {error}"))
+}
+
+/// A client for large downloads, which can take longer than one AI request.
+pub fn download_client() -> Result<reqwest::Client, String> {
+    reqwest::Client::builder()
+        .user_agent(concat!("ImageSage/", env!("CARGO_PKG_VERSION")))
+        .timeout(DOWNLOAD_TIMEOUT)
         .connect_timeout(CONNECT_TIMEOUT)
         .build()
         .map_err(|error| format!("Could not start the network client: {error}"))

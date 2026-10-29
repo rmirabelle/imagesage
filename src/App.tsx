@@ -23,10 +23,13 @@ import {
   DISCONNECTED,
   apiKeyStatus,
   loadAiSettings,
+  localReady,
+  localStatus,
   storeAiSettings,
   type AiSettings,
   type ApiKeyStatus,
   type KeyStatuses,
+  type LocalStatus,
   type Provider
 } from "./lib/ai";
 import { formatUsd, loadSpend, refreshPrices, spendTotals, usePrices } from "./lib/pricing";
@@ -64,6 +67,8 @@ type DocumentPanelProps = {
   settings: AiSettings;
   openaiConnected: boolean;
   onRequestOpenAiSettings: () => void;
+  localReady: boolean;
+  onRequestLocalSettings: () => void;
   onSettingsChange: (settings: AiSettings) => void;
   onCommit: (id: string, patch: Partial<Pick<ImageDocument, "base" | "baseAdjust" | "history" | "historyIndex">>, markDirty?: boolean) => void;
   onBusyChange: (id: string, busy: boolean) => void;
@@ -101,6 +106,8 @@ export default function App() {
   const [settings, setSettingsState] = useState<AiSettings>(loadAiSettings);
   const [keyStatuses, setKeyStatuses] = useState<KeyStatuses>({ openai: DISCONNECTED });
   const openaiReady = keyStatuses.openai.connected;
+  /** The optional local engine; null until its status loads. */
+  const [localState, setLocalState] = useState<LocalStatus | null>(null);
   /** Re-renders when prices or the spend record change. */
   usePrices();
   const spend = spendTotals();
@@ -339,6 +346,7 @@ export default function App() {
     if (!isTauri()) return;
     let cancelled = false;
     apiKeyStatus("openai").then((status) => { if (!cancelled) setKeyStatus("openai", status); }).catch(() => {});
+    localStatus().then((status) => { if (!cancelled) setLocalState(status); }).catch(() => {});
     void refreshPrices();
     void loadSpend();
     getAppVersion().then((version) => { if (!cancelled) setAppVersion(version); }).catch(() => {});
@@ -716,6 +724,7 @@ export default function App() {
   }, [addDocument]);
 
   const openConnect = useCallback(() => setConnectSection("new"), []);
+  const openLocalSettings = useCallback(() => setConnectSection("local"), []);
   const dirtyCount = documents.filter(isDocumentDirty).length;
 
   /** A File menu command for the active editor; only that editor receives it. */
@@ -874,6 +883,8 @@ export default function App() {
             settings={settings}
             openaiConnected={keyStatuses.openai.connected}
             onRequestOpenAiSettings={openConnect}
+            localReady={localReady(localState)}
+            onRequestLocalSettings={openLocalSettings}
             onSettingsChange={setSettings}
             onCommit={commitHistory}
             onBusyChange={setBusy}
@@ -1028,6 +1039,8 @@ export default function App() {
           statuses={keyStatuses}
           generateModel={settings.generateModel}
           onStatusChange={setKeyStatus}
+          localStatus={localState}
+          onLocalStatusChange={setLocalState}
           onClose={() => setConnectSection(null)}
         />
       )}
