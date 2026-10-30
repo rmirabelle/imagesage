@@ -44,7 +44,7 @@ const MODEL_INFO: Record<string, { name: string; files: Record<FileKey, string>;
   }
 };
 
-const EMPTY_FILES: LocalModelConfig = { diffusionModel: "", textEncoder: "", vae: "", negativePrompt: "", sampler: "euler", scheduler: "beta" };
+const EMPTY_FILES: LocalModelConfig = { diffusionModel: "", textEncoder: "", vae: "", negativePrompt: "", promptPrefix: "", sampler: "euler", scheduler: "beta" };
 const EMPTY_CONFIG: LocalConfig = { idleMinutes: 10, models: {} };
 
 /** The engine's sampler names to compare; the two-pass ones take about twice as long per step. */
@@ -270,6 +270,23 @@ export function LocalPanel({
             {SCHEDULERS.map(({ id, label }) => <option key={id} value={id}>{id === info.scheduler ? `${label} (recommended)` : label}</option>)}
           </select>
         </div>
+        <div className="form-row">
+          <label className="form-row-label" htmlFor="local-prefix">Prompt start</label>
+          <div className="local-negative">
+            <input
+              id="local-prefix"
+              className="settings-input"
+              spellCheck={false}
+              placeholder="Words before every new image's prompt"
+              value={files.promptPrefix}
+              onChange={(event) => setConfig(withFiles({ promptPrefix: event.target.value }))}
+              onBlur={() => void save(config)}
+            />
+            {status && files.promptPrefix !== (status.defaultPromptPrefixes[model] ?? "") && (
+              <button className="settings-link" onClick={() => void save(withFiles({ promptPrefix: status.defaultPromptPrefixes[model] ?? "" }))}>Use the default</button>
+            )}
+          </div>
+        </div>
         <div className="form-row form-row-top">
           <label className="form-row-label" htmlFor="local-negative">Negative prompt</label>
           <div className="local-negative">
@@ -287,7 +304,7 @@ export function LocalPanel({
             )}
           </div>
         </div>
-        <small className="settings-help">The negative prompt lists what {info.name} should avoid in every image, such as blur and extra fingers. The settings apply to the next image.</small>
+        <small className="settings-help">The prompt start goes before every new image's prompt; "A photo." makes {info.name} draw photos unless the prompt asks for another style. The negative prompt lists what {info.name} should avoid in every image, such as blur and extra fingers. The settings apply to the next image.</small>
       </div>
 
       <div className="settings-group">

@@ -196,6 +196,8 @@ export interface LocalModelConfig {
   vae: string;
   /** What every image avoids. */
   negativePrompt: string;
+  /** The words before each new image's prompt, such as "A photo." */
+  promptPrefix: string;
   /** The engine's sampler name, such as "euler". */
   sampler: string;
   /** The engine's scheduler name, such as "beta". */
@@ -219,6 +221,8 @@ export interface LocalStatus {
   running: string | null;
   /** The negative prompt a new config starts with. */
   defaultNegativePrompt: string;
+  /** Each local model's prompt start in a new config, by local model id. */
+  defaultPromptPrefixes: Record<string, string>;
 }
 
 export const localModelReady = (status: LocalStatus | null, model: string) =>

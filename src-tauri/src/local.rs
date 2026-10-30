@@ -87,6 +87,19 @@ impl LocalModel {
         }
     }
 
+    /**
+     * The words a new image's prompt starts with. Chroma learned from many
+     * anime and furry drawings, so a prompt without a style often comes out
+     * drawn; "A photo." makes photos the norm. Qwen-Image-2.1 draws photos
+     * without help.
+     */
+    fn default_prompt_prefix(self) -> &'static str {
+        match self {
+            Self::Chroma => "A photo.",
+            Self::Qwen => "",
+        }
+    }
+
     /// Beta is what SwarmUI and ComfyUI use for Chroma; Noct Q's author uses Simple.
     fn default_scheduler(self) -> &'static str {
         match self {
@@ -146,6 +159,9 @@ pub struct ModelConfig {
     vae: String,
     /// What every image avoids; both models use real guidance, so this changes the result a lot.
     negative_prompt: String,
+    /// The words before each new image's prompt; none in a saved file means the model's default.
+    #[serde(default)]
+    prompt_prefix: Option<String>,
     /// The engine's sampler name, such as `euler` or `dpm++2m`.
     sampler: String,
     /// The engine's scheduler name, such as `beta`.
@@ -180,6 +196,7 @@ impl ModelConfig {
             text_encoder: String::new(),
             vae: String::new(),
             negative_prompt: DEFAULT_NEGATIVE_PROMPT.into(),
+            prompt_prefix: Some(model.default_prompt_prefix().into()),
             sampler: "euler".into(),
             scheduler: model.default_scheduler().into(),
         }
@@ -232,6 +249,8 @@ pub struct LocalStatus {
     running: Option<LocalModel>,
     /// The negative prompt a new config starts with, so the settings can restore it.
     default_negative_prompt: &'static str,
+    /// Each model's prompt start in a new config, so the settings can restore it.
+    default_prompt_prefixes: BTreeMap<LocalModel, &'static str>,
 }
 
 #[derive(Serialize, Default, Debug, PartialEq)]
@@ -381,6 +400,7 @@ fn parse_config(text: &str) -> LocalConfig {
         if files.scheduler.trim().is_empty() {
             files.scheduler = model.default_scheduler().into();
         }
+        files.prompt_prefix.get_or_insert_with(|| model.default_prompt_prefix().into());
     }
     config
 }
@@ -395,6 +415,7 @@ pub fn local_status(app: AppHandle, engine: State<'_, LocalEngine>) -> Result<Lo
         config,
         running: engine.lock().as_ref().filter(|server| server.ready).map(|server| server.model),
         default_negative_prompt: DEFAULT_NEGATIVE_PROMPT,
+        default_prompt_prefixes: LOCAL_MODELS.into_iter().map(|model| (model, model.default_prompt_prefix())).collect(),
     })
 }
 
@@ -597,6 +618,12 @@ fn free_port() -> Result<u16, String> {
         .map_err(|error| format!("Could not find a free port for the local engine: {error}"))
 }
 
+/**
+ * Starts the engine for a model. Its conditioning cache is off: the cache can
+ * hand a later job an earlier prompt's encoding, and after a few images
+ * Chroma drew only cartoons and anime, the words of its negative prompt.
+ * Encoding each prompt again costs seconds.
+ */
 fn spawn_server(dir: &Path, model: LocalModel, files: &ModelConfig, idle_minutes: u32) -> Result<Server, String> {
     let port = free_port()?;
     let mut command = Command::new(dir.join(SERVER_EXE));
@@ -606,6 +633,7 @@ fn spawn_server(dir: &Path, model: LocalModel, files: &ModelConfig, idle_minutes
         .args(["--diffusion-model", &files.diffusion_model])
         .args([model.encoder_flag(), &files.text_encoder])
         .args(["--vae", &files.vae]);
+    command.args(["--conditioning-cache-size", "0"]);
     if let Some(args) = model.model_args() {
         command.args(["--model-args", args]);
     }
@@ -810,6 +838,8 @@ fn parse_size(size: &str) -> Result<(u32, u32), String> {
 /**
  * The engine's job request: the prompt, the size, the sampling settings from
  * Settings → Local, and for an edit the image as Qwen-Image-2.1's reference.
+ * A new image's prompt starts with the model's prompt start; an edit keeps
+ * the image's own style.
  */
 fn generate_body(model: LocalModel, prompt: &str, width: u32, height: u32, steps: u32, files: &ModelConfig, image: Option<&str>) -> Value {
     let sampler = files.sampler.trim();
@@ -823,6 +853,8 @@ fn generate_body(model: LocalModel, prompt: &str, width: u32, height: u32, steps
     }
     let scheduler = files.scheduler.trim();
     sample_params["scheduler"] = json!(if scheduler.is_empty() { model.default_scheduler() } else { scheduler });
+    let prefix = files.prompt_prefix.as_deref().unwrap_or_default().trim();
+    let prompt = if image.is_none() && !prefix.is_empty() { format!("{prefix} {prompt}") } else { prompt.to_string() };
     let mut body = json!({
         "prompt": prompt,
         "negative_prompt": files.negative_prompt.trim(),
@@ -982,6 +1014,8 @@ mod tests {
         let chroma = config.model(LocalModel::Chroma);
         assert_eq!(chroma.negative_prompt, DEFAULT_NEGATIVE_PROMPT);
         assert_eq!(chroma.sampler, "euler");
+        assert_eq!(chroma.prompt_prefix.as_deref(), Some("A photo."));
+        assert_eq!(config.model(LocalModel::Qwen).prompt_prefix.as_deref(), Some(""));
         assert_eq!(chroma.missing(), vec!["diffusion model", "text encoder", "VAE"]);
         let qwen = config.model(LocalModel::Qwen);
         assert_eq!(qwen.scheduler, "simple");
@@ -1007,6 +1041,7 @@ mod tests {
         let mut files = ModelConfig { sampler: "dpm++2m".into(), ..ModelConfig::defaults(LocalModel::Chroma) };
         let body = generate_body(LocalModel::Chroma, "a cat", 1024, 768, 30, &files, None);
         assert_eq!(body["negative_prompt"], DEFAULT_NEGATIVE_PROMPT);
+        assert_eq!(body["prompt"], "A photo. a cat");
         assert_eq!(body["sample_params"]["sample_method"], "dpm++2m");
         assert_eq!(body["sample_params"]["scheduler"], "beta");
         assert_eq!(body["sample_params"]["flow_shift"], 1.0);
@@ -1018,14 +1053,17 @@ mod tests {
         assert_eq!(body["sample_params"]["scheduler"], "karras");
         assert_eq!(body["sample_params"]["sample_method"], "euler");
         files.scheduler = String::new();
+        files.prompt_prefix = Some(" ".into());
         let body = generate_body(LocalModel::Chroma, "a cat", 1024, 768, 30, &files, None);
         assert_eq!(body["sample_params"]["scheduler"], "beta");
+        assert_eq!(body["prompt"], "a cat");
     }
 
     #[test]
     fn qwen_edit_sends_the_image_and_keeps_the_engine_shift() {
-        let files = ModelConfig::defaults(LocalModel::Qwen);
+        let files = ModelConfig { prompt_prefix: Some("A photo.".into()), ..ModelConfig::defaults(LocalModel::Qwen) };
         let body = generate_body(LocalModel::Qwen, "make it night", 1024, 768, 25, &files, Some("data:image/png;base64,AAAA"));
+        assert_eq!(body["prompt"], "make it night");
         assert_eq!(body["ref_images"], json!(["data:image/png;base64,AAAA"]));
         assert!(body["sample_params"].get("flow_shift").is_none());
         assert_eq!(body["sample_params"]["scheduler"], "simple");
