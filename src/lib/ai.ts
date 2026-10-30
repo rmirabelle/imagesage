@@ -9,8 +9,10 @@ export interface ImageModel {
   label: string;
   note: string;
   qualities: string[];
-  /** Runs on this computer through the local engine; makes new images only. */
+  /** Runs on this computer through the local engine. */
   local?: boolean;
+  /** A local model that also edits the whole image, so it can regenerate a layer. */
+  edits?: boolean;
 }
 
 const BASIC_QUALITIES = ["auto", "low", "medium", "high"];
@@ -22,15 +24,24 @@ export const IMAGE_MODELS: ImageModel[] = [
   { id: "gpt-image-2", label: "GPT Image 2", note: "Previous generation", qualities: BASIC_QUALITIES }
 ];
 
-/** Models that the optional local engine runs. They create new images from a prompt and never edit. */
+/**
+ * Models that the optional local engine runs. Chroma creates new images from
+ * a prompt only; Qwen-Image-2.1 (or a merge of it, such as Noct Q) also edits.
+ */
 export const LOCAL_MODELS: ImageModel[] = [
-  { id: "chroma1-hd", label: "Chroma1-HD (local)", note: "Free, on this computer; new images only", qualities: ["low", "medium", "high"], local: true }
+  { id: "chroma1-hd", label: "Chroma1-HD (local)", note: "Free, on this computer; new images only", qualities: ["low", "medium", "high"], local: true },
+  { id: "qwen-image-2.1", label: "Qwen-Image-2.1 (local)", note: "Free, on this computer; new images and edits", qualities: ["low", "medium", "high"], local: true, edits: true }
 ];
-/** Sampling steps for each local quality (the Rust side uses the same values). */
-export const LOCAL_STEPS: Record<string, number> = { low: 20, medium: 30, high: 40 };
+/** Sampling steps for each local model and quality (the Rust side uses the same values). */
+export const LOCAL_STEPS: Record<string, Record<string, number>> = {
+  "chroma1-hd": { low: 20, medium: 30, high: 40 },
+  "qwen-image-2.1": { low: 16, medium: 25, high: 35 }
+};
 
 const ALL_MODELS = [...IMAGE_MODELS, ...LOCAL_MODELS];
 export const isLocalModel = (id: string) => LOCAL_MODELS.some((model) => model.id === id);
+/** A local model that edits the whole image, as GPT Image does. */
+export const localEdits = (id: string) => LOCAL_MODELS.some((model) => model.id === id && model.edits);
 
 /** Layers made before FLUX support was removed keep their model name. */
 const LEGACY_MODEL_LABELS: Record<string, string> = { "flux-3-image": "FLUX 3 Image" };
@@ -151,12 +162,17 @@ export async function runWithProgress<T = AiImage>(
 /** A new image from a prompt, with GPT Image or, for a local model, the local engine. */
 export const generateImage = (requestId: string, payload: GeneratePayload, onProgress: (progress: AiProgress) => void) =>
   isLocalModel(payload.model)
-    ? runWithProgress("local_generate", requestId, { prompt: payload.prompt, quality: payload.quality, size: payload.size }, onProgress)
+    ? runWithProgress("local_generate", requestId, { model: payload.model, prompt: payload.prompt, quality: payload.quality, size: payload.size }, onProgress)
     : runWithProgress("ai_generate", requestId, payload, onProgress);
 
-/** Edits the whole image with GPT Image (OpenAI Images API edit endpoint, no mask). */
+/**
+ * Edits the whole image with GPT Image (OpenAI Images API edit endpoint, no
+ * mask), or with a local model that edits.
+ */
 export const editWholeImage = (requestId: string, payload: WholeEditPayload, onProgress: (progress: AiProgress) => void) =>
-  runWithProgress("ai_edit_whole", requestId, payload, onProgress);
+  isLocalModel(payload.model)
+    ? runWithProgress("local_generate", requestId, { model: payload.model, prompt: payload.prompt, quality: payload.quality, size: payload.size, image: payload.imagePng }, onProgress)
+    : runWithProgress("ai_edit_whole", requestId, payload, onProgress);
 
 /**
  * A request can be cancelled only before the service accepts it. From
@@ -173,13 +189,11 @@ export const jobCanCancel = (stage: AiStage | null, service: string) => service 
 
 export const cancelAiRequest = (requestId: string) => invoke<void>("ai_cancel", { requestId });
 
-/** The local engine's model files, as saved on this computer. */
-export interface LocalConfig {
+/** One local model's files and image settings, as saved on this computer. */
+export interface LocalModelConfig {
   diffusionModel: string;
   textEncoder: string;
   vae: string;
-  /** Minutes without a job before the engine stops and frees the GPU memory. */
-  idleMinutes: number;
   /** What every image avoids. */
   negativePrompt: string;
   /** The engine's sampler name, such as "euler". */
@@ -188,29 +202,41 @@ export interface LocalConfig {
   scheduler: string;
 }
 
+export interface LocalConfig {
+  /** Minutes without a job before the engine stops and frees the GPU memory. */
+  idleMinutes: number;
+  /** By local model id. */
+  models: Record<string, LocalModelConfig>;
+}
+
 export interface LocalStatus {
   engineInstalled: boolean;
   engineSizeBytes: number;
   config: LocalConfig;
-  /** Model files that are not set or not found, by name. */
-  missing: string[];
-  /** True while the engine runs with the model loaded. */
-  running: boolean;
+  /** Each local model's files that are not set or not found, by name. */
+  missing: Record<string, string[]>;
+  /** The local model the engine has loaded, if any. */
+  running: string | null;
   /** The negative prompt a new config starts with. */
   defaultNegativePrompt: string;
 }
 
-export const localReady = (status: LocalStatus | null) => Boolean(status?.engineInstalled && status.missing.length === 0);
+export const localModelReady = (status: LocalStatus | null, model: string) =>
+  Boolean(status?.engineInstalled && status.missing[model]?.length === 0);
+/** The local models whose files are all set. */
+export const readyLocalModels = (status: LocalStatus | null) =>
+  LOCAL_MODELS.filter((model) => localModelReady(status, model.id)).map((model) => model.id);
+export const localReady = (status: LocalStatus | null) => readyLocalModels(status).length > 0;
 
 export const localStatus = () => invoke<LocalStatus>("local_status");
 export const saveLocalConfig = (config: LocalConfig) => invoke<void>("local_config_set", { config });
-export const findLocalModels = (folder: string) =>
-  invoke<{ diffusionModel: string | null; textEncoder: string | null; vae: string | null }>("local_find_models", { folder });
+export const findLocalModels = (folder: string, model: string) =>
+  invoke<{ diffusionModel: string | null; textEncoder: string | null; vae: string | null }>("local_find_models", { folder, model });
 export const downloadLocalEngine = (requestId: string, onProgress: (progress: AiProgress) => void) =>
   runWithProgress<void>("local_engine_download", requestId, {}, onProgress);
 /** Starts the engine and loads the model; returns a short success message. */
-export const loadLocalModel = (requestId: string, onProgress: (progress: AiProgress) => void) =>
-  runWithProgress<string>("local_load", requestId, {}, onProgress);
+export const loadLocalModel = (requestId: string, model: string, onProgress: (progress: AiProgress) => void) =>
+  runWithProgress<string>("local_load", requestId, { model }, onProgress);
 
 export const stageLabel = (stage: AiStage | null, service = "OpenAI") => {
   switch (stage) {

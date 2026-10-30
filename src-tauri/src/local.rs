@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
-    collections::VecDeque,
+    collections::{BTreeMap, VecDeque},
     io::Read,
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
@@ -15,12 +15,13 @@ use crate::requests::{self, AiImage, AiRequests, ProgressReporter};
 
 /**
  * The optional local engine: stable-diffusion.cpp's `sd-server.exe` (CUDA 12
- * build) runs Chroma1-HD on this computer for new images from a prompt. The
- * engine downloads once, on first use, from a pinned upstream release and is
- * checked against its SHA-256. The model files are the user's own (for
- * example a ComfyUI models folder) and are read in place. The server keeps
- * the model loaded between images and stops after some idle minutes to free
- * the GPU memory.
+ * build) runs a local model on this computer. Chroma1-HD makes new images
+ * from a prompt; Qwen-Image-2.1 (or a merge of it, such as Noct Q) also
+ * edits the whole image. The engine downloads once, on first use, from a
+ * pinned upstream release and is checked against its SHA-256. The model
+ * files are the user's own (for example a ComfyUI models folder) and are
+ * read in place. The server keeps one model loaded between images, restarts
+ * for another model, and stops after some idle minutes to free the GPU memory.
  */
 const ENGINE_BUILD: &str = "sdcpp-77b72a2";
 const ENGINE_URL_PREFIX: &str = "https://github.com/leejet/stable-diffusion.cpp/releases/download/master-";
@@ -30,15 +31,89 @@ const LOAD_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const POLL_INTERVAL: Duration = Duration::from_millis(300);
 const IDLE_CHECK: Duration = Duration::from_secs(30);
 const LOG_LINES: usize = 20;
-/// Chroma1-HD's recommended guidance; SwarmUI's 3.5 gives photo results.
-const CFG_SCALE: f64 = 3.5;
-/**
- * Chroma1-HD's intended flow shift, as ComfyUI and SwarmUI use it. The
- * engine's automatic shift is higher and gives soft, airbrushed images.
- */
-const FLOW_SHIFT: f64 = 1.0;
-/// The scheduler SwarmUI and ComfyUI use for Chroma.
-const DEFAULT_SCHEDULER: &str = "beta";
+
+/// The local models; the ids are the ones the webview uses.
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+pub enum LocalModel {
+    #[serde(rename = "chroma1-hd")]
+    Chroma,
+    #[serde(rename = "qwen-image-2.1")]
+    Qwen,
+}
+
+const LOCAL_MODELS: [LocalModel; 2] = [LocalModel::Chroma, LocalModel::Qwen];
+
+impl LocalModel {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Chroma => "Chroma1-HD",
+            Self::Qwen => "Qwen-Image-2.1",
+        }
+    }
+
+    /// Chroma reads a T5 text encoder; Qwen-Image-2.1 reads Qwen3-VL, which also sees the image to edit.
+    fn encoder_flag(self) -> &'static str {
+        match self {
+            Self::Chroma => "--t5xxl",
+            Self::Qwen => "--llm",
+        }
+    }
+
+    /// Only Qwen-Image-2.1 edits an image; Chroma makes new images only.
+    fn edits(self) -> bool {
+        self == Self::Qwen
+    }
+
+    /**
+     * The guidance: SwarmUI's 3.5 gives Chroma photo results, and Noct Q's
+     * author uses 3 with the negative prompt.
+     */
+    fn cfg_scale(self) -> f64 {
+        match self {
+            Self::Chroma => 3.5,
+            Self::Qwen => 3.0,
+        }
+    }
+
+    /**
+     * Chroma1-HD's intended flow shift, as ComfyUI and SwarmUI use it; the
+     * engine's automatic shift is higher and gives soft, airbrushed images.
+     * Qwen-Image-2.1 uses the engine's own shift for each image size.
+     */
+    fn flow_shift(self) -> Option<f64> {
+        match self {
+            Self::Chroma => Some(1.0),
+            Self::Qwen => None,
+        }
+    }
+
+    /// Beta is what SwarmUI and ComfyUI use for Chroma; Noct Q's author uses Simple.
+    fn default_scheduler(self) -> &'static str {
+        match self {
+            Self::Chroma => "beta",
+            Self::Qwen => "simple",
+        }
+    }
+
+    fn model_args(self) -> Option<&'static str> {
+        match self {
+            Self::Chroma => Some("chroma_use_dit_mask=false"),
+            Self::Qwen => None,
+        }
+    }
+
+    /// Sampling steps for each quality (the webview shows the same values).
+    fn steps(self, quality: &str) -> u32 {
+        match (self, quality) {
+            (Self::Chroma, "low") => 20,
+            (Self::Chroma, "high") => 40,
+            (Self::Chroma, _) => 30,
+            (Self::Qwen, "low") => 16,
+            (Self::Qwen, "high") => 35,
+            (Self::Qwen, _) => 25,
+        }
+    }
+}
 
 struct EngineZip {
     name: &'static str,
@@ -62,20 +137,27 @@ const ENGINE_ZIPS: [EngineZip; 2] = [
     },
 ];
 
+/// One local model's files and image settings.
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
 #[serde(rename_all = "camelCase", default)]
-pub struct LocalConfig {
+pub struct ModelConfig {
     diffusion_model: String,
     text_encoder: String,
     vae: String,
-    /// Minutes without a job before the engine stops and frees the GPU memory.
-    idle_minutes: u32,
-    /// What every image avoids; Chroma uses real guidance, so this changes the result a lot.
+    /// What every image avoids; both models use real guidance, so this changes the result a lot.
     negative_prompt: String,
     /// The engine's sampler name, such as `euler` or `dpm++2m`.
     sampler: String,
     /// The engine's scheduler name, such as `beta`.
     scheduler: String,
+}
+
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+#[serde(rename_all = "camelCase", default)]
+pub struct LocalConfig {
+    /// Minutes without a job before the engine stops and frees the GPU memory.
+    idle_minutes: u32,
+    models: BTreeMap<LocalModel, ModelConfig>,
 }
 
 /**
@@ -91,21 +173,18 @@ const DEFAULT_NEGATIVE_PROMPT: &str = "cartoon, anime, illustration, drawing, pa
 const OLD_DEFAULT_NEGATIVE_PROMPT: &str = "low quality, ugly, unfinished, out of focus, deformed, disfigure, blurry, smudged, restricted palette, flat colors, \
      bad anatomy, incorrect anatomy, extra fingers, missing fingers, fused fingers, malformed hands, extra limbs, missing limbs";
 
-impl Default for LocalConfig {
-    fn default() -> Self {
+impl ModelConfig {
+    fn defaults(model: LocalModel) -> Self {
         Self {
             diffusion_model: String::new(),
             text_encoder: String::new(),
             vae: String::new(),
-            idle_minutes: 10,
             negative_prompt: DEFAULT_NEGATIVE_PROMPT.into(),
             sampler: "euler".into(),
-            scheduler: DEFAULT_SCHEDULER.into(),
+            scheduler: model.default_scheduler().into(),
         }
     }
-}
 
-impl LocalConfig {
     /// The model files that are not set or do not exist, by name.
     fn missing(&self) -> Vec<&'static str> {
         [
@@ -120,14 +199,37 @@ impl LocalConfig {
     }
 }
 
+impl Default for ModelConfig {
+    fn default() -> Self {
+        Self::defaults(LocalModel::Chroma)
+    }
+}
+
+impl Default for LocalConfig {
+    fn default() -> Self {
+        Self {
+            idle_minutes: 10,
+            models: LOCAL_MODELS.into_iter().map(|model| (model, ModelConfig::defaults(model))).collect(),
+        }
+    }
+}
+
+impl LocalConfig {
+    fn model(&self, model: LocalModel) -> ModelConfig {
+        self.models.get(&model).cloned().unwrap_or_else(|| ModelConfig::defaults(model))
+    }
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LocalStatus {
     engine_installed: bool,
     engine_size_bytes: u64,
     config: LocalConfig,
-    missing: Vec<&'static str>,
-    running: bool,
+    /// Each model's files that are not set or not found.
+    missing: BTreeMap<LocalModel, Vec<&'static str>>,
+    /// The model the engine has loaded, if any.
+    running: Option<LocalModel>,
     /// The negative prompt a new config starts with, so the settings can restore it.
     default_negative_prompt: &'static str,
 }
@@ -148,11 +250,21 @@ pub struct LocalRequest {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct LocalLoadRequest {
+    request_id: String,
+    model: LocalModel,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct LocalGenerateRequest {
     request_id: String,
+    model: LocalModel,
     prompt: String,
     quality: String,
     size: String,
+    /// The image to edit, as a PNG data URL at `size`; none makes a new image from the prompt alone.
+    image: Option<String>,
 }
 
 /// The last lines the engine printed, to explain a failed start.
@@ -185,7 +297,9 @@ impl ServerLog {
 struct Server {
     child: Child,
     port: u16,
-    config: LocalConfig,
+    model: LocalModel,
+    files: ModelConfig,
+    idle_minutes: u32,
     ready: bool,
     busy: u32,
     last_used: Instant,
@@ -247,13 +361,26 @@ fn load_config(app: &AppHandle) -> Result<LocalConfig, String> {
     }
 }
 
+/**
+ * Reads the saved settings. Settings from before the second local model
+ * kept Chroma's files at the top level; they become Chroma's settings.
+ */
 fn parse_config(text: &str) -> LocalConfig {
-    let mut config: LocalConfig = serde_json::from_str(text).unwrap_or_default();
-    if config.negative_prompt == OLD_DEFAULT_NEGATIVE_PROMPT {
-        config.negative_prompt = DEFAULT_NEGATIVE_PROMPT.into();
+    let value: Value = serde_json::from_str(text).unwrap_or(Value::Null);
+    let mut config: LocalConfig = serde_json::from_value(value.clone()).unwrap_or_default();
+    if value.is_object() && value.get("models").is_none() {
+        if let Ok(old) = serde_json::from_value::<ModelConfig>(value) {
+            config.models.insert(LocalModel::Chroma, old);
+        }
     }
-    if config.scheduler.trim().is_empty() {
-        config.scheduler = DEFAULT_SCHEDULER.into();
+    for model in LOCAL_MODELS {
+        let files = config.models.entry(model).or_insert_with(|| ModelConfig::defaults(model));
+        if files.negative_prompt == OLD_DEFAULT_NEGATIVE_PROMPT {
+            files.negative_prompt = DEFAULT_NEGATIVE_PROMPT.into();
+        }
+        if files.scheduler.trim().is_empty() {
+            files.scheduler = model.default_scheduler().into();
+        }
     }
     config
 }
@@ -264,9 +391,9 @@ pub fn local_status(app: AppHandle, engine: State<'_, LocalEngine>) -> Result<Lo
     Ok(LocalStatus {
         engine_installed: engine_installed(&engines_dir(&app)?.join(ENGINE_BUILD)),
         engine_size_bytes: ENGINE_ZIPS.iter().map(|zip| zip.size).sum(),
-        missing: config.missing(),
+        missing: LOCAL_MODELS.into_iter().map(|model| (model, config.model(model).missing())).collect(),
         config,
-        running: engine.lock().as_ref().is_some_and(|server| server.ready),
+        running: engine.lock().as_ref().filter(|server| server.ready).map(|server| server.model),
         default_negative_prompt: DEFAULT_NEGATIVE_PROMPT,
     })
 }
@@ -279,28 +406,28 @@ pub fn local_config_set(app: AppHandle, engine: State<'_, LocalEngine>, config: 
     let mut slot = engine.lock();
     let stale = slot
         .as_ref()
-        .is_some_and(|server| server.busy == 0 && !same_models(&server.config, &config));
+        .is_some_and(|server| server.busy == 0 && !same_files(&server.files, &config.model(server.model)));
     if stale {
         if let Some(server) = slot.take() {
             server.stop();
         }
     } else if let Some(server) = slot.as_mut() {
-        server.config.idle_minutes = config.idle_minutes;
+        server.idle_minutes = config.idle_minutes;
     }
     Ok(())
 }
 
-fn same_models(a: &LocalConfig, b: &LocalConfig) -> bool {
+fn same_files(a: &ModelConfig, b: &ModelConfig) -> bool {
     a.diffusion_model == b.diffusion_model && a.text_encoder == b.text_encoder && a.vae == b.vae
 }
 
-/// Finds Chroma's model files in a ComfyUI folder (its root, or its `models` folder).
+/// Finds a local model's files in a ComfyUI folder (its root, or its `models` folder).
 #[tauri::command]
-pub fn local_find_models(folder: String) -> FoundModels {
-    find_models(Path::new(&folder))
+pub fn local_find_models(folder: String, model: LocalModel) -> FoundModels {
+    find_models(Path::new(&folder), model)
 }
 
-fn find_models(folder: &Path) -> FoundModels {
+fn find_models(folder: &Path, model: LocalModel) -> FoundModels {
     let Some(root) = [folder.to_path_buf(), folder.join("models"), folder.join("ComfyUI").join("models")]
         .into_iter()
         .find(|candidate| ["diffusion_models", "unet", "text_encoders", "clip", "vae"].iter().any(|name| candidate.join(name).is_dir()))
@@ -308,16 +435,36 @@ fn find_models(folder: &Path) -> FoundModels {
         return FoundModels::default();
     };
     let model_file = |name: &str| name.ends_with(".safetensors") || name.ends_with(".gguf") || name.ends_with(".sft");
-    FoundModels {
-        diffusion_model: best_file(&root, &["diffusion_models", "unet", "checkpoints"], |name| {
-            (model_file(name) && name.contains("chroma")).then(|| if name.contains("hd") { 0 } else { 1 })
-        }),
-        text_encoder: best_file(&root, &["text_encoders", "clip"], |name| {
-            (model_file(name) && name.contains("t5xxl")).then(|| if name.contains("fp16") { 0 } else if name.contains("fp8") { 2 } else { 1 })
-        }),
-        vae: best_file(&root, &["vae"], |name| {
-            (model_file(name) && (name.starts_with("ae.") || (name.contains("flux") && name.contains("vae")))).then_some(0)
-        }),
+    let diffusion = ["diffusion_models", "unet", "checkpoints"];
+    let encoders = ["text_encoders", "clip"];
+    match model {
+        LocalModel::Chroma => FoundModels {
+            diffusion_model: best_file(&root, &diffusion, |name| {
+                (model_file(name) && name.contains("chroma")).then(|| if name.contains("hd") { 0 } else { 1 })
+            }),
+            text_encoder: best_file(&root, &encoders, |name| {
+                (model_file(name) && name.contains("t5xxl")).then(|| if name.contains("fp16") { 0 } else if name.contains("fp8") { 2 } else { 1 })
+            }),
+            vae: best_file(&root, &["vae"], |name| {
+                (model_file(name) && (name.starts_with("ae.") || (name.contains("flux") && name.contains("vae")))).then_some(0)
+            }),
+        },
+        /* Noct Q comes first, then the original model; the Turbo model needs other sampling settings. */
+        LocalModel::Qwen => FoundModels {
+            diffusion_model: best_file(&root, &diffusion, |name| {
+                if !model_file(name) {
+                    None
+                } else if name.starts_with("noctq") {
+                    Some(if name.contains("v4") { 0 } else { 1 })
+                } else {
+                    (name.contains("qwen_image_2.1") && !name.contains("turbo") && !name.contains("vae")).then_some(2)
+                }
+            }),
+            text_encoder: best_file(&root, &encoders, |name| {
+                (model_file(name) && name.contains("qwen3vl") && name.contains("8b")).then(|| if name.contains("int8") { 0 } else if name.contains("bf16") { 1 } else { 2 })
+            }),
+            vae: best_file(&root, &["vae"], |name| (model_file(name) && name.contains("qwen_image_2.1_vae")).then_some(0)),
+        },
     }
 }
 
@@ -450,17 +597,22 @@ fn free_port() -> Result<u16, String> {
         .map_err(|error| format!("Could not find a free port for the local engine: {error}"))
 }
 
-fn spawn_server(dir: &Path, config: &LocalConfig) -> Result<Server, String> {
+fn spawn_server(dir: &Path, model: LocalModel, files: &ModelConfig, idle_minutes: u32) -> Result<Server, String> {
     let port = free_port()?;
     let mut command = Command::new(dir.join(SERVER_EXE));
     command
         .current_dir(dir)
         .args(["--listen-ip", "127.0.0.1", "--listen-port", &port.to_string()])
-        .args(["--diffusion-model", &config.diffusion_model])
-        .args(["--t5xxl", &config.text_encoder])
-        .args(["--vae", &config.vae])
-        .args(["--model-args", "chroma_use_dit_mask=false"])
-        .args(["--flow-shift", &FLOW_SHIFT.to_string()])
+        .args(["--diffusion-model", &files.diffusion_model])
+        .args([model.encoder_flag(), &files.text_encoder])
+        .args(["--vae", &files.vae]);
+    if let Some(args) = model.model_args() {
+        command.args(["--model-args", args]);
+    }
+    if let Some(shift) = model.flow_shift() {
+        command.args(["--flow-shift", &shift.to_string()]);
+    }
+    command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -483,7 +635,9 @@ fn spawn_server(dir: &Path, config: &LocalConfig) -> Result<Server, String> {
     Ok(Server {
         child,
         port,
-        config: config.clone(),
+        model,
+        files: files.clone(),
+        idle_minutes,
         ready: false,
         busy: 0,
         last_used: Instant::now(),
@@ -534,27 +688,31 @@ impl Drop for Session {
     }
 }
 
-/// Starts the engine with the saved model files, or reuses it, and waits until the model is loaded.
-async fn open_session(app: &AppHandle, engine: &LocalEngine, reporter: &ProgressReporter) -> Result<Session, String> {
+/**
+ * Starts the engine with the model's saved files, or reuses it, and waits
+ * until the model is loaded. An engine with another model stops first.
+ */
+async fn open_session(app: &AppHandle, engine: &LocalEngine, reporter: &ProgressReporter, model: LocalModel) -> Result<Session, String> {
     let dir = engines_dir(app)?.join(ENGINE_BUILD);
     if !engine_installed(&dir) {
         return Err("The local engine is not installed. Download it in Settings → Local.".into());
     }
     let config = load_config(app)?;
-    let missing = config.missing();
+    let files = config.model(model);
+    let missing = files.missing();
     if !missing.is_empty() {
-        return Err(format!("Choose the Chroma {} in Settings → Local.", missing.join(", ")));
+        return Err(format!("Choose the {} {} in Settings → Local.", model.name(), missing.join(", ")));
     }
     let port = {
         let mut slot = engine.lock();
         let reusable = slot.as_mut().is_some_and(|server| {
-            same_models(&server.config, &config) && matches!(server.child.try_wait(), Ok(None))
+            server.model == model && same_files(&server.files, &files) && matches!(server.child.try_wait(), Ok(None))
         });
         if !reusable {
             if let Some(old) = slot.take() {
                 old.stop();
             }
-            *slot = Some(spawn_server(&dir, &config)?);
+            *slot = Some(spawn_server(&dir, model, &files, config.idle_minutes)?);
         }
         let server = slot.as_mut().expect("the engine was just started");
         server.busy += 1;
@@ -608,13 +766,14 @@ pub async fn local_load(
     app: AppHandle,
     requests: State<'_, AiRequests>,
     engine: State<'_, LocalEngine>,
-    request: LocalRequest,
+    request: LocalLoadRequest,
 ) -> Result<String, String> {
     let engine = engine.inner().clone();
     let handle = app.clone();
+    let model = request.model;
     requests::run_cancellable(app, &requests, request.request_id, move |reporter| async move {
         let started = Instant::now();
-        let _session = open_session(&handle, &engine, &reporter).await?;
+        let _session = open_session(&handle, &engine, &reporter, model).await?;
         Ok(format!("The model is loaded and ready ({} s).", started.elapsed().as_secs()))
     })
     .await
@@ -635,14 +794,6 @@ impl Drop for CancelOnDrop {
     }
 }
 
-fn steps_for(quality: &str) -> u32 {
-    match quality {
-        "low" => 20,
-        "high" => 40,
-        _ => 30,
-    }
-}
-
 fn parse_size(size: &str) -> Result<(u32, u32), String> {
     let invalid = || format!("The image size {size} is not valid for the local engine.");
     let (width, height) = size.split_once('x').ok_or_else(invalid)?;
@@ -656,20 +807,25 @@ fn parse_size(size: &str) -> Result<(u32, u32), String> {
     }
 }
 
-/// The engine's job request: the prompt, the size, and the sampling settings from Settings → Local.
-fn generate_body(prompt: &str, width: u32, height: u32, steps: u32, config: &LocalConfig) -> Value {
-    let sampler = config.sampler.trim();
+/**
+ * The engine's job request: the prompt, the size, the sampling settings from
+ * Settings → Local, and for an edit the image as Qwen-Image-2.1's reference.
+ */
+fn generate_body(model: LocalModel, prompt: &str, width: u32, height: u32, steps: u32, files: &ModelConfig, image: Option<&str>) -> Value {
+    let sampler = files.sampler.trim();
     let mut sample_params = json!({
         "sample_method": if sampler.is_empty() { "euler" } else { sampler },
         "sample_steps": steps,
-        "guidance": { "txt_cfg": CFG_SCALE },
-        "flow_shift": FLOW_SHIFT
+        "guidance": { "txt_cfg": model.cfg_scale() }
     });
-    let scheduler = config.scheduler.trim();
-    sample_params["scheduler"] = json!(if scheduler.is_empty() { DEFAULT_SCHEDULER } else { scheduler });
-    json!({
+    if let Some(shift) = model.flow_shift() {
+        sample_params["flow_shift"] = json!(shift);
+    }
+    let scheduler = files.scheduler.trim();
+    sample_params["scheduler"] = json!(if scheduler.is_empty() { model.default_scheduler() } else { scheduler });
+    let mut body = json!({
         "prompt": prompt,
-        "negative_prompt": config.negative_prompt.trim(),
+        "negative_prompt": files.negative_prompt.trim(),
         "width": width,
         "height": height,
         "seed": -1,
@@ -677,10 +833,14 @@ fn generate_body(prompt: &str, width: u32, height: u32, steps: u32, config: &Loc
         "preview": "proj",
         "preview_interval": 1,
         "output_format": "png"
-    })
+    });
+    if let Some(image) = image {
+        body["ref_images"] = json!([image]);
+    }
+    body
 }
 
-/// Creates a new image from a prompt with Chroma1-HD on this computer.
+/// Makes a new image from a prompt, or with Qwen-Image-2.1 edits the given image, on this computer.
 #[tauri::command]
 pub async fn local_generate(
     app: AppHandle,
@@ -689,17 +849,22 @@ pub async fn local_generate(
     request: LocalGenerateRequest,
 ) -> Result<AiImage, String> {
     let (width, height) = parse_size(&request.size)?;
-    let steps = steps_for(&request.quality);
+    let model = request.model;
+    if request.image.is_some() && !model.edits() {
+        return Err(format!("{} makes new images only; it cannot edit an image.", model.name()));
+    }
+    let steps = model.steps(&request.quality);
     let engine = engine.inner().clone();
     let handle = app.clone();
     let prompt = request.prompt;
+    let image = request.image;
     requests::run_cancellable(app, &requests, request.request_id, move |reporter| async move {
-        let session = open_session(&handle, &engine, &reporter).await?;
-        let config = load_config(&handle)?;
+        let session = open_session(&handle, &engine, &reporter, model).await?;
+        let files = load_config(&handle)?.model(model);
         reporter.progress("generating", 0.0);
         let client = requests::client()?;
         let base = format!("http://127.0.0.1:{}/sdcpp/v1", session.port);
-        let body = generate_body(&prompt, width, height, steps, &config);
+        let body = generate_body(model, &prompt, width, height, steps, &files, image.as_deref());
         let fail = |error: reqwest::Error| requests::describe_transport_error("the local engine", &error);
         let created: Value = client.post(format!("{base}/img_gen")).json(&body).send().await.map_err(fail)?.json().await.map_err(fail)?;
         let id = created["id"]
@@ -753,7 +918,7 @@ pub fn watch_idle(engine: LocalEngine) {
             tokio::time::sleep(IDLE_CHECK).await;
             let mut slot = engine.lock();
             let done = slot.as_mut().is_some_and(|server| {
-                let idle = Duration::from_secs(u64::from(server.config.idle_minutes.max(1)) * 60);
+                let idle = Duration::from_secs(u64::from(server.idle_minutes.max(1)) * 60);
                 let exited = !matches!(server.child.try_wait(), Ok(None));
                 exited || (server.busy == 0 && server.last_used.elapsed() >= idle)
             });
@@ -791,9 +956,12 @@ mod tests {
 
     #[test]
     fn quality_sets_the_steps() {
-        assert_eq!(steps_for("low"), 20);
-        assert_eq!(steps_for("medium"), 30);
-        assert_eq!(steps_for("high"), 40);
+        assert_eq!(LocalModel::Chroma.steps("low"), 20);
+        assert_eq!(LocalModel::Chroma.steps("medium"), 30);
+        assert_eq!(LocalModel::Chroma.steps("high"), 40);
+        assert_eq!(LocalModel::Qwen.steps("low"), 16);
+        assert_eq!(LocalModel::Qwen.steps("medium"), 25);
+        assert_eq!(LocalModel::Qwen.steps("high"), 35);
     }
 
     #[test]
@@ -809,34 +977,59 @@ mod tests {
 
     #[test]
     fn config_lists_missing_files_and_defaults_idle_minutes() {
-        let config: LocalConfig = serde_json::from_str(r#"{"vae":"C:\\nope\\ae.safetensors"}"#).unwrap();
+        let config = parse_config(r#"{"models":{"chroma1-hd":{"vae":"C:\\nope\\ae.safetensors"}}}"#);
         assert_eq!(config.idle_minutes, 10);
-        assert_eq!(config.negative_prompt, DEFAULT_NEGATIVE_PROMPT);
-        assert_eq!(config.sampler, "euler");
-        let old = parse_config(&json!({ "negativePrompt": OLD_DEFAULT_NEGATIVE_PROMPT }).to_string());
-        assert_eq!(old.negative_prompt, DEFAULT_NEGATIVE_PROMPT);
+        let chroma = config.model(LocalModel::Chroma);
+        assert_eq!(chroma.negative_prompt, DEFAULT_NEGATIVE_PROMPT);
+        assert_eq!(chroma.sampler, "euler");
+        assert_eq!(chroma.missing(), vec!["diffusion model", "text encoder", "VAE"]);
+        let qwen = config.model(LocalModel::Qwen);
+        assert_eq!(qwen.scheduler, "simple");
+        assert_eq!(qwen.missing(), vec!["diffusion model", "text encoder", "VAE"]);
+    }
+
+    #[test]
+    fn old_settings_become_chromas() {
+        let old = parse_config(&json!({ "diffusionModel": "C:\\c.safetensors", "idleMinutes": 5, "negativePrompt": OLD_DEFAULT_NEGATIVE_PROMPT, "scheduler": "" }).to_string());
+        assert_eq!(old.idle_minutes, 5);
+        let chroma = old.model(LocalModel::Chroma);
+        assert_eq!(chroma.diffusion_model, "C:\\c.safetensors");
+        assert_eq!(chroma.negative_prompt, DEFAULT_NEGATIVE_PROMPT);
+        assert_eq!(chroma.scheduler, "beta");
+        assert_eq!(old.model(LocalModel::Qwen), ModelConfig::defaults(LocalModel::Qwen));
         let own = parse_config(r#"{"negativePrompt":"text"}"#);
-        assert_eq!(own.negative_prompt, "text");
-        assert_eq!(own.scheduler, "beta");
-        assert_eq!(config.missing(), vec!["diffusion model", "text encoder", "VAE"]);
+        assert_eq!(own.model(LocalModel::Chroma).negative_prompt, "text");
+        assert_eq!(parse_config("not json"), LocalConfig::default());
     }
 
     #[test]
     fn job_request_has_the_sampling_settings() {
-        let mut config = LocalConfig { sampler: "dpm++2m".into(), ..LocalConfig::default() };
-        let body = generate_body("a cat", 1024, 768, 30, &config);
+        let mut files = ModelConfig { sampler: "dpm++2m".into(), ..ModelConfig::defaults(LocalModel::Chroma) };
+        let body = generate_body(LocalModel::Chroma, "a cat", 1024, 768, 30, &files, None);
         assert_eq!(body["negative_prompt"], DEFAULT_NEGATIVE_PROMPT);
         assert_eq!(body["sample_params"]["sample_method"], "dpm++2m");
         assert_eq!(body["sample_params"]["scheduler"], "beta");
         assert_eq!(body["sample_params"]["flow_shift"], 1.0);
-        config.scheduler = "karras".into();
-        config.sampler = " ".into();
-        let body = generate_body("a cat", 1024, 768, 30, &config);
+        assert_eq!(body["sample_params"]["guidance"]["txt_cfg"], 3.5);
+        assert!(body.get("ref_images").is_none());
+        files.scheduler = "karras".into();
+        files.sampler = " ".into();
+        let body = generate_body(LocalModel::Chroma, "a cat", 1024, 768, 30, &files, None);
         assert_eq!(body["sample_params"]["scheduler"], "karras");
         assert_eq!(body["sample_params"]["sample_method"], "euler");
-        config.scheduler = String::new();
-        let body = generate_body("a cat", 1024, 768, 30, &config);
+        files.scheduler = String::new();
+        let body = generate_body(LocalModel::Chroma, "a cat", 1024, 768, 30, &files, None);
         assert_eq!(body["sample_params"]["scheduler"], "beta");
+    }
+
+    #[test]
+    fn qwen_edit_sends_the_image_and_keeps_the_engine_shift() {
+        let files = ModelConfig::defaults(LocalModel::Qwen);
+        let body = generate_body(LocalModel::Qwen, "make it night", 1024, 768, 25, &files, Some("data:image/png;base64,AAAA"));
+        assert_eq!(body["ref_images"], json!(["data:image/png;base64,AAAA"]));
+        assert!(body["sample_params"].get("flow_shift").is_none());
+        assert_eq!(body["sample_params"]["scheduler"], "simple");
+        assert_eq!(body["sample_params"]["guidance"]["txt_cfg"], 3.0);
     }
 
     #[test]
@@ -851,17 +1044,28 @@ mod tests {
             ("text_encoders", "t5xxl_fp16.safetensors"),
             ("vae", "ae.safetensors"),
             ("vae/Wan", "wan_2.1_vae.safetensors"),
+            ("diffusion_models", "qwen_image_2.1_turbo_int8_convrot.safetensors"),
+            ("diffusion_models", "qwen_image_2.1_int8_convrot.safetensors"),
+            ("diffusion_models", "KreaNoct_V4_int8_convrot.safetensors"),
+            ("diffusion_models", "NoctQ_V4_int8_convrot.safetensors"),
+            ("text_encoders", "qwen3vl_8b_bf16.safetensors"),
+            ("text_encoders", "qwen3vl_8b_int8_convrot.safetensors"),
+            ("vae", "qwen_image_2.1_vae_bf16.safetensors"),
         ] {
             let dir = models.join(folder);
             std::fs::create_dir_all(&dir).unwrap();
             std::fs::write(dir.join(name), b"x").unwrap();
         }
-        let found = find_models(&root);
+        let found = find_models(&root, LocalModel::Chroma);
         let name = |path: &Option<String>| path.as_deref().and_then(|path| Path::new(path).file_name()).map(|name| name.to_string_lossy().into_owned());
         assert_eq!(name(&found.diffusion_model).as_deref(), Some("Chroma1-HD.safetensors"));
         assert_eq!(name(&found.text_encoder).as_deref(), Some("t5xxl_fp16.safetensors"));
         assert_eq!(name(&found.vae).as_deref(), Some("ae.safetensors"));
-        assert_eq!(find_models(&root.join("nowhere")), FoundModels::default());
+        let found = find_models(&root, LocalModel::Qwen);
+        assert_eq!(name(&found.diffusion_model).as_deref(), Some("NoctQ_V4_int8_convrot.safetensors"));
+        assert_eq!(name(&found.text_encoder).as_deref(), Some("qwen3vl_8b_int8_convrot.safetensors"));
+        assert_eq!(name(&found.vae).as_deref(), Some("qwen_image_2.1_vae_bf16.safetensors"));
+        assert_eq!(find_models(&root.join("nowhere"), LocalModel::Qwen), FoundModels::default());
         let _ = std::fs::remove_dir_all(&root);
     }
 }

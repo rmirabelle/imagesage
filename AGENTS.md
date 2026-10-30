@@ -35,9 +35,11 @@
   `src-tauri/src/sam.rs`. `src-tauri/src/models.rs` downloads the model on
   first use from this repo's `model-*` releases, which `publish.ps1` keeps;
   see `docs/RELEASING.md`.
-- The optional local engine (`src-tauri/src/local.rs`) runs Chroma1-HD through
-  stable-diffusion.cpp's `sd-server.exe` for new images only, never edits.
-  It reads the user's own model files in place; see `docs/RELEASING.md`.
+- The optional local engine (`src-tauri/src/local.rs`) runs local models
+  through stable-diffusion.cpp's `sd-server.exe`: Chroma1-HD for new images
+  only, and Qwen-Image-2.1 (or a merge such as Noct Q) for new images and,
+  through Regenerate, edits of the selected layer into a new layer. It reads the user's own
+  model files in place; see `docs/RELEASING.md`.
 - GPT Image size rules live in `src/editor/region.ts` and are unit-tested
   (`npm test`). Keep them free of DOM code.
 - In managed Codex sessions, prefer process-local Git `safe.directory` variables

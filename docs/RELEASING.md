@@ -93,9 +93,10 @@ releases, so nothing is mirrored here. `src-tauri/src/local.rs` pins the build
 asset `digest`). The zips unpack into `%LOCALAPPDATA%\<app>\engines\<build>`.
 
 To move to a newer build: take the `win-cuda12-x64` and `cudart` assets of the
-new release, update `ENGINE_BUILD` and `ENGINE_ZIPS`, and generate one image
-with Chroma before release. The model files are the user's own (for example
-from ComfyUI); the app never downloads them.
+new release, update `ENGINE_BUILD` and `ENGINE_ZIPS`, and before release
+generate one image with Chroma and one layer edit (Regenerate) with
+Qwen-Image-2.1. The model files are the user's own (for example from
+ComfyUI); the app never downloads them.
 
 ## Slideshow music
 

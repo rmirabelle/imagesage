@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -23,8 +23,8 @@ import {
   DISCONNECTED,
   apiKeyStatus,
   loadAiSettings,
-  localReady,
   localStatus,
+  readyLocalModels,
   storeAiSettings,
   type AiSettings,
   type ApiKeyStatus,
@@ -67,7 +67,7 @@ type DocumentPanelProps = {
   settings: AiSettings;
   openaiConnected: boolean;
   onRequestOpenAiSettings: () => void;
-  localReady: boolean;
+  readyLocalModels: string[];
   onRequestLocalSettings: () => void;
   onSettingsChange: (settings: AiSettings) => void;
   onCommit: (id: string, patch: Partial<Pick<ImageDocument, "base" | "baseAdjust" | "history" | "historyIndex">>, markDirty?: boolean) => void;
@@ -108,6 +108,8 @@ export default function App() {
   const openaiReady = keyStatuses.openai.connected;
   /** The optional local engine; null until its status loads. */
   const [localState, setLocalState] = useState<LocalStatus | null>(null);
+  /** The local models whose files are set; one array per status, so the document panels stay memoized. */
+  const localModels = useMemo(() => readyLocalModels(localState), [localState]);
   /** Re-renders when prices or the spend record change. */
   usePrices();
   const spend = spendTotals();
@@ -883,7 +885,7 @@ export default function App() {
             settings={settings}
             openaiConnected={keyStatuses.openai.connected}
             onRequestOpenAiSettings={openConnect}
-            localReady={localReady(localState)}
+            readyLocalModels={localModels}
             onRequestLocalSettings={openLocalSettings}
             onSettingsChange={setSettings}
             onCommit={commitHistory}

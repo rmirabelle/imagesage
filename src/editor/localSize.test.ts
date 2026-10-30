@@ -16,11 +16,11 @@ describe("local engine sizes", () => {
     expect(small.width / small.height).toBeCloseTo(4 / 3, 1);
   });
 
-  it("uses multiples of 16", () => {
+  it("uses multiples of 32", () => {
     for (const [width, height] of [[1000, 700], [3000, 2000], [513, 999]]) {
       const size = localImageSize(width, height)!;
-      expect(size.width % 16).toBe(0);
-      expect(size.height % 16).toBe(0);
+      expect(size.width % 32).toBe(0);
+      expect(size.height % 32).toBe(0);
     }
   });
 

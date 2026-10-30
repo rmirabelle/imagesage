@@ -1,9 +1,10 @@
 /**
- * Size rules for new images from the local engine (Chroma1-HD). Chroma works
- * best near one megapixel: the engine makes the image at a size of the same
- * shape within these limits, and Image Sage scales it to the canvas.
+ * Size rules for images from the local engine (Chroma1-HD and Qwen-Image-2.1).
+ * Both work best near one megapixel: the engine makes the image at a size of
+ * the same shape within these limits, and Image Sage scales it to the canvas.
+ * Qwen-Image-2.1 needs sides that are multiples of 32; Chroma takes those too.
  */
-export const LOCAL_SIZE_MULTIPLE = 16;
+export const LOCAL_SIZE_MULTIPLE = 32;
 export const LOCAL_MIN_PIXELS = 768 * 768;
 export const LOCAL_MAX_PIXELS = 1280 * 1280;
 export const LOCAL_MAX_ASPECT = 4;

@@ -129,7 +129,7 @@ interface Props {
 /** An AI edit that is still running: its status, prompt, a short note (time, what it replaces), and Cancel while possible. */
 /** A running AI edit. `replaces` is the id of the layer a regenerate replaces; its row takes that layer's place in the list. */
 /** `aborts`: the service already charges for the edit, so stopping it is Abort, not Cancel. */
-export type PendingLayer = { id: string; status: string; prompt: string; note: string; onCancel?: () => void; aborts?: boolean; selected: boolean; onSelect: () => void; replaces?: string };
+export type PendingLayer = { id: string; status: string; prompt: string; note: string; onCancel?: () => void; aborts?: boolean; selected: boolean; onSelect: () => void; replaces?: string; hidden?: boolean; onToggleHidden?: () => void };
 
 /** A layer being dragged to a new place: where it started, and where it would land. */
 type LayerDrag = { from: number; pointerId: number; startY: number; moved: boolean; to: number | null; above: boolean };
@@ -920,8 +920,18 @@ export const StepsPanel = memo(function StepsPanel({ documentId, hasBase, origin
 
   /** The row of a running AI edit: its stage, prompt, time, and a Cancel button while it can still be cancelled. */
   const renderPending = (item: PendingLayer) => (
-    <li key={item.id} className={`steps-row pending-row ${item.selected ? "active" : ""}`} aria-busy="true" onClick={item.onSelect}>
-      <span className="steps-eye-spacer" aria-hidden="true" />
+    <li key={item.id} className={`steps-row pending-row ${item.selected ? "active" : ""} ${item.hidden ? "hidden-layer" : ""}`} aria-busy="true" onClick={item.onSelect}>
+      {item.onToggleHidden ? (
+        <button
+          className="steps-eye"
+          onClick={(event) => { event.stopPropagation(); item.onToggleHidden?.(); }}
+          aria-label={item.hidden ? "Show this layer" : "Hide this layer"}
+          aria-pressed={!item.hidden}
+          data-help={item.hidden ? "Show this layer. Its progress shows on the image again." : "Hide this layer. Its progress leaves the image, and the layer arrives hidden."}
+        >
+          {item.hidden ? <EyeSlash size={15} /> : <Eye size={15} />}
+        </button>
+      ) : <span className="steps-eye-spacer" aria-hidden="true" />}
       <div className="steps-card">
         <div className="steps-item" data-help={`${item.prompt}
 

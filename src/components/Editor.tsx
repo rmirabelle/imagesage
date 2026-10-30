@@ -67,6 +67,7 @@ import {
   IMAGE_MODELS,
   isLocalModel,
   jobCanCancel,
+  localEdits,
   LOCAL_MODELS,
   LOCAL_STEPS,
   editWholeImage,
@@ -552,6 +553,8 @@ type EditJob = {
   quality?: string;
   /** The partial preview already saved as a snapshot layer. */
   snapped?: string;
+  /** The user hid the layer while it runs: no progress box on the image, and the layer arrives hidden. */
+  hidden?: boolean;
 };
 /**
  * Click to select in progress: what it fills, the prepared image (`key`),
@@ -607,8 +610,8 @@ interface Props {
   /** OpenAI is connected; every edit needs it. */
   openaiConnected: boolean;
   onRequestOpenAiSettings: () => void;
-  /** The local engine is installed and its model files are set, so local models can make new images. */
-  localReady: boolean;
+  /** The local models whose files are set, with the engine installed. */
+  readyLocalModels: string[];
   onRequestLocalSettings: () => void;
   onSettingsChange: (settings: AiSettings) => void;
   onCommit: (id: string, patch: Partial<Pick<ImageDocument, "base" | "baseAdjust" | "history" | "historyIndex" | "surface">>, markDirty?: boolean) => void;
@@ -695,7 +698,7 @@ export function Editor({
   settings,
   openaiConnected,
   onRequestOpenAiSettings,
-  localReady,
+  readyLocalModels,
   onRequestLocalSettings,
   onSettingsChange,
   onCommit,
@@ -968,7 +971,16 @@ export function Editor({
   const updateJob = useCallback((requestId: string, change: (existing: EditJob) => EditJob) => {
     setJobs((list) => list.map((item) => item.requestId === requestId ? change(item) : item));
   }, []);
+  /** Running edits the user hid, read when the result arrives. */
+  const hiddenJobsRef = useRef(new Set<string>());
+  const toggleJobHidden = useCallback((requestId: string) => {
+    const hidden = !hiddenJobsRef.current.has(requestId);
+    if (hidden) hiddenJobsRef.current.add(requestId);
+    else hiddenJobsRef.current.delete(requestId);
+    updateJob(requestId, (existing) => ({ ...existing, hidden }));
+  }, [updateJob]);
   const endJob = useCallback((documentId: string, requestId: string) => {
+    hiddenJobsRef.current.delete(requestId);
     runningRef.current = Math.max(0, runningRef.current - 1);
     setJobs((list) => list.filter((item) => item.requestId !== requestId));
     onBusyChange(documentId, runningRef.current > 0);
@@ -1216,8 +1228,8 @@ export function Editor({
     layerCacheRef.current.set(`${step.id}:image`, { src: step.layer ?? "", canvas: image });
     const index = replaceId ? latest.history.findIndex((item) => item.id === replaceId) : -1;
     if (index < 0) {
-      /** A new top layer has no mask, so it is the whole visible image. */
-      context2d(latest.surface).drawImage(image, 0, 0);
+      /** A new top layer has no mask, so it is the whole visible image. A hidden one leaves the image as it is. */
+      if (!step.hidden) context2d(latest.surface).drawImage(image, 0, 0);
       const history = [...latest.history, step];
       onCommit(latest.id, { history, historyIndex: history.length });
       return null;
@@ -1582,7 +1594,7 @@ export function Editor({
    * always generates from the prompt alone, never edits. `choice` overrides
    * the model and quality of the prompt bar.
    */
-  const runWholeEdit = useCallback(async (instruction: string, from?: HTMLCanvasElement, replaceId?: string, choice?: { model: string; quality: string }) => {
+  const runWholeEdit = useCallback(async (instruction: string, from?: HTMLCanvasElement, replaceId?: string, choice?: { model: string; quality: string }, editLayer = false) => {
     const current = documentRef.current;
     if (!instruction.trim() || applyingRef.current) return;
     if (resizeRef.current) {
@@ -1592,7 +1604,7 @@ export function Editor({
     const model = choice?.model ?? settings.wholeModel;
     const quality = choice?.quality ?? settings.wholeQuality;
     const local = isLocalModel(model);
-    if (local ? !localReady : !openaiConnected) {
+    if (local ? !readyLocalModels.includes(model) : !openaiConnected) {
       if (local) onRequestLocalSettings();
       else onRequestOpenAiSettings();
       return;
@@ -1601,7 +1613,7 @@ export function Editor({
     const imageHeight = current.surface.height;
     const size = local ? localImageSize(imageWidth, imageHeight) : wholeImageSize(imageWidth, imageHeight);
     if (!size) {
-      onNotice({ tone: "error", message: local ? "Chroma1-HD cannot make an image wider or taller than 4:1." : "GPT Image cannot edit an image wider or taller than 3:1." });
+      onNotice({ tone: "error", message: local ? "A local model cannot make an image wider or taller than 4:1." : "GPT Image cannot edit an image wider or taller than 3:1." });
       return;
     }
     const area: Rect = { x: 0, y: 0, width: imageWidth, height: imageHeight };
@@ -1615,8 +1627,12 @@ export function Editor({
     try {
       await composeRef.current;
       const work = cloneCanvas(from ?? current.surface);
-      /** A local model always makes a new image from the prompt alone, as a new layer over the image. */
-      const generate = local || opaqueBounds(work) === null;
+      /**
+       * A local model makes a new image from the prompt alone, as a new layer
+       * over the image, unless it edits a layer (`editLayer`, Regenerate with
+       * Qwen-Image-2.1). An empty image is always made from the prompt alone.
+       */
+      const generate = (local && !(editLayer && localEdits(model))) || opaqueBounds(work) === null;
       const onProgress = (progress: AiProgress) => {
         updateJob(requestId, (existing) => ({
           ...existing,
@@ -1636,7 +1652,7 @@ export function Editor({
       workContext.drawImage(resultImage, 0, 0, imageWidth, imageHeight);
       const cost = local ? null : openAiActualCost(result.usage, model);
       if (!local) recordSpend(cost);
-      if (!generate) learnWholeEditInput(result.usage, model, sizeText);
+      if (!generate && !local) learnWholeEditInput(result.usage, model, sizeText);
       const step: EditStep = {
         id: requestId,
         prompt: instruction.trim(),
@@ -1648,6 +1664,7 @@ export function Editor({
         sent,
         layer: await canvasToDataUrl(work),
         ...(cost !== null ? { cost } : {}),
+        ...(hiddenJobsRef.current.has(requestId) ? { hidden: true } : {}),
         /** The first image in an empty document is its original. */
         ...(!replaceId && documentRef.current.base === "" && !documentRef.current.history.length ? { name: ORIGINAL_LAYER_NAME } : {})
       };
@@ -1666,7 +1683,7 @@ export function Editor({
     } finally {
       endJob(current.id, requestId);
     }
-  }, [appendStep, endJob, localReady, onCommit, onNotice, onRequestLocalSettings, onRequestOpenAiSettings, openaiConnected, settings, startJob, undoReplace, updateJob]);
+  }, [appendStep, endJob, readyLocalModels, onCommit, onNotice, onRequestLocalSettings, onRequestOpenAiSettings, openaiConnected, settings, startJob, undoReplace, updateJob]);
 
   /** A new image from a prompt: generate it once, as the first layer, when the tab opens. */
   const startedGenerationRef = useRef(false);
@@ -1947,8 +1964,24 @@ export function Editor({
     recordMaskChange({ owner, part, before, after });
   };
 
+  /** The selected layer alone, as it shows (mask and adjustments applied), even while it is hidden. */
+  const selectedLayerImage = async (doc: ImageDocument) => {
+    const target = createCanvas(doc.surface.width, doc.surface.height);
+    const step = doc.historyIndex > 0 ? doc.history[doc.historyIndex - 1] : undefined;
+    if (step) drawLayers(target, null, await layerCanvases([withHidden(step, false)]));
+    else drawLayers(target, await baseCanvases(doc), []);
+    return target;
+  };
+
   const submit = () => {
     void runWholeEdit(prompt);
+  };
+
+  /** Regenerate with a local model that edits: the selected layer alone, with the edit, becomes a new layer; the layer stays. */
+  const editSelectedLayer = () => {
+    selectedLayerImage(documentRef.current)
+      .then((layer) => runWholeEdit(prompt, layer, undefined, undefined, true))
+      .catch((error) => onNotice({ tone: "error", message: error instanceof Error ? error.message : String(error) }));
   };
 
   /** Delete asks first; the message after it has an Undo button. */
@@ -4643,7 +4676,14 @@ export function Editor({
   /** Regenerate replaces the selected layer; layers not made by AI cannot be regenerated. */
   const regenStep = lastStep && lastStep.model !== IMPORTED_MODEL && lastStep.model !== ORIGINAL_COPY_MODEL && lastStep.model !== SNAPSHOT_MODEL && lastStep.model !== BLANK_MODEL ? lastStep : undefined;
   const regenName = lastStep ? lastStep.name || `Layer ${imageDocument.historyIndex}` : "the original image";
+  /** Qwen-Image-2.1 edits any layer, the original image and imported photos included. */
+  const layerEdit = localEdits(settings.wholeModel);
+  const canEditLayer = Boolean(lastStep || imageDocument.base);
   const regenerate = () => {
+    if (layerEdit) {
+      if (canEditLayer && prompt.trim()) editSelectedLayer();
+      return;
+    }
     if (localChosen || !regenStep || !prompt.trim()) return;
     if (!confirms("regenerate")) void retryLayer(regenStep.id, prompt);
     else {
@@ -4660,11 +4700,11 @@ export function Editor({
   const confirmRegenStep = confirmRegen ? imageDocument.history.find((item) => item.id === confirmRegen.stepId) : undefined;
   /**
    * Models in the prompt bar: the GPT Image 2.5 models (plus the current one if
-   * it is older), and the local models for new images when the engine is ready.
+   * it is older), and each local model whose files are set.
    */
   const editModels = [
     ...IMAGE_MODELS.filter((model) => model.id.startsWith("gpt-image-2.5") || model.id === settings.wholeModel),
-    ...LOCAL_MODELS.filter((model) => localReady || model.id === settings.wholeModel)
+    ...LOCAL_MODELS.filter((model) => readyLocalModels.includes(model.id) || model.id === settings.wholeModel)
   ];
 
   /**
@@ -5560,7 +5600,7 @@ export function Editor({
                   </div>
                 );
               })()}
-              {jobs.filter((job) => job.requestId === selectedJob).map((job) => (
+              {jobs.filter((job) => job.requestId === selectedJob && !job.hidden).map((job) => (
                 <div key={job.requestId} className="selection-mask working">
                   {job.partialDataUrl && (
                     <div className="partial-preview" style={frameStyle(job.frame)}>
@@ -5696,6 +5736,8 @@ export function Editor({
             aborts: !jobCanCancel(job.stage, job.service),
             selected: job.requestId === selectedJob,
             onSelect: () => setSelectedJob(job.requestId),
+            /** Only an AI edit makes a layer that can be hidden. */
+            ...(job.model ? { hidden: Boolean(job.hidden), onToggleHidden: () => toggleJobHidden(job.requestId) } : {}),
             ...(job.replaceId ? { replaces: job.replaceId } : {})
           };
         })}
@@ -5728,7 +5770,7 @@ export function Editor({
           <div className="prompt-options">
             <select
               aria-label="Edit model"
-              data-help="The model for the prompt. GPT Image edits the whole image or makes a new one; a local model makes new images only, on this computer, for free."
+              data-help="The model for the prompt. GPT Image edits the whole image or makes a new one. The local models make new images; Regenerate with Qwen-Image-2.1 edits the selected layer into a new layer. Local models run on this computer, for free."
               value={settings.wholeModel}
              
               onChange={(event) => {
@@ -5747,7 +5789,7 @@ export function Editor({
                 onChange={(event) => onSettingsChange({ ...settings, wholeQuality: event.target.value })}
               >
                 {qualitiesFor(settings.wholeModel).map((quality) => {
-                  if (localChosen) return <option key={quality} value={quality}>{quality} · {LOCAL_STEPS[quality]} steps</option>;
+                  if (localChosen) return <option key={quality} value={quality}>{quality} · {LOCAL_STEPS[settings.wholeModel]?.[quality]} steps</option>;
                   const size = wholeSize && `${wholeSize.width}x${wholeSize.height}`;
                   return (
                     <option key={quality} value={quality}>
@@ -5768,10 +5810,12 @@ export function Editor({
             </button>
             <button
               className="primary-action regenerate-action"
-              disabled={localChosen || !wholeSize || !regenStep || !prompt.trim()}
+              disabled={(layerEdit ? !canEditLayer : localChosen || !regenStep) || !wholeSize || !prompt.trim()}
               onClick={regenerate}
-              data-help={localChosen
-                ? "A local model only adds new layers. Choose a GPT Image model to regenerate a layer."
+              data-help={layerEdit
+                ? `Edit ${regenName} with this prompt on this computer (Ctrl+Shift+Enter). The result is a new layer; ${regenName} stays as it is.`
+                : localChosen
+                ? "Chroma1-HD only adds new layers. Choose GPT Image or Qwen-Image-2.1 to regenerate a layer."
                 : regenStep
                 ? `Regenerate ${regenName} with this prompt (Ctrl+Shift+Enter). The result replaces the layer and keeps its name; its mask and adjustments are removed. The old layer comes back if it fails or you cancel.`
                 : `Select a layer made by AI to regenerate it. ${lastStep ? `${regenName} was not made by AI.` : ""}`}
