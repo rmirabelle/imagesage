@@ -25,7 +25,7 @@ const FILES: { key: "diffusionModel" | "textEncoder" | "vae"; label: string; hel
   { key: "vae", label: "VAE", help: "ae.safetensors" }
 ];
 
-const EMPTY_CONFIG: LocalConfig = { diffusionModel: "", textEncoder: "", vae: "", idleMinutes: 10, negativePrompt: "", sampler: "euler", scheduler: "" };
+const EMPTY_CONFIG: LocalConfig = { diffusionModel: "", textEncoder: "", vae: "", idleMinutes: 10, negativePrompt: "", sampler: "euler", scheduler: "beta" };
 
 /** The engine's sampler names to compare; the two-pass ones take about twice as long per step. */
 const SAMPLERS: { id: string; label: string }[] = [
@@ -36,10 +36,9 @@ const SAMPLERS: { id: string; label: string }[] = [
   { id: "res_2s", label: "Res 2S (slower)" },
   { id: "heun", label: "Heun (slower)" }
 ];
-/** The engine's scheduler names; empty uses the model's own default. */
+/** The engine's scheduler names; Beta is what SwarmUI and ComfyUI use for Chroma. */
 const SCHEDULERS: { id: string; label: string }[] = [
-  { id: "", label: "Model default" },
-  { id: "beta", label: "Beta" },
+  { id: "beta", label: "Beta (recommended)" },
   { id: "simple", label: "Simple" },
   { id: "karras", label: "Karras" },
   { id: "sgm_uniform", label: "SGM uniform" },

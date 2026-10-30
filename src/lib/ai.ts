@@ -184,7 +184,7 @@ export interface LocalConfig {
   negativePrompt: string;
   /** The engine's sampler name, such as "euler". */
   sampler: string;
-  /** The engine's scheduler name; empty uses the model's own default. */
+  /** The engine's scheduler name, such as "beta". */
   scheduler: string;
 }
 

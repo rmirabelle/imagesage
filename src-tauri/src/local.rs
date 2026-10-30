@@ -30,8 +30,15 @@ const LOAD_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const POLL_INTERVAL: Duration = Duration::from_millis(300);
 const IDLE_CHECK: Duration = Duration::from_secs(30);
 const LOG_LINES: usize = 20;
-/// Chroma1-HD's recommended guidance.
-const CFG_SCALE: f64 = 4.0;
+/// Chroma1-HD's recommended guidance; SwarmUI's 3.5 gives photo results.
+const CFG_SCALE: f64 = 3.5;
+/**
+ * Chroma1-HD's intended flow shift, as ComfyUI and SwarmUI use it. The
+ * engine's automatic shift is higher and gives soft, airbrushed images.
+ */
+const FLOW_SHIFT: f64 = 1.0;
+/// The scheduler SwarmUI and ComfyUI use for Chroma.
+const DEFAULT_SCHEDULER: &str = "beta";
 
 struct EngineZip {
     name: &'static str,
@@ -67,7 +74,7 @@ pub struct LocalConfig {
     negative_prompt: String,
     /// The engine's sampler name, such as `euler` or `dpm++2m`.
     sampler: String,
-    /// The engine's scheduler name; empty uses the model's own default.
+    /// The engine's scheduler name, such as `beta`.
     scheduler: String,
 }
 
@@ -93,7 +100,7 @@ impl Default for LocalConfig {
             idle_minutes: 10,
             negative_prompt: DEFAULT_NEGATIVE_PROMPT.into(),
             sampler: "euler".into(),
-            scheduler: String::new(),
+            scheduler: DEFAULT_SCHEDULER.into(),
         }
     }
 }
@@ -244,6 +251,9 @@ fn parse_config(text: &str) -> LocalConfig {
     let mut config: LocalConfig = serde_json::from_str(text).unwrap_or_default();
     if config.negative_prompt == OLD_DEFAULT_NEGATIVE_PROMPT {
         config.negative_prompt = DEFAULT_NEGATIVE_PROMPT.into();
+    }
+    if config.scheduler.trim().is_empty() {
+        config.scheduler = DEFAULT_SCHEDULER.into();
     }
     config
 }
@@ -450,6 +460,7 @@ fn spawn_server(dir: &Path, config: &LocalConfig) -> Result<Server, String> {
         .args(["--t5xxl", &config.text_encoder])
         .args(["--vae", &config.vae])
         .args(["--model-args", "chroma_use_dit_mask=false"])
+        .args(["--flow-shift", &FLOW_SHIFT.to_string()])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -651,12 +662,11 @@ fn generate_body(prompt: &str, width: u32, height: u32, steps: u32, config: &Loc
     let mut sample_params = json!({
         "sample_method": if sampler.is_empty() { "euler" } else { sampler },
         "sample_steps": steps,
-        "guidance": { "txt_cfg": CFG_SCALE }
+        "guidance": { "txt_cfg": CFG_SCALE },
+        "flow_shift": FLOW_SHIFT
     });
     let scheduler = config.scheduler.trim();
-    if !scheduler.is_empty() {
-        sample_params["scheduler"] = json!(scheduler);
-    }
+    sample_params["scheduler"] = json!(if scheduler.is_empty() { DEFAULT_SCHEDULER } else { scheduler });
     json!({
         "prompt": prompt,
         "negative_prompt": config.negative_prompt.trim(),
@@ -807,6 +817,7 @@ mod tests {
         assert_eq!(old.negative_prompt, DEFAULT_NEGATIVE_PROMPT);
         let own = parse_config(r#"{"negativePrompt":"text"}"#);
         assert_eq!(own.negative_prompt, "text");
+        assert_eq!(own.scheduler, "beta");
         assert_eq!(config.missing(), vec!["diffusion model", "text encoder", "VAE"]);
     }
 
@@ -816,12 +827,16 @@ mod tests {
         let body = generate_body("a cat", 1024, 768, 30, &config);
         assert_eq!(body["negative_prompt"], DEFAULT_NEGATIVE_PROMPT);
         assert_eq!(body["sample_params"]["sample_method"], "dpm++2m");
-        assert!(body["sample_params"].get("scheduler").is_none());
-        config.scheduler = "beta".into();
+        assert_eq!(body["sample_params"]["scheduler"], "beta");
+        assert_eq!(body["sample_params"]["flow_shift"], 1.0);
+        config.scheduler = "karras".into();
         config.sampler = " ".into();
         let body = generate_body("a cat", 1024, 768, 30, &config);
-        assert_eq!(body["sample_params"]["scheduler"], "beta");
+        assert_eq!(body["sample_params"]["scheduler"], "karras");
         assert_eq!(body["sample_params"]["sample_method"], "euler");
+        config.scheduler = String::new();
+        let body = generate_body("a cat", 1024, 768, 30, &config);
+        assert_eq!(body["sample_params"]["scheduler"], "beta");
     }
 
     #[test]
