@@ -1806,7 +1806,7 @@ dependencies = [
 
 [[package]]
 name = "imagesage"
-version = "0.12.2"
+version = "0.12.3"
 dependencies = [
  "anyhow",
  "base64 0.22.1",

@@ -5748,7 +5748,11 @@ export function Editor({
             onCancel: jobCanCancel(job.stage, job.service) || canAbort(job.stage) ? () => cancelJob(job.requestId) : undefined,
             aborts: !jobCanCancel(job.stage, job.service),
             selected: job.requestId === selectedJob,
-            onSelect: () => setSelectedJob(job.requestId),
+            onSelect: () => {
+              setSelectedJob(job.requestId);
+              /** Only an AI edit's row holds a prompt; other running jobs show a label. */
+              if (job.model) setPrompt(job.prompt);
+            },
             /** Only an AI edit makes a layer that can be hidden. */
             ...(job.model ? { hidden: Boolean(job.hidden), onToggleHidden: () => toggleJobHidden(job.requestId) } : {}),
             ...(job.replaceId ? { replaces: job.replaceId } : {})
