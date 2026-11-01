@@ -973,12 +973,14 @@ export function Editor({
   }, []);
   /** Running edits the user hid, read when the result arrives. */
   const hiddenJobsRef = useRef(new Set<string>());
-  const toggleJobHidden = useCallback((requestId: string) => {
-    const hidden = !hiddenJobsRef.current.has(requestId);
+  const setJobHidden = useCallback((requestId: string, hidden: boolean) => {
     if (hidden) hiddenJobsRef.current.add(requestId);
     else hiddenJobsRef.current.delete(requestId);
     updateJob(requestId, (existing) => ({ ...existing, hidden }));
   }, [updateJob]);
+  const toggleJobHidden = useCallback((requestId: string) => {
+    setJobHidden(requestId, !hiddenJobsRef.current.has(requestId));
+  }, [setJobHidden]);
   const endJob = useCallback((documentId: string, requestId: string) => {
     hiddenJobsRef.current.delete(requestId);
     runningRef.current = Math.max(0, runningRef.current - 1);
@@ -1204,13 +1206,15 @@ export function Editor({
   const selectLayer = useCallback((node: number) => {
     const current = documentRef.current;
     setSelectedJob(null);
-    if (node < 0 || node > current.history.length || node === current.historyIndex) return;
+    if (node < 0 || node > current.history.length) return;
+    /** The prompt loads even for the layer already selected, for example after a running edit's row was selected. */
+    const layerPrompt = node > 0 ? current.history[node - 1].prompt : current.origin.kind === "generated" ? current.origin.prompt : null;
+    if (layerPrompt !== null) setPrompt(layerPrompt);
+    if (node === current.historyIndex) return;
     onCommit(current.id, { historyIndex: node }, false);
     /** The Mask tool belongs to the layer it was turned on for; picking a mask chip turns it on again for the new layer. */
     setTool((active) => active === "mask" ? "whole" : active);
     setGradient(null);
-    const layerPrompt = node > 0 ? current.history[node - 1].prompt : current.origin.kind === "generated" ? current.origin.prompt : null;
-    if (layerPrompt !== null) setPrompt(layerPrompt);
   }, [onCommit]);
 
   /** Layers hidden while a retry runs, with whether each was hidden before the retry. */
@@ -2955,22 +2959,31 @@ export function Editor({
 
   /**
    * Ctrl+click on a layer's eye: shows only that layer (and the original image,
-   * which always shows). Ctrl+click again on the same layer, while it is still
-   * the only one shown, brings back the visibility from before.
+   * which always shows). Running AI edits are hidden too, so their progress
+   * does not cover the layer and their results arrive hidden. Ctrl+click again
+   * on the same layer, while it is still the only one shown, brings back the
+   * visibility from before.
    */
   const soloLayer = (node: number) => {
     const current = documentRef.current;
     const step = current.history[node - 1];
     if (!step) return;
     const solo = soloRef.current;
-    const soloed = !step.hidden && current.history.every((item) => item.id === step.id || item.hidden);
+    const layerJobs = jobs.filter((job) => job.model);
+    const soloed = !step.hidden && current.history.every((item) => item.id === step.id || item.hidden) && layerJobs.every((job) => job.hidden);
     if (soloed && solo && solo.documentId === current.id && solo.owner === step.id) {
       soloRef.current = null;
       onCommit(current.id, { history: current.history.map((item) => withHidden(item, solo.hidden.get(item.id) ?? false)) }, false);
+      for (const job of layerJobs) setJobHidden(job.requestId, solo.hidden.get(job.requestId) ?? false);
       return;
     }
-    soloRef.current = { documentId: current.id, owner: step.id, hidden: new Map(current.history.map((item) => [item.id, item.hidden === true])) };
+    soloRef.current = {
+      documentId: current.id,
+      owner: step.id,
+      hidden: new Map([...current.history.map((item) => [item.id, item.hidden === true] as const), ...layerJobs.map((job) => [job.requestId, Boolean(job.hidden)] as const)])
+    };
     onCommit(current.id, { history: current.history.map((item) => withHidden(item, item.id !== step.id)) }, false);
+    for (const job of layerJobs) setJobHidden(job.requestId, true);
   };
 
   const toggleLayerVisible = (node: number, solo = false) => {
