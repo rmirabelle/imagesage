@@ -2,12 +2,12 @@ import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useStat
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { save } from "@tauri-apps/plugin-dialog";
-import { ArrowClockwise, ArrowCounterClockwise, ArrowsOut, Camera, CheckCircle, CornersOut, DownloadSimple, FilePlus, FilmStrip, FloppyDisk, FolderOpen, GearSix, ImageSquare, Info, Keyboard, SpinnerGap, Warning, WarningCircle, X } from "@phosphor-icons/react";
+import { open, save } from "@tauri-apps/plugin-dialog";
+import { ArrowClockwise, ArrowCounterClockwise, ArrowsOut, Camera, CheckCircle, CornersOut, DownloadSimple, FilePlus, FilmStrip, FloppyDisk, FolderOpen, GearSix, ImageSquare, Info, Keyboard, SpinnerGap, Stack, Warning, WarningCircle, X } from "@phosphor-icons/react";
 import { AboutDialog } from "./components/AboutDialog";
 import { ShortcutsDialog } from "./components/ShortcutsDialog";
 import { ConnectDialog, type SettingsSection } from "./components/ConnectDialog";
-import { Editor, type EditorCommand, type Notice } from "./components/Editor";
+import { Editor, type EditorCommand, type LayerExport, type Notice } from "./components/Editor";
 import { NewImageDialog } from "./components/NewImageDialog";
 import { OpenDialog } from "./components/OpenDialog";
 import { Tooltips } from "./components/Tooltips";
@@ -60,6 +60,13 @@ const samePath = (a: string | null | undefined, b: string) => Boolean(a) && a!.r
 type PendingImport = { path: string; surface: HTMLCanvasElement; target: { width: number; height: number } };
 const documentNameFor = (path: string) => `${fileName(path).replace(/\.[^.]+$/, "") || "Untitled"}.imagesage`;
 const SAVE_SEQUENCE_KEY = "imagesage.export-sequence";
+/** The folder of the last export in this run of the app; it is in memory only, so the app forgets it on close. */
+let lastExportFolder: string | null = null;
+const folderOf = (path: string) => path.replace(/[\\/][^\\/]*$/, "");
+/** A suggested export path: the file name in the last export folder, when there is one. */
+const inLastExportFolder = (path: string) => lastExportFolder ? `${lastExportFolder}\\${fileName(path)}` : path;
+/** Characters that Windows does not allow in file names become spaces. */
+const safeFileName = (name: string) => name.replace(/[<>:"/\\|?*\u0000-\u001f]/g, " ").replace(/\s+/g, " ").trim().replace(/[. ]+$/, "");
 
 type DocumentPanelProps = {
   document: ImageDocument;
@@ -76,6 +83,7 @@ type DocumentPanelProps = {
   onSave: (id: string, saveAs?: boolean) => Promise<boolean>;
   onExport: (id: string, dataUrl: string, format: SaveFormat) => Promise<boolean>;
   onExportVideo: (id: string, video: Blob) => Promise<boolean>;
+  onExportLayers: (id: string, layers: LayerExport[]) => Promise<boolean>;
   onNotice: (notice: Notice) => void;
   onFileTask: <T>(label: string, work: () => Promise<T>) => Promise<T>;
   command: EditorCommand | null;
@@ -590,11 +598,12 @@ export default function App() {
     if (!document) return false;
     const chosenPath = await save({
       title: "Export video slideshow",
-      defaultPath: `${document.name.replace(/\.[^.]+$/, "")} slideshow.mp4`,
+      defaultPath: inLastExportFolder(`${document.name.replace(/\.[^.]+$/, "")} slideshow.mp4`),
       filters: [{ name: "MP4 video", extensions: ["mp4"] }]
     });
     if (!chosenPath) return false;
     const path = chosenPath.toLowerCase().endsWith(".mp4") ? chosenPath : `${chosenPath}.mp4`;
+    lastExportFolder = folderOf(path);
     await runFileTask(`Exporting ${fileName(path)}…`, async () => {
       /** The video goes to Rust as a data URL; the file reader makes it without a slow loop over the bytes. */
       const dataUrl = await new Promise<string>((resolve, reject) => {
@@ -639,16 +648,55 @@ export default function App() {
       : `Image Sage ${sequence}.${extension}`;
     const chosenPath = await save({
       title: "Export image",
-      defaultPath,
+      defaultPath: inLastExportFolder(defaultPath),
       filters: [format === "png"
         ? { name: "PNG image", extensions: ["png"] }
         : { name: "JPEG image", extensions: ["jpg", "jpeg"] }]
     });
     if (!chosenPath) return false;
     const path = /\.[a-z0-9]+$/i.test(chosenPath) ? chosenPath : `${chosenPath}.${extension}`;
+    lastExportFolder = folderOf(path);
     await runFileTask(`Exporting ${fileName(path)}…`, () => invoke("save_image", { path, dataUrl }));
     try { localStorage.setItem(SAVE_SEQUENCE_KEY, String(sequence + 1)); } catch { /* See above. */ }
     showNotice({ tone: "success", message: `Exported ${path}`, documentId });
+    return true;
+  }, [runFileTask, showNotice]);
+
+  /**
+   * Exports each layer as its own PNG file in a folder the user picks. The
+   * files are named "<image> 01 <layer>.png", bottom layer first; files of an
+   * earlier export with the same names are replaced. Layers are drawn and
+   * written one at a time, so a large image does not hold all of them at once.
+   */
+  const exportLayers = useCallback(async (documentId: string, layers: LayerExport[]) => {
+    if (!isTauri()) {
+      showNotice({ tone: "error", message: "Exporting is available in the Image Sage desktop app." });
+      return false;
+    }
+    const document = documentsRef.current.find((candidate) => candidate.id === documentId);
+    if (!document || !layers.length) return false;
+    const folder = await open({
+      title: "Export all layers to a folder",
+      directory: true,
+      multiple: false,
+      defaultPath: lastExportFolder ?? (document.path ? folderOf(document.path) : undefined)
+    });
+    if (typeof folder !== "string") return false;
+    lastExportFolder = folder.replace(/[\\/]+$/, "");
+    const prefix = safeFileName(document.name.replace(/\.[^.]+$/, "")) || "Image Sage";
+    const digits = Math.max(2, String(layers.length).length);
+    try {
+      await runFileTask(`Exporting ${layers.length} layers…`, async () => {
+        for (const [index, layer] of layers.entries()) {
+          const name = `${prefix} ${String(index + 1).padStart(digits, "0")} ${safeFileName(layer.name) || "Layer"}.png`;
+          await invoke("save_image", { path: `${lastExportFolder}\\${name}`, dataUrl: await layer.render() });
+        }
+      });
+    } catch (error) {
+      showNotice({ tone: "error", message: String(error) });
+      return false;
+    }
+    showNotice({ tone: "success", message: `Exported ${layers.length} layers to ${lastExportFolder}`, documentId });
     return true;
   }, [runFileTask, showNotice]);
 
@@ -747,7 +795,8 @@ export default function App() {
         { label: "Save As…", shortcut: "Ctrl+Shift+S", disabled: !activeDocument || activeDocument.saving, run: () => activeDocument && void saveDocument(activeDocument.id, true) },
         "separator",
         { label: "Import Image…", icon: <DownloadSimple size={15} />, disabled: !activeDocument, run: () => sendCommand("import-image") },
-        { label: "Export Image…", icon: <ImageSquare size={15} />, disabled: !activeDocument, run: () => sendCommand("export-image") },
+        { label: "Export Image…", icon: <ImageSquare size={15} />, shortcut: "Ctrl+E", disabled: !activeDocument, run: () => sendCommand("export-image") },
+        { label: "Export All Layers…", icon: <Stack size={15} />, disabled: !activeDocument, run: () => sendCommand("export-layers") },
         { label: "Export Video Slideshow…", icon: <FilmStrip size={15} />, disabled: !activeDocument, run: () => sendCommand("export-video") },
         "separator",
         { label: "Settings…", icon: <GearSix size={15} />, run: openConnect }
@@ -893,6 +942,7 @@ export default function App() {
             onSave={saveDocument}
             onExport={exportImage}
             onExportVideo={exportVideo}
+            onExportLayers={exportLayers}
             onNotice={noticeFor(document.id)}
             onFileTask={runFileTask}
             command={editorCommand?.documentId === document.id ? editorCommand : null}

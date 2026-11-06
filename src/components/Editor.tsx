@@ -621,6 +621,8 @@ interface Props {
   onExport: (id: string, dataUrl: string, format: SaveFormat) => Promise<boolean>;
   /** Asks where to save the video slideshow and writes it; false when the user cancels. */
   onExportVideo: (id: string, video: Blob) => Promise<boolean>;
+  /** Asks for a folder and writes each layer there as its own PNG; false when the user cancels. */
+  onExportLayers: (id: string, layers: LayerExport[]) => Promise<boolean>;
   onNotice: (notice: Notice) => void;
   /** Shows the file loader with `label` while `work` runs. */
   onFileTask: <T>(label: string, work: () => Promise<T>) => Promise<T>;
@@ -628,12 +630,15 @@ interface Props {
   command?: EditorCommand | null;
 }
 
+/** One layer to export: its name and a function that draws it as a PNG data URL. */
+export type LayerExport = { name: string; render: () => Promise<string> };
+
 /**
  * File menu commands that open one of the editor's dialogs, for the document
  * `documentId`. `nonce` changes each time, so the same command can run again,
  * and an editor runs each nonce only once.
  */
-export type EditorCommand = { name: "export-image" | "export-video" | "import-image" | "undo" | "redo" | "snapshot" | "canvas-size" | "image-size"; documentId: string; nonce: number };
+export type EditorCommand = { name: "export-image" | "export-video" | "export-layers" | "import-image" | "undo" | "redo" | "snapshot" | "canvas-size" | "image-size"; documentId: string; nonce: number };
 
 /** Ctrl+wheel zoom: the scale changes by exp(-deltaY × this); one wheel notch (100) is about 5%. */
 const WHEEL_ZOOM_RATE = 0.0005;
@@ -706,6 +711,7 @@ export function Editor({
   onSave,
   onExport,
   onExportVideo,
+  onExportLayers,
   onNotice,
   onFileTask,
   command
@@ -3005,6 +3011,14 @@ export function Editor({
     void cancelAiRequest(requestId);
   };
 
+  /** Ctrl+E opens Export Image as the File menu does; a ref, so the key handler always sees the latest state. */
+  const openExportImageRef = useRef(() => {});
+  openExportImageRef.current = () => {
+    if (exporting) return;
+    onNotice(null);
+    setExportDialogOpen(true);
+  };
+
   useEffect(() => {
     if (!active) return;
     const onKeyDown = (event: KeyboardEvent) => {
@@ -3125,6 +3139,10 @@ export function Editor({
       } else if (event.ctrlKey && event.key.toLowerCase() === "s") {
         event.preventDefault();
         void onSave(documentRef.current.id, event.shiftKey);
+      } else if (event.ctrlKey && !event.altKey && !event.shiftKey && event.key.toLowerCase() === "e" && !typing) {
+        /** Ctrl+E opens Export Image, as the File menu does. */
+        event.preventDefault();
+        if (!event.repeat) openExportImageRef.current();
       }
       if (event.key === "Escape" && !typing) {
         /** Esc first drops work in progress; then, in the Paint tool, it goes straight back to Select. */
@@ -4594,6 +4612,44 @@ export function Editor({
     }
   };
 
+  /**
+   * Exports every layer, hidden ones too, as its own full-size PNG: the
+   * original image (older documents), then each layer bottom to top. Each
+   * file holds only that layer, with its mask and adjustments, on
+   * transparency; blend modes need the layers below, so they are left out.
+   */
+  const exportAllLayers = async () => {
+    const doc = documentRef.current;
+    if (exporting || applyingRef.current || resizeRef.current || clickSelectRef.current) return;
+    const { width: fullWidth, height: fullHeight } = doc.surface;
+    const render = (layer: () => Promise<LayerCanvases | null>) => async () => {
+      const canvas = createCanvas(fullWidth, fullHeight);
+      const decoded = await layer();
+      if (decoded) drawLayer(context2d(canvas), { ...decoded, blend: undefined });
+      return canvasToDataUrl(canvas);
+    };
+    const layers: LayerExport[] = [
+      ...(doc.base ? [{ name: "Original image", render: render(() => baseCanvases(doc)) }] : []),
+      ...doc.history
+        .map((step, index) => ({ step, node: index + 1 }))
+        .filter(({ step }) => step.layer)
+        .map(({ step, node }) => ({
+          name: step.name || `Layer ${node}`,
+          render: render(async () => (await layerCanvases([{ ...step, hidden: false }]))[0] ?? null)
+        }))
+    ];
+    if (!layers.length) {
+      onNotice({ tone: "error", message: "This image has no layers to export." });
+      return;
+    }
+    setExporting(true);
+    try {
+      await onExportLayers(doc.id, layers);
+    } finally {
+      setExporting(false);
+    }
+  };
+
   /** Shows the brush cursor at an image point, or hides it for null. */
   function moveBrushCursor(point: Point | null) {
     brushPointRef.current = point;
@@ -4631,11 +4687,12 @@ export function Editor({
         return;
       }
       setCanvasDialog(command.name === "image-size" ? "image" : "canvas");
-    } else if (command.name === "export-image" || command.name === "export-video") {
+    } else if (command.name === "export-image" || command.name === "export-video" || command.name === "export-layers") {
       if (exporting) return;
       /** A new export first removes the message of the one before. */
       onNotice(null);
       if (command.name === "export-image") setExportDialogOpen(true);
+      else if (command.name === "export-layers") void exportAllLayers();
       else setSlideshowDialogOpen(true);
     } else if (resizeRef.current || clickSelectRef.current) {
       onNotice({ tone: "error", message: "Apply or cancel the current tool (Enter or Esc) before you import an image." });

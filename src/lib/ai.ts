@@ -202,6 +202,10 @@ export interface LocalModelConfig {
   sampler: string;
   /** The engine's scheduler name, such as "beta". */
   scheduler: string;
+  /** An optional LoRA file that changes the model's style; empty means none. */
+  lora: string;
+  /** How strongly the LoRA applies: 1 is full strength, 0 turns it off. */
+  loraStrength: number;
 }
 
 export interface LocalConfig {

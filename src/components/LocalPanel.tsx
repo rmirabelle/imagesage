@@ -44,7 +44,7 @@ const MODEL_INFO: Record<string, { name: string; files: Record<FileKey, string>;
   }
 };
 
-const EMPTY_FILES: LocalModelConfig = { diffusionModel: "", textEncoder: "", vae: "", negativePrompt: "", promptPrefix: "", sampler: "euler", scheduler: "beta" };
+const EMPTY_FILES: LocalModelConfig = { diffusionModel: "", textEncoder: "", vae: "", negativePrompt: "", promptPrefix: "", sampler: "euler", scheduler: "beta", lora: "", loraStrength: 0.75 };
 const EMPTY_CONFIG: LocalConfig = { idleMinutes: 10, models: {} };
 
 /** The engine's sampler names to compare; the two-pass ones take about twice as long per step. */
@@ -138,7 +138,7 @@ export function LocalPanel({
 
   const load = () => run(`Loading ${info.name}…`, (requestId) => loadLocalModel(requestId, model, () => {}));
 
-  const browse = async (key: FileKey) => {
+  const browse = async (key: FileKey | "lora") => {
     const picked = await open({ multiple: false, directory: false, filters: MODEL_FILTERS, defaultPath: files[key] || undefined });
     if (typeof picked === "string") await save(withFiles({ [key]: picked }));
   };
@@ -246,7 +246,7 @@ export function LocalPanel({
             </button>
           </div>
         </div>
-        {missing.length > 0 && files.diffusionModel + files.textEncoder + files.vae !== "" && (
+        {missing.length > 0 && files.diffusionModel + files.textEncoder + files.vae + files.lora !== "" && (
           <div className="settings-check error" role="status">
             <WarningCircle size={16} weight="fill" />
             <span>Not found: {missing.join(", ")}.</span>
@@ -270,6 +270,43 @@ export function LocalPanel({
             {SCHEDULERS.map(({ id, label }) => <option key={id} value={id}>{id === info.scheduler ? `${label} (recommended)` : label}</option>)}
           </select>
         </div>
+        <div className="form-row">
+          <label className="form-row-label" htmlFor="local-lora">LoRA</label>
+          <div className="settings-key-row">
+            <input
+              id="local-lora"
+              className="settings-input"
+              spellCheck={false}
+              placeholder="None (optional style file)"
+              value={files.lora}
+              onChange={(event) => setConfig(withFiles({ lora: event.target.value }))}
+              onBlur={() => void save(config)}
+            />
+            <button className="button secondary" disabled={working} onClick={() => void browse("lora")}>Browse…</button>
+            {files.lora && (
+              <button className="button secondary" disabled={working} onClick={() => void save(withFiles({ lora: "" }))}>Clear</button>
+            )}
+          </div>
+        </div>
+        {files.lora && (
+          <div className="form-row">
+            <label className="form-row-label" htmlFor="local-lora-strength">LoRA strength</label>
+            <div className="local-idle">
+              <input
+                id="local-lora-strength"
+                className="settings-input"
+                type="number"
+                min={0}
+                max={2}
+                step={0.05}
+                value={files.loraStrength}
+                onChange={(event) => setConfig(withFiles({ loraStrength: Math.max(0, Math.min(2, Number(event.target.value) || 0)) }))}
+                onBlur={() => void save(config)}
+              />
+              <span>1 is full strength; 0 turns it off</span>
+            </div>
+          </div>
+        )}
         <div className="form-row">
           <label className="form-row-label" htmlFor="local-prefix">Prompt start</label>
           <div className="local-negative">
@@ -304,7 +341,7 @@ export function LocalPanel({
             )}
           </div>
         </div>
-        <small className="settings-help">The prompt start goes before every new image's prompt; "A photo." makes {info.name} draw photos unless the prompt asks for another style. The negative prompt lists what {info.name} should avoid in every image, such as blur and extra fingers. The settings apply to the next image.</small>
+        <small className="settings-help">The prompt start goes before every new image's prompt; "A photo." makes {info.name} draw photos unless the prompt asks for another style. The negative prompt lists what {info.name} should avoid in every image, such as blur and extra fingers. A LoRA is a small add-on file made for {info.name} that changes its style, such as a photo look. The settings apply to the next image.</small>
       </div>
 
       <div className="settings-group">

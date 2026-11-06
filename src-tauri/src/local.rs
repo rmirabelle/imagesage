@@ -166,6 +166,10 @@ pub struct ModelConfig {
     sampler: String,
     /// The engine's scheduler name, such as `beta`.
     scheduler: String,
+    /// An optional LoRA file that changes the model's style, such as a photo look; empty means none.
+    lora: String,
+    /// How strongly the LoRA applies: 1 is full strength, 0 turns it off.
+    lora_strength: f64,
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
@@ -185,6 +189,8 @@ pub struct LocalConfig {
 const DEFAULT_NEGATIVE_PROMPT: &str = "cartoon, anime, illustration, drawing, painting, 3d render, cgi, airbrushed, plastic skin, overly smooth skin, \
      oversaturated, low quality, blurry, out of focus, jpeg artifacts, \
      bad anatomy, extra fingers, missing fingers, fused fingers, malformed hands, extra limbs, missing limbs";
+/// A LoRA's starting strength: a little below full, as photo-style LoRAs such as FineArtPhoto suggest.
+const DEFAULT_LORA_STRENGTH: f64 = 0.75;
 /// The earlier default; a saved copy of it becomes the new default.
 const OLD_DEFAULT_NEGATIVE_PROMPT: &str = "low quality, ugly, unfinished, out of focus, deformed, disfigure, blurry, smudged, restricted palette, flat colors, \
      bad anatomy, incorrect anatomy, extra fingers, missing fingers, fused fingers, malformed hands, extra limbs, missing limbs";
@@ -199,12 +205,14 @@ impl ModelConfig {
             prompt_prefix: Some(model.default_prompt_prefix().into()),
             sampler: "euler".into(),
             scheduler: model.default_scheduler().into(),
+            lora: String::new(),
+            lora_strength: DEFAULT_LORA_STRENGTH,
         }
     }
 
-    /// The model files that are not set or do not exist, by name.
+    /// The model files that are not set or do not exist, by name. The LoRA is optional, so it counts only when set.
     fn missing(&self) -> Vec<&'static str> {
-        [
+        let mut missing: Vec<&'static str> = [
             (&self.diffusion_model, "diffusion model"),
             (&self.text_encoder, "text encoder"),
             (&self.vae, "VAE"),
@@ -212,7 +220,20 @@ impl ModelConfig {
         .into_iter()
         .filter(|(path, _)| path.trim().is_empty() || !Path::new(path.as_str()).is_file())
         .map(|(_, name)| name)
-        .collect()
+        .collect();
+        if !self.lora.trim().is_empty() && !Path::new(self.lora.trim()).is_file() {
+            missing.push("LoRA");
+        }
+        missing
+    }
+
+    /// The LoRA's folder and file name, when a LoRA is set: the engine reads LoRAs from one folder, by name.
+    fn lora_parts(&self) -> Option<(PathBuf, String)> {
+        let path = Path::new(self.lora.trim());
+        if path.as_os_str().is_empty() {
+            return None;
+        }
+        Some((path.parent()?.to_path_buf(), path.file_name()?.to_string_lossy().into_owned()))
     }
 }
 
@@ -438,8 +459,10 @@ pub fn local_config_set(app: AppHandle, engine: State<'_, LocalEngine>, config: 
     Ok(())
 }
 
+/// The engine's start settings: its model files and the LoRA folder. The LoRA and its strength apply per image.
 fn same_files(a: &ModelConfig, b: &ModelConfig) -> bool {
-    a.diffusion_model == b.diffusion_model && a.text_encoder == b.text_encoder && a.vae == b.vae
+    let lora_dir = |files: &ModelConfig| files.lora_parts().map(|(dir, _)| dir);
+    a.diffusion_model == b.diffusion_model && a.text_encoder == b.text_encoder && a.vae == b.vae && lora_dir(a) == lora_dir(b)
 }
 
 /// Finds a local model's files in a ComfyUI folder (its root, or its `models` folder).
@@ -639,6 +662,9 @@ fn spawn_server(dir: &Path, model: LocalModel, files: &ModelConfig, idle_minutes
     }
     if let Some(shift) = model.flow_shift() {
         command.args(["--flow-shift", &shift.to_string()]);
+    }
+    if let Some((dir, _)) = files.lora_parts() {
+        command.arg("--lora-model-dir").arg(dir);
     }
     command
         .stdin(Stdio::null())
@@ -869,6 +895,9 @@ fn generate_body(model: LocalModel, prompt: &str, width: u32, height: u32, steps
     if let Some(image) = image {
         body["ref_images"] = json!([image]);
     }
+    if let Some((_, name)) = files.lora_parts().filter(|_| files.lora_strength != 0.0) {
+        body["lora"] = json!([{ "path": name, "multiplier": files.lora_strength }]);
+    }
     body
 }
 
@@ -1057,6 +1086,29 @@ mod tests {
         let body = generate_body(LocalModel::Chroma, "a cat", 1024, 768, 30, &files, None);
         assert_eq!(body["sample_params"]["scheduler"], "beta");
         assert_eq!(body["prompt"], "a cat");
+    }
+
+    #[test]
+    fn lora_goes_by_name_from_its_folder() {
+        let mut files = ModelConfig::defaults(LocalModel::Chroma);
+        assert!(files.lora_parts().is_none());
+        assert!(generate_body(LocalModel::Chroma, "a cat", 1024, 768, 30, &files, None).get("lora").is_none());
+        files.lora = "D:\\models\\loras\\FineArtPhoto2.safetensors".into();
+        let (dir, name) = files.lora_parts().unwrap();
+        assert_eq!(dir, PathBuf::from("D:\\models\\loras"));
+        assert_eq!(name, "FineArtPhoto2.safetensors");
+        let body = generate_body(LocalModel::Chroma, "a cat", 1024, 768, 30, &files, None);
+        assert_eq!(body["lora"], json!([{ "path": "FineArtPhoto2.safetensors", "multiplier": 0.75 }]));
+        assert!(files.missing().contains(&"LoRA"));
+        files.lora_strength = 0.0;
+        assert!(generate_body(LocalModel::Chroma, "a cat", 1024, 768, 30, &files, None).get("lora").is_none());
+        let other_strength = ModelConfig { lora_strength: 1.0, ..files.clone() };
+        assert!(same_files(&files, &other_strength));
+        let other_folder = ModelConfig { lora: "E:\\loras\\FineArtPhoto2.safetensors".into(), ..files.clone() };
+        assert!(!same_files(&files, &other_folder));
+        let saved = parse_config(r#"{"models":{"chroma1-hd":{"sampler":"euler"}}}"#);
+        assert_eq!(saved.model(LocalModel::Chroma).lora, "");
+        assert_eq!(saved.model(LocalModel::Chroma).lora_strength, 0.75);
     }
 
     #[test]
