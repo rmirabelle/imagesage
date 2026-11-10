@@ -748,10 +748,20 @@ impl Drop for Session {
  */
 async fn open_session(app: &AppHandle, engine: &LocalEngine, reporter: &ProgressReporter, model: LocalModel) -> Result<Session, String> {
     let dir = engines_dir(app)?.join(ENGINE_BUILD);
-    if !engine_installed(&dir) {
+    start_session(&dir, &load_config(app)?, engine, Some(reporter), model).await
+}
+
+/// The same as `open_session`, from the engine's folder and the settings; a request with no window has no reporter.
+async fn start_session(
+    dir: &Path,
+    config: &LocalConfig,
+    engine: &LocalEngine,
+    reporter: Option<&ProgressReporter>,
+    model: LocalModel,
+) -> Result<Session, String> {
+    if !engine_installed(dir) {
         return Err("The local engine is not installed. Download it in Settings → Local.".into());
     }
-    let config = load_config(app)?;
     let files = config.model(model);
     let missing = files.missing();
     if !missing.is_empty() {
@@ -766,7 +776,7 @@ async fn open_session(app: &AppHandle, engine: &LocalEngine, reporter: &Progress
             if let Some(old) = slot.take() {
                 old.stop();
             }
-            *slot = Some(spawn_server(&dir, model, &files, config.idle_minutes)?);
+            *slot = Some(spawn_server(dir, model, &files, config.idle_minutes)?);
         }
         let server = slot.as_mut().expect("the engine was just started");
         server.busy += 1;
@@ -778,11 +788,13 @@ async fn open_session(app: &AppHandle, engine: &LocalEngine, reporter: &Progress
     Ok(session)
 }
 
-async fn wait_until_ready(engine: &LocalEngine, port: u16, reporter: &ProgressReporter) -> Result<(), String> {
+async fn wait_until_ready(engine: &LocalEngine, port: u16, reporter: Option<&ProgressReporter>) -> Result<(), String> {
     if engine.lock().as_ref().is_some_and(|server| server.port == port && server.ready) {
         return Ok(());
     }
-    reporter.stage("loading");
+    if let Some(reporter) = reporter {
+        reporter.stage("loading");
+    }
     let client = requests::client()?;
     let url = format!("http://127.0.0.1:{port}/sdcpp/v1/capabilities");
     let started = Instant::now();
@@ -923,53 +935,248 @@ pub async fn local_generate(
         let session = open_session(&handle, &engine, &reporter, model).await?;
         let files = load_config(&handle)?.model(model);
         reporter.progress("generating", 0.0);
-        let client = requests::client()?;
-        let base = format!("http://127.0.0.1:{}/sdcpp/v1", session.port);
         let body = generate_body(model, &prompt, width, height, steps, &files, image.as_deref());
-        let fail = |error: reqwest::Error| requests::describe_transport_error("the local engine", &error);
-        let created: Value = client.post(format!("{base}/img_gen")).json(&body).send().await.map_err(fail)?.json().await.map_err(fail)?;
-        let id = created["id"]
-            .as_str()
-            .ok_or_else(|| format!("The local engine did not accept the job: {created}"))?
-            .to_string();
-        let mut cancel = CancelOnDrop(Some(format!("{base}/jobs/{id}/cancel")));
-        let mut shown_step = 0_u64;
-        loop {
-            tokio::time::sleep(POLL_INTERVAL).await;
-            let job: Value = client.get(format!("{base}/jobs/{id}")).send().await.map_err(fail)?.json().await.map_err(fail)?;
-            match job["status"].as_str() {
-                Some("completed") => {
-                    cancel.0 = None;
-                    let image = job["result"]["images"][0]["b64_json"]
-                        .as_str()
-                        .ok_or("The local engine returned no image.")?;
-                    return Ok(AiImage { data_url: format!("data:image/png;base64,{image}"), usage: None });
-                }
-                Some("failed") | Some("cancelled") => {
-                    cancel.0 = None;
-                    let reason = job["error"]["message"].as_str().unwrap_or("no reason given");
-                    return Err(format!("The local engine could not make the image: {reason}"));
-                }
-                _ => {
-                    let preview = &job["preview"];
-                    let (Some(step), Some(total)) = (preview["step"].as_u64(), preview["total_steps"].as_u64()) else { continue };
-                    if step == shown_step || total == 0 {
-                        continue;
-                    }
-                    shown_step = step;
-                    if step >= total {
-                        reporter.stage("finishing");
-                    } else {
-                        reporter.progress("generating", step as f64 / total as f64);
-                    }
-                    if let Some(image) = preview["b64_json"].as_str().filter(|_| step % 5 == 0) {
-                        reporter.partial(step, format!("data:image/png;base64,{image}"));
-                    }
-                }
+        let image = run_job(session.port, &body, |job| {
+            if job.step >= job.total {
+                reporter.stage("finishing");
+            } else {
+                reporter.progress("generating", job.step as f64 / job.total as f64);
             }
-        }
+            if let Some(image) = job.preview.filter(|_| job.step % 5 == 0) {
+                reporter.partial(job.step, format!("data:image/png;base64,{image}"));
+            }
+        })
+        .await?;
+        Ok(AiImage { data_url: format!("data:image/png;base64,{image}"), usage: None })
     })
     .await
+}
+
+/// A new sampling step of a running job; `preview` is a small PNG of the image so far, as base64.
+struct JobStep<'a> {
+    step: u64,
+    total: u64,
+    preview: Option<&'a str>,
+}
+
+/**
+ * Gives the engine one job and waits for its image, which it returns as PNG
+ * base64. It calls `on_step` once for each new sampling step. If the caller
+ * stops waiting, the engine is told to cancel the job.
+ */
+async fn run_job(port: u16, body: &Value, mut on_step: impl FnMut(JobStep<'_>) + Send) -> Result<String, String> {
+    let client = requests::client()?;
+    let base = format!("http://127.0.0.1:{port}/sdcpp/v1");
+    let fail = |error: reqwest::Error| requests::describe_transport_error("the local engine", &error);
+    let created: Value = client.post(format!("{base}/img_gen")).json(body).send().await.map_err(fail)?.json().await.map_err(fail)?;
+    let id = created["id"]
+        .as_str()
+        .ok_or_else(|| format!("The local engine did not accept the job: {created}"))?
+        .to_string();
+    let mut cancel = CancelOnDrop(Some(format!("{base}/jobs/{id}/cancel")));
+    let mut shown_step = 0_u64;
+    loop {
+        tokio::time::sleep(POLL_INTERVAL).await;
+        let job: Value = client.get(format!("{base}/jobs/{id}")).send().await.map_err(fail)?.json().await.map_err(fail)?;
+        match job["status"].as_str() {
+            Some("completed") => {
+                cancel.0 = None;
+                let image = job["result"]["images"][0]["b64_json"]
+                    .as_str()
+                    .ok_or("The local engine returned no image.")?;
+                return Ok(image.to_string());
+            }
+            Some("failed") | Some("cancelled") => {
+                cancel.0 = None;
+                let reason = job["error"]["message"].as_str().unwrap_or("no reason given");
+                return Err(format!("The local engine could not make the image: {reason}"));
+            }
+            _ => {
+                let preview = &job["preview"];
+                let (Some(step), Some(total)) = (preview["step"].as_u64(), preview["total_steps"].as_u64()) else { continue };
+                if step == shown_step || total == 0 {
+                    continue;
+                }
+                shown_step = step;
+                on_step(JobStep { step, total, preview: preview["b64_json"].as_str() });
+            }
+        }
+    }
+}
+
+/// How many images one request file can ask for.
+const MAX_REQUEST_IMAGES: u32 = 8;
+
+/**
+ * A request from another program, such as Chat Sage, read from a JSON file.
+ * Image Sage makes the images with no window and saves them as PNG files.
+ */
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FileRequest {
+    prompt: String,
+    /// The folder for the PNG files, as a full path; it is created if it does not exist.
+    output_folder: String,
+    /// How many images to make; 1 when it is not given.
+    count: Option<u32>,
+    /// Width and height, such as `1024x1024`; that size when it is not given.
+    size: Option<String>,
+    /// `low`, `medium`, or `high`; `medium` when it is not given.
+    quality: Option<String>,
+    /// Chroma1-HD when it is not given.
+    model: Option<LocalModel>,
+}
+
+/// A request file's contents after the checks.
+#[derive(Debug, PartialEq)]
+struct FilePlan {
+    prompt: String,
+    output_folder: PathBuf,
+    count: u32,
+    width: u32,
+    height: u32,
+    steps: u32,
+    model: LocalModel,
+}
+
+fn plan_file_request(text: &str) -> Result<FilePlan, String> {
+    let request: FileRequest = serde_json::from_str(text).map_err(|error| format!("The request file is not valid: {error}"))?;
+    let prompt = request.prompt.trim().to_string();
+    if prompt.is_empty() {
+        return Err("The request has no prompt.".into());
+    }
+    let output_folder = PathBuf::from(request.output_folder.trim());
+    if !output_folder.is_absolute() {
+        return Err("The output folder must be a full path.".into());
+    }
+    let count = request.count.unwrap_or(1);
+    if !(1..=MAX_REQUEST_IMAGES).contains(&count) {
+        return Err(format!("One request can make 1 to {MAX_REQUEST_IMAGES} images."));
+    }
+    let quality = request.quality.as_deref().unwrap_or("medium");
+    if !matches!(quality, "low" | "medium" | "high") {
+        return Err(format!("The quality {quality} is not valid. Use low, medium, or high."));
+    }
+    let (width, height) = parse_size(request.size.as_deref().unwrap_or("1024x1024"))?;
+    let model = request.model.unwrap_or(LocalModel::Chroma);
+    Ok(FilePlan { prompt, output_folder, count, width, height, steps: model.steps(quality), model })
+}
+
+/// The app's identifier, which names its data folders. It comes from the Tauri settings file at build time.
+fn app_identifier() -> Result<String, String> {
+    let settings: Value = serde_json::from_str(include_str!("../tauri.conf.json")).map_err(|error| format!("Could not read the app settings: {error}"))?;
+    settings["identifier"].as_str().map(str::to_string).ok_or_else(|| "The app settings have no identifier.".to_string())
+}
+
+/**
+ * The engines folder and the settings file, in the same places as
+ * `engines_dir` and `config_path`. A request with no window has no app
+ * handle to ask, so this builds the paths the way Tauri does on Windows.
+ */
+fn windowless_paths() -> Result<(PathBuf, PathBuf), String> {
+    let identifier = app_identifier()?;
+    let folder = |variable: &str| {
+        std::env::var_os(variable)
+            .map(PathBuf::from)
+            .ok_or_else(|| format!("Could not find the app data folder ({variable} is not set)."))
+    };
+    let engines = folder("LOCALAPPDATA")?.join(&identifier).join("engines");
+    let settings = folder("APPDATA")?.join(&identifier).join("local-engine.json");
+    Ok((engines, settings))
+}
+
+/**
+ * True when an engine process already runs, most likely for the Image Sage
+ * window. Two loaded models do not fit in the GPU memory together, so a
+ * request with no window must not start a second engine.
+ */
+fn engine_process_runs() -> bool {
+    let mut command = Command::new("tasklist");
+    command.args(["/FI", &format!("IMAGENAME eq {SERVER_EXE}"), "/NH", "/FO", "CSV"]);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    command
+        .output()
+        .is_ok_and(|output| String::from_utf8_lossy(&output.stdout).to_ascii_lowercase().contains(SERVER_EXE))
+}
+
+/// Writes one line of JSON for the program that started Image Sage. With no such program, the line goes nowhere.
+fn tell(event: Value) {
+    use std::io::Write;
+    let mut out = std::io::stdout();
+    let _ = writeln!(out, "{event}");
+    let _ = out.flush();
+}
+
+/**
+ * Makes the images of a request file with no window, for another program.
+ * Progress and the result go to standard output, one JSON object on each
+ * line: `loading`, `progress`, `image` (with the file's path), then `done`
+ * (with all paths) or `error` (with a message). Returns the exit code: 0
+ * when every image was made.
+ */
+pub fn run_file_request(path: &str) -> i32 {
+    match tauri::async_runtime::block_on(make_request_images(path)) {
+        Ok(paths) => {
+            tell(json!({ "event": "done", "paths": paths }));
+            0
+        }
+        Err(message) => {
+            tell(json!({ "event": "error", "message": message }));
+            1
+        }
+    }
+}
+
+async fn make_request_images(path: &str) -> Result<Vec<String>, String> {
+    let text = std::fs::read_to_string(path).map_err(|error| format!("Could not read the request file {path}: {error}"))?;
+    let plan = plan_file_request(&text)?;
+    if engine_process_runs() {
+        return Err("Image Sage's local engine already runs, most likely for the Image Sage window. \
+                    Close Image Sage, or wait until its engine stops, then try again."
+            .into());
+    }
+    let (engines, settings) = windowless_paths()?;
+    let config = std::fs::read_to_string(settings).map(|text| parse_config(&text)).unwrap_or_default();
+    std::fs::create_dir_all(&plan.output_folder).map_err(|error| format!("Could not create the output folder: {error}"))?;
+    let engine = LocalEngine::default();
+    let result = make_plan_images(&plan, &engines.join(ENGINE_BUILD), &config, &engine).await;
+    if let Some(server) = engine.lock().take() {
+        server.stop();
+    }
+    result
+}
+
+async fn make_plan_images(plan: &FilePlan, dir: &Path, config: &LocalConfig, engine: &LocalEngine) -> Result<Vec<String>, String> {
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+
+    tell(json!({ "event": "loading" }));
+    let session = start_session(dir, config, engine, None, plan.model).await?;
+    let files = config.model(plan.model);
+    /* The time in the names keeps the files of two requests apart. */
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs())
+        .unwrap_or_default();
+    let mut paths = Vec::new();
+    for number in 1..=plan.count {
+        let body = generate_body(plan.model, &plan.prompt, plan.width, plan.height, plan.steps, &files, None);
+        let image = run_job(session.port, &body, |job| {
+            tell(json!({ "event": "progress", "image": number, "count": plan.count, "step": job.step, "steps": job.total }));
+        })
+        .await?;
+        let bytes = STANDARD.decode(image).map_err(|error| format!("The local engine returned an image that is not valid: {error}"))?;
+        let file = plan.output_folder.join(format!("imagesage-{stamp}-{number}.png"));
+        std::fs::write(&file, bytes).map_err(|error| format!("Could not save {}: {error}", file.display()))?;
+        let file = file.to_string_lossy().into_owned();
+        tell(json!({ "event": "image", "image": number, "count": plan.count, "path": file }));
+        paths.push(file);
+    }
+    Ok(paths)
 }
 
 /// Stops the engine after its idle minutes, to free the GPU memory, and forgets an engine that exited.
@@ -1005,6 +1212,52 @@ mod tests {
         }
         assert!(validate_engine_url("https://github.com/leejet/stable-diffusion.cpp.evil/releases/download/master-1/x.zip").is_err());
         assert!(validate_engine_url("https://github.com/leejet/stable-diffusion.cpp/releases/download/master-1/x.exe").is_err());
+    }
+
+    #[test]
+    fn a_request_file_gets_defaults() {
+        let plan = plan_file_request(r#"{"prompt":" a red barn ","outputFolder":"C:\\Images\\Chat"}"#).unwrap();
+        assert_eq!(
+            plan,
+            FilePlan {
+                prompt: "a red barn".into(),
+                output_folder: PathBuf::from(r"C:\Images\Chat"),
+                count: 1,
+                width: 1024,
+                height: 1024,
+                steps: 30,
+                model: LocalModel::Chroma,
+            }
+        );
+    }
+
+    #[test]
+    fn a_request_file_sets_count_size_quality_and_model() {
+        let text = r#"{"prompt":"x","outputFolder":"C:\\Out","count":4,"size":"1280x720","quality":"high","model":"qwen-image-2.1"}"#;
+        let plan = plan_file_request(text).unwrap();
+        assert_eq!((plan.count, plan.width, plan.height, plan.steps, plan.model), (4, 1280, 720, 35, LocalModel::Qwen));
+    }
+
+    #[test]
+    fn a_bad_request_file_is_refused() {
+        let refused = |text: &str| plan_file_request(text).is_err();
+        assert!(refused("not json"));
+        assert!(refused(r#"{"outputFolder":"C:\\Out"}"#));
+        assert!(refused(r#"{"prompt":"  ","outputFolder":"C:\\Out"}"#));
+        assert!(refused(r#"{"prompt":"x","outputFolder":"Out"}"#));
+        assert!(refused(r#"{"prompt":"x","outputFolder":"C:\\Out","count":0}"#));
+        assert!(refused(r#"{"prompt":"x","outputFolder":"C:\\Out","count":9}"#));
+        assert!(refused(r#"{"prompt":"x","outputFolder":"C:\\Out","size":"1000x1000"}"#));
+        assert!(refused(r#"{"prompt":"x","outputFolder":"C:\\Out","quality":"best"}"#));
+        assert!(refused(r#"{"prompt":"x","outputFolder":"C:\\Out","model":"dall-e"}"#));
+    }
+
+    #[test]
+    fn windowless_paths_use_the_app_identifier() {
+        assert_eq!(app_identifier().unwrap(), "com.robmirabelle.imagesage");
+        let (engines, settings) = windowless_paths().unwrap();
+        assert!(engines.ends_with(r"com.robmirabelle.imagesage\engines"));
+        assert!(settings.ends_with(r"com.robmirabelle.imagesage\local-engine.json"));
     }
 
     #[test]

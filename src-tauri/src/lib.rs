@@ -35,6 +35,12 @@ fn openable_file_from_args(args: &[String], cwd: &str) -> Option<String> {
     })
 }
 
+/// The request file that follows `--generate`: another program asks for images with no window.
+fn generate_request_from_args(args: &[String]) -> Option<String> {
+    let flag = args.iter().skip(1).position(|argument| argument == "--generate")?;
+    args.get(flag + 2).cloned()
+}
+
 #[tauri::command]
 fn take_pending_open_document(state: State<'_, PendingOpenDocument>) -> Option<String> {
     state
@@ -66,6 +72,10 @@ pub fn run() {
         .unwrap_or_default()
         .to_string_lossy()
         .into_owned();
+    // This runs before the app is built: no window opens, and the single-instance plugin cannot send it to an open Image Sage.
+    if let Some(request) = generate_request_from_args(&initial_args) {
+        std::process::exit(local::run_file_request(&request));
+    }
     let initial_document = openable_file_from_args(&initial_args, &initial_cwd);
 
     tauri::Builder::default()
@@ -158,6 +168,16 @@ mod tests {
             openable_file_from_args(&args, r"C:\Images"),
             Some(r"D:\photo.JPG".into())
         );
+    }
+
+    #[test]
+    fn finds_the_request_file_after_the_generate_flag() {
+        let args = vec!["imagesage.exe".into(), "--generate".into(), r"C:\Temp\request.json".into()];
+        assert_eq!(generate_request_from_args(&args), Some(r"C:\Temp\request.json".into()));
+        let args = vec!["imagesage.exe".into(), "--generate".into()];
+        assert_eq!(generate_request_from_args(&args), None);
+        let args = vec!["imagesage.exe".into(), r"D:\photo.png".into()];
+        assert_eq!(generate_request_from_args(&args), None);
     }
 
     #[test]

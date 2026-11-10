@@ -40,6 +40,10 @@
   only, and Qwen-Image-2.1 (or a merge such as Noct Q) for new images and,
   through Regenerate, edits of the selected layer into a new layer. It reads the user's own
   model files in place; see `docs/RELEASING.md`.
+- Another program can ask for local images with no window:
+  `imagesage.exe --generate <request file>`. Chat Sage uses this. The request
+  file and the answer lines are a contract with that program; read
+  `docs/GENERATE-REQUESTS.md` before changing them.
 - GPT Image size rules live in `src/editor/region.ts` and are unit-tested
   (`npm test`). Keep them free of DOM code.
 - In managed Codex sessions, prefer process-local Git `safe.directory` variables
