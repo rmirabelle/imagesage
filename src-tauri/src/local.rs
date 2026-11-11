@@ -1005,7 +1005,7 @@ async fn run_job(port: u16, body: &Value, mut on_step: impl FnMut(JobStep<'_>) +
 }
 
 /// How many images one request file can ask for.
-const MAX_REQUEST_IMAGES: u32 = 8;
+const MAX_REQUEST_IMAGES: u32 = 50;
 
 /**
  * A request from another program, such as Chat Sage, read from a JSON file.
@@ -1246,7 +1246,7 @@ mod tests {
         assert!(refused(r#"{"prompt":"  ","outputFolder":"C:\\Out"}"#));
         assert!(refused(r#"{"prompt":"x","outputFolder":"Out"}"#));
         assert!(refused(r#"{"prompt":"x","outputFolder":"C:\\Out","count":0}"#));
-        assert!(refused(r#"{"prompt":"x","outputFolder":"C:\\Out","count":9}"#));
+        assert!(refused(r#"{"prompt":"x","outputFolder":"C:\\Out","count":51}"#));
         assert!(refused(r#"{"prompt":"x","outputFolder":"C:\\Out","size":"1000x1000"}"#));
         assert!(refused(r#"{"prompt":"x","outputFolder":"C:\\Out","quality":"best"}"#));
         assert!(refused(r#"{"prompt":"x","outputFolder":"C:\\Out","model":"dall-e"}"#));

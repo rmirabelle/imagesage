@@ -20,7 +20,7 @@ A JSON file. Only `prompt` and `outputFolder` are necessary.
 | --- | --- | --- |
 | `prompt` | What the image shows. Image Sage adds the model's prompt start and negative prompt from the settings. | |
 | `outputFolder` | Full path of the folder for the PNG files. Image Sage creates it. | |
-| `count` | How many images, 1 to 8. Each image gets a new random seed. | 1 |
+| `count` | How many images, 1 to 50. Each image gets a new random seed. | 1 |
 | `size` | Width and height, each a multiple of 16 from 256 to 4096. | `1024x1024` |
 | `quality` | `low`, `medium`, or `high`. It sets the sampling steps. | `medium` |
 | `model` | `chroma1-hd` or `qwen-image-2.1`. | `chroma1-hd` |
