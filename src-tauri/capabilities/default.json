@@ -1,8 +1,8 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Capability for the ImageSage editor window",
-  "windows": ["main"],
+  "description": "Capability for the ImageSage editor window and its video window",
+  "windows": ["main", "video"],
   "permissions": [
     "core:default",
     "core:window:allow-start-dragging",

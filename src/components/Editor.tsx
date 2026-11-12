@@ -59,6 +59,7 @@ import {
   wholeImageSize
 } from "../editor/region";
 import { localImageSize } from "../editor/localSize";
+import { CLIP_QUALITIES, CLIP_SOURCE_PIXELS, clipSize } from "../editor/clipSize";
 import type { Adjustment, BlendMode, EditStep, LayerAdjust, LayerPart, MaskImage, Point, Rect, SentRegion, TransformSource } from "../editor/types";
 import {
   CANCELLED_MESSAGE,
@@ -623,12 +624,23 @@ interface Props {
   onExportVideo: (id: string, video: Blob) => Promise<boolean>;
   /** Asks for a folder and writes each layer there as its own PNG; false when the user cancels. */
   onExportLayers: (id: string, layers: LayerExport[]) => Promise<boolean>;
+  /**
+   * Asks for a folder, then makes the layer videos there while the user
+   * continues to work. `prepare` gives each layer's first picture (a PNG data
+   * URL at `size`, such as "832x480") and prompt, bottom layer first.
+   */
+  onExportLayerVideos: (id: string, size: string, prepare: () => Promise<LayerVideoSource[]>) => Promise<void>;
+  /** True while the app makes layer videos: the local engine is in use, so the editor starts no image job. */
+  videoExportRunning: boolean;
   onNotice: (notice: Notice) => void;
   /** Shows the file loader with `label` while `work` runs. */
   onFileTask: <T>(label: string, work: () => Promise<T>) => Promise<T>;
   /** A File menu command for this editor, or null; only the active editor gets one. */
   command?: EditorCommand | null;
 }
+
+/** One layer for Export Layer Videos: its first picture, as a PNG data URL at the clip's size, and its prompt. */
+export type LayerVideoSource = { image: string; prompt: string };
 
 /** One layer to export: its name and a function that draws it as a PNG data URL. */
 export type LayerExport = { name: string; render: () => Promise<string> };
@@ -638,7 +650,7 @@ export type LayerExport = { name: string; render: () => Promise<string> };
  * `documentId`. `nonce` changes each time, so the same command can run again,
  * and an editor runs each nonce only once.
  */
-export type EditorCommand = { name: "export-image" | "export-video" | "export-layers" | "import-image" | "undo" | "redo" | "snapshot" | "canvas-size" | "image-size"; documentId: string; nonce: number };
+export type EditorCommand = { name: "export-image" | "export-video" | "export-layers" | "export-layer-videos" | "import-image" | "undo" | "redo" | "snapshot" | "animate-layer" | "canvas-size" | "image-size"; documentId: string; nonce: number };
 
 /** Ctrl+wheel zoom: the scale changes by exp(-deltaY × this); one wheel notch (100) is about 5%. */
 const WHEEL_ZOOM_RATE = 0.0005;
@@ -712,6 +724,8 @@ export function Editor({
   onExport,
   onExportVideo,
   onExportLayers,
+  onExportLayerVideos,
+  videoExportRunning,
   onNotice,
   onFileTask,
   command
@@ -1607,6 +1621,10 @@ export function Editor({
   const runWholeEdit = useCallback(async (instruction: string, from?: HTMLCanvasElement, replaceId?: string, choice?: { model: string; quality: string }, editLayer = false) => {
     const current = documentRef.current;
     if (!instruction.trim() || applyingRef.current) return;
+    if (videoExportRunning) {
+      onNotice({ tone: "error", message: "Image Sage makes layer videos now. Wait until they are done, or cancel the video export, then generate." });
+      return;
+    }
     if (resizeRef.current) {
       onNotice({ tone: "error", message: "Apply (Enter) or cancel (Esc) the transform first." });
       return;
@@ -1693,7 +1711,7 @@ export function Editor({
     } finally {
       endJob(current.id, requestId);
     }
-  }, [appendStep, endJob, readyLocalModels, onCommit, onNotice, onRequestLocalSettings, onRequestOpenAiSettings, openaiConnected, settings, startJob, undoReplace, updateJob]);
+  }, [appendStep, endJob, readyLocalModels, videoExportRunning, onCommit, onNotice, onRequestLocalSettings, onRequestOpenAiSettings, openaiConnected, settings, startJob, undoReplace, updateJob]);
 
   /** A new image from a prompt: generate it once, as the first layer, when the tab opens. */
   const startedGenerationRef = useRef(false);
@@ -1981,6 +1999,49 @@ export function Editor({
     if (step) drawLayers(target, null, await layerCanvases([withHidden(step, false)]));
     else drawLayers(target, await baseCanvases(doc), []);
     return target;
+  };
+
+  /**
+   * One layer alone at a clip's size, as the first picture of a video. `node`
+   * is the layer (0 is the original image). The layer shows even while it is
+   * hidden. Video has no transparency, so clear areas become black.
+   */
+  const layerClipPicture = async (doc: ImageDocument, node: number, size: { width: number; height: number }) => {
+    const step = node > 0 ? doc.history[node - 1] : undefined;
+    const whole = createCanvas(doc.surface.width, doc.surface.height);
+    if (step) drawLayers(whole, null, await layerCanvases([withHidden(step, false)]));
+    else drawLayers(whole, await baseCanvases(doc), []);
+    const picture = createCanvas(size.width, size.height);
+    const context = picture.getContext("2d")!;
+    context.fillStyle = "#000000";
+    context.fillRect(0, 0, size.width, size.height);
+    context.drawImage(scaledCanvas(whole, size.width, size.height), 0, 0);
+    return picture;
+  };
+
+  /**
+   * Edit, Animate Layer, or Make Video in a layer's right-click menu: sends
+   * one layer to the video window, which makes a short clip from it with
+   * Wan 2.2. `node` is the layer (0 is the original image); none means the
+   * selected layer. The layer goes alone, as it shows, even while it is
+   * hidden. Video has no transparency, so clear areas become black.
+   */
+  const animateLayer = async (node?: number) => {
+    const doc = documentRef.current;
+    const layerNode = node ?? doc.historyIndex;
+    const size = clipSize(doc.surface.width, doc.surface.height, CLIP_SOURCE_PIXELS);
+    if (!size) {
+      onNotice({ tone: "error", message: "This image is wider or taller than 3:1, which is too far from the shape of a video." });
+      return;
+    }
+    try {
+      const step = layerNode > 0 ? doc.history[layerNode - 1] : undefined;
+      const picture = await layerClipPicture(doc, layerNode, size);
+      const name = step ? step.name || step.prompt || `Layer ${layerNode}` : "Original image";
+      await invoke("video_open", { source: { image: await canvasToDataUrl(picture), prompt: step?.prompt ?? "", name } });
+    } catch (error) {
+      onNotice({ tone: "error", message: `Could not open the video window: ${error instanceof Error ? error.message : String(error)}` });
+    }
   };
 
   const submit = () => {
@@ -2529,6 +2590,9 @@ export function Editor({
         return;
       case "duplicate":
         duplicateLayer(node);
+        return;
+      case "make-video":
+        void animateLayer(node);
         return;
       case "click-select": {
         const source = step ? step.layer : current.base;
@@ -4650,6 +4714,37 @@ export function Editor({
     }
   };
 
+  /**
+   * File, Export Layer Videos: makes clips of 5 seconds
+   * from each layer, bottom layer first, hidden layers too. Each clip starts
+   * from the layer's picture (Wan 2.2 image-to-video, small size) and uses
+   * the layer's prompt; a layer with no prompt sends none. The editor gives
+   * only the pictures and prompts, as the layers are now; the app asks for
+   * the folder and makes the clips, so the user can continue to work.
+   */
+  const exportLayerVideos = async () => {
+    const doc = documentRef.current;
+    if (exporting || applyingRef.current || resizeRef.current || clickSelectRef.current) return;
+    const size = clipSize(doc.surface.width, doc.surface.height, CLIP_QUALITIES[0].pixels);
+    if (!size) {
+      onNotice({ tone: "error", message: "This image is wider or taller than 3:1, which is too far from the shape of a video." });
+      return;
+    }
+    const layers = [
+      ...(doc.base ? [{ node: 0, prompt: doc.origin.kind === "generated" ? doc.origin.prompt : "" }] : []),
+      ...doc.history.map((step, index) => ({ node: index + 1, prompt: step.prompt ?? "", layer: step.layer })).filter((item) => item.layer)
+    ];
+    if (!layers.length) {
+      onNotice({ tone: "error", message: "This image has no layers to export." });
+      return;
+    }
+    await onExportLayerVideos(doc.id, `${size.width}x${size.height}`, async () => {
+      const sources: LayerVideoSource[] = [];
+      for (const layer of layers) sources.push({ image: await canvasToDataUrl(await layerClipPicture(doc, layer.node, size)), prompt: layer.prompt });
+      return sources;
+    });
+  };
+
   /** Shows the brush cursor at an image point, or hides it for null. */
   function moveBrushCursor(point: Point | null) {
     brushPointRef.current = point;
@@ -4681,18 +4776,21 @@ export function Editor({
       if (!clickSelectRef.current) redoMask();
     } else if (command.name === "snapshot") {
       void snapshotVisible();
+    } else if (command.name === "animate-layer") {
+      void animateLayer();
     } else if (command.name === "canvas-size" || command.name === "image-size") {
       if (resizeRef.current || clickSelectRef.current || gradientRef.current) {
         onNotice({ tone: "error", message: "Apply or cancel the current tool (Enter or Esc) first." });
         return;
       }
       setCanvasDialog(command.name === "image-size" ? "image" : "canvas");
-    } else if (command.name === "export-image" || command.name === "export-video" || command.name === "export-layers") {
+    } else if (command.name === "export-image" || command.name === "export-video" || command.name === "export-layers" || command.name === "export-layer-videos") {
       if (exporting) return;
       /** A new export first removes the message of the one before. */
       onNotice(null);
       if (command.name === "export-image") setExportDialogOpen(true);
       else if (command.name === "export-layers") void exportAllLayers();
+      else if (command.name === "export-layer-videos") void exportLayerVideos();
       else setSlideshowDialogOpen(true);
     } else if (resizeRef.current || clickSelectRef.current) {
       onNotice({ tone: "error", message: "Apply or cancel the current tool (Enter or Esc) before you import an image." });

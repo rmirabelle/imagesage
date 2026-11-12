@@ -17,7 +17,9 @@ use crate::requests::{self, AiImage, AiRequests, ProgressReporter};
  * The optional local engine: stable-diffusion.cpp's `sd-server.exe` (CUDA 12
  * build) runs a local model on this computer. Chroma1-HD makes new images
  * from a prompt; Qwen-Image-2.1 (or a merge of it, such as Noct Q) also
- * edits the whole image. The engine downloads once, on first use, from a
+ * edits the whole image. Wan 2.2 makes a short video clip: its image-to-video
+ * model from a first picture, its text-to-video model from the prompt alone.
+ * Each has its own files and settings. The engine downloads once, on first use, from a
  * pinned upstream release and is checked against its SHA-256. The model
  * files are the user's own (for example a ComfyUI models folder) and are
  * read in place. The server keeps one model loaded between images, restarts
@@ -39,22 +41,40 @@ pub enum LocalModel {
     Chroma,
     #[serde(rename = "qwen-image-2.1")]
     Qwen,
+    #[serde(rename = "wan-2.2-i2v")]
+    WanImage,
+    #[serde(rename = "wan-2.2-t2v")]
+    WanText,
 }
 
-const LOCAL_MODELS: [LocalModel; 2] = [LocalModel::Chroma, LocalModel::Qwen];
+const LOCAL_MODELS: [LocalModel; 4] = [LocalModel::Chroma, LocalModel::Qwen, LocalModel::WanImage, LocalModel::WanText];
+/// The one Wan 2.2 entry of settings saved before image-to-video and text-to-video had their own files.
+const OLD_WAN_KEY: &str = "wan-2.2";
 
 impl LocalModel {
     fn name(self) -> &'static str {
         match self {
             Self::Chroma => "Chroma1-HD",
             Self::Qwen => "Qwen-Image-2.1",
+            Self::WanImage => "Wan 2.2 image-to-video",
+            Self::WanText => "Wan 2.2 text-to-video",
         }
     }
 
-    /// Chroma reads a T5 text encoder; Qwen-Image-2.1 reads Qwen3-VL, which also sees the image to edit.
+    /// Wan 2.2 makes video clips only; the other models make images only.
+    fn video(self) -> bool {
+        matches!(self, Self::WanImage | Self::WanText)
+    }
+
+    /// Wan 2.2 image-to-video starts a clip from a picture; text-to-video uses the prompt alone.
+    fn starts_from_picture(self) -> bool {
+        self == Self::WanImage
+    }
+
+    /// Chroma reads a T5 text encoder and Wan 2.2 reads UMT5; Qwen-Image-2.1 reads Qwen3-VL, which also sees the image to edit.
     fn encoder_flag(self) -> &'static str {
         match self {
-            Self::Chroma => "--t5xxl",
+            Self::Chroma | Self::WanImage | Self::WanText => "--t5xxl",
             Self::Qwen => "--llm",
         }
     }
@@ -70,7 +90,7 @@ impl LocalModel {
      */
     fn cfg_scale(self) -> f64 {
         match self {
-            Self::Chroma => 3.5,
+            Self::Chroma | Self::WanImage | Self::WanText => 3.5,
             Self::Qwen => 3.0,
         }
     }
@@ -83,7 +103,7 @@ impl LocalModel {
     fn flow_shift(self) -> Option<f64> {
         match self {
             Self::Chroma => Some(1.0),
-            Self::Qwen => None,
+            Self::Qwen | Self::WanImage | Self::WanText => None,
         }
     }
 
@@ -96,7 +116,7 @@ impl LocalModel {
     fn default_prompt_prefix(self) -> &'static str {
         match self {
             Self::Chroma => "A photo.",
-            Self::Qwen => "",
+            Self::Qwen | Self::WanImage | Self::WanText => "",
         }
     }
 
@@ -104,14 +124,14 @@ impl LocalModel {
     fn default_scheduler(self) -> &'static str {
         match self {
             Self::Chroma => "beta",
-            Self::Qwen => "simple",
+            Self::Qwen | Self::WanImage | Self::WanText => "simple",
         }
     }
 
     fn model_args(self) -> Option<&'static str> {
         match self {
             Self::Chroma => Some("chroma_use_dit_mask=false"),
-            Self::Qwen => None,
+            Self::Qwen | Self::WanImage | Self::WanText => None,
         }
     }
 
@@ -124,6 +144,25 @@ impl LocalModel {
             (Self::Qwen, "low") => 16,
             (Self::Qwen, "high") => 35,
             (Self::Qwen, _) => 25,
+            (Self::WanImage | Self::WanText, _) => VIDEO_STEPS,
+        }
+    }
+
+    /// A LoRA's starting strength: a little below full for the photo-style LoRAs of the image models, full for Wan 2.2's LoRAs.
+    fn default_lora_strength(self) -> f64 {
+        if self.video() {
+            1.0
+        } else {
+            DEFAULT_LORA_STRENGTH
+        }
+    }
+
+    /// What every image or clip avoids in a new config.
+    fn default_negative_prompt(self) -> &'static str {
+        if self.video() {
+            DEFAULT_VIDEO_NEGATIVE_PROMPT
+        } else {
+            DEFAULT_NEGATIVE_PROMPT
         }
     }
 }
@@ -154,7 +193,10 @@ const ENGINE_ZIPS: [EngineZip; 2] = [
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
 #[serde(rename_all = "camelCase", default)]
 pub struct ModelConfig {
+    /// For Wan 2.2, the low-noise model: it finishes the clip that the high-noise model starts.
     diffusion_model: String,
+    /// Wan 2.2 only: the high-noise model, which makes the first sampling steps.
+    high_noise_model: String,
     text_encoder: String,
     vae: String,
     /// What every image avoids; both models use real guidance, so this changes the result a lot.
@@ -166,10 +208,14 @@ pub struct ModelConfig {
     sampler: String,
     /// The engine's scheduler name, such as `beta`.
     scheduler: String,
-    /// An optional LoRA file that changes the model's style, such as a photo look; empty means none.
+    /// An optional LoRA file that changes the model's style, such as a photo look; empty means none. For Wan 2.2, the low-noise model's LoRA.
     lora: String,
     /// How strongly the LoRA applies: 1 is full strength, 0 turns it off.
     lora_strength: f64,
+    /// Wan 2.2 only: an optional LoRA file for the high-noise model; empty means none.
+    high_noise_lora: String,
+    /// How strongly the high-noise LoRA applies.
+    high_noise_lora_strength: f64,
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
@@ -189,6 +235,19 @@ pub struct LocalConfig {
 const DEFAULT_NEGATIVE_PROMPT: &str = "cartoon, anime, illustration, drawing, painting, 3d render, cgi, airbrushed, plastic skin, overly smooth skin, \
      oversaturated, low quality, blurry, out of focus, jpeg artifacts, \
      bad anatomy, extra fingers, missing fingers, fused fingers, malformed hands, extra limbs, missing limbs";
+/**
+ * Wan 2.2's default negative prompt: its makers' list, in English. It works
+ * against still pictures, washed-out colors, and bad hands and bodies.
+ */
+const DEFAULT_VIDEO_NEGATIVE_PROMPT: &str = "oversaturated colors, overexposed, static, blurry details, subtitles, artwork, painting, still picture, overall gray, \
+     worst quality, low quality, jpeg artifacts, ugly, incomplete, extra fingers, poorly drawn hands, poorly drawn faces, deformed, disfigured, \
+     malformed limbs, fused fingers, motionless frame, cluttered background, three legs, many people in the background, walking backwards";
+/// Sampling steps for one clip, shared by Wan 2.2's two models.
+const VIDEO_STEPS: u32 = 20;
+/// Wan 2.2 makes 16 pictures for each second.
+const VIDEO_FPS: u32 = 16;
+/// The longest clip: 5 seconds, the length Wan 2.2 learned from.
+const MAX_VIDEO_FRAMES: u32 = 81;
 /// A LoRA's starting strength: a little below full, as photo-style LoRAs such as FineArtPhoto suggest.
 const DEFAULT_LORA_STRENGTH: f64 = 0.75;
 /// The earlier default; a saved copy of it becomes the new default.
@@ -199,41 +258,85 @@ impl ModelConfig {
     fn defaults(model: LocalModel) -> Self {
         Self {
             diffusion_model: String::new(),
+            high_noise_model: String::new(),
             text_encoder: String::new(),
             vae: String::new(),
-            negative_prompt: DEFAULT_NEGATIVE_PROMPT.into(),
+            negative_prompt: model.default_negative_prompt().into(),
             prompt_prefix: Some(model.default_prompt_prefix().into()),
             sampler: "euler".into(),
             scheduler: model.default_scheduler().into(),
             lora: String::new(),
-            lora_strength: DEFAULT_LORA_STRENGTH,
+            lora_strength: model.default_lora_strength(),
+            high_noise_lora: String::new(),
+            high_noise_lora_strength: model.default_lora_strength(),
         }
     }
 
-    /// The model files that are not set or do not exist, by name. The LoRA is optional, so it counts only when set.
-    fn missing(&self) -> Vec<&'static str> {
-        let mut missing: Vec<&'static str> = [
-            (&self.diffusion_model, "diffusion model"),
-            (&self.text_encoder, "text encoder"),
-            (&self.vae, "VAE"),
-        ]
-        .into_iter()
-        .filter(|(path, _)| path.trim().is_empty() || !Path::new(path.as_str()).is_file())
-        .map(|(_, name)| name)
-        .collect();
-        if !self.lora.trim().is_empty() && !Path::new(self.lora.trim()).is_file() {
-            missing.push("LoRA");
+    /// The model files that are not set or do not exist, by name. A LoRA is optional, so it counts only when set.
+    fn missing(&self, model: LocalModel) -> Vec<&'static str> {
+        let diffusion: &[(&String, &'static str)] = if model.video() {
+            &[(&self.diffusion_model, "low-noise model"), (&self.high_noise_model, "high-noise model")]
+        } else {
+            &[(&self.diffusion_model, "diffusion model")]
+        };
+        let mut missing: Vec<&'static str> = diffusion
+            .iter()
+            .copied()
+            .chain([(&self.text_encoder, "text encoder"), (&self.vae, "VAE")])
+            .filter(|(path, _)| path.trim().is_empty() || !Path::new(path.as_str()).is_file())
+            .map(|(_, name)| name)
+            .collect();
+        let lost = |path: &str| !path.trim().is_empty() && !Path::new(path.trim()).is_file();
+        if lost(&self.lora) {
+            missing.push(if model.video() { "low-noise LoRA" } else { "LoRA" });
+        }
+        if lost(&self.high_noise_lora) {
+            missing.push("high-noise LoRA");
         }
         missing
     }
 
-    /// The LoRA's folder and file name, when a LoRA is set: the engine reads LoRAs from one folder, by name.
-    fn lora_parts(&self) -> Option<(PathBuf, String)> {
-        let path = Path::new(self.lora.trim());
-        if path.as_os_str().is_empty() {
+    /**
+     * The folder the engine reads LoRAs from, when a LoRA is set. The engine
+     * has one LoRA folder: for two LoRAs in different folders, it is the
+     * nearest folder that holds both.
+     */
+    fn lora_dir(&self) -> Option<PathBuf> {
+        let folders: Vec<&Path> = [&self.lora, &self.high_noise_lora]
+            .into_iter()
+            .filter(|path| !path.trim().is_empty())
+            .filter_map(|path| Path::new(path.trim()).parent())
+            .collect();
+        let shared = folders.first()?.ancestors().find(|folder| folders.iter().all(|other| other.starts_with(folder)))?;
+        Some(shared.to_path_buf())
+    }
+
+    /// A LoRA's name for the engine: its path from the LoRA folder, with forward slashes. None when the LoRA is not set.
+    fn lora_name(&self, lora: &str) -> Option<String> {
+        if lora.trim().is_empty() {
             return None;
         }
-        Some((path.parent()?.to_path_buf(), path.file_name()?.to_string_lossy().into_owned()))
+        let inside = Path::new(lora.trim()).strip_prefix(self.lora_dir()?).ok()?;
+        Some(inside.components().map(|part| part.as_os_str().to_string_lossy()).collect::<Vec<_>>().join("/"))
+    }
+
+    /**
+     * The LoRA list of a job: the LoRA for the (low-noise) model, then for
+     * Wan 2.2 the high-noise model's LoRA. A LoRA of strength 0 is left out.
+     */
+    fn job_loras(&self) -> Vec<Value> {
+        [(&self.lora, self.lora_strength, false), (&self.high_noise_lora, self.high_noise_lora_strength, true)]
+            .into_iter()
+            .filter(|(_, strength, _)| *strength != 0.0)
+            .filter_map(|(lora, strength, high_noise)| {
+                let name = self.lora_name(lora)?;
+                Some(if high_noise {
+                    json!({ "path": name, "multiplier": strength, "is_high_noise": true })
+                } else {
+                    json!({ "path": name, "multiplier": strength })
+                })
+            })
+            .collect()
     }
 }
 
@@ -268,8 +371,8 @@ pub struct LocalStatus {
     missing: BTreeMap<LocalModel, Vec<&'static str>>,
     /// The model the engine has loaded, if any.
     running: Option<LocalModel>,
-    /// The negative prompt a new config starts with, so the settings can restore it.
-    default_negative_prompt: &'static str,
+    /// Each model's negative prompt in a new config, so the settings can restore it.
+    default_negative_prompts: BTreeMap<LocalModel, &'static str>,
     /// Each model's prompt start in a new config, so the settings can restore it.
     default_prompt_prefixes: BTreeMap<LocalModel, &'static str>,
 }
@@ -278,6 +381,7 @@ pub struct LocalStatus {
 #[serde(rename_all = "camelCase")]
 pub struct FoundModels {
     diffusion_model: Option<String>,
+    high_noise_model: Option<String>,
     text_encoder: Option<String>,
     vae: Option<String>,
 }
@@ -305,6 +409,34 @@ pub struct LocalGenerateRequest {
     size: String,
     /// The image to edit, as a PNG data URL at `size`; none makes a new image from the prompt alone.
     image: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalVideoRequest {
+    request_id: String,
+    /// Wan 2.2 image-to-video or text-to-video.
+    model: LocalModel,
+    prompt: String,
+    /// Width and height of the clip, such as `832x480`.
+    size: String,
+    /// How many pictures the clip has: a multiple of 4, plus 1.
+    frames: u32,
+    /// The first picture, as a PNG data URL at `size`. Text-to-video does not use it.
+    image: Option<String>,
+    /**
+     * A `.webm` file in a folder the user chose. With it, the clip goes to
+     * that file and is not the video window's current clip.
+     */
+    save_to: Option<String>,
+}
+
+/// A finished clip; the video window reads its WebM bytes with `video_read`.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalClip {
+    fps: u64,
+    frame_count: u64,
 }
 
 /// The last lines the engine printed, to explain a failed start.
@@ -404,9 +536,18 @@ fn load_config(app: &AppHandle) -> Result<LocalConfig, String> {
 /**
  * Reads the saved settings. Settings from before the second local model
  * kept Chroma's files at the top level; they become Chroma's settings.
+ * Settings with one Wan 2.2 entry give it to image-to-video or
+ * text-to-video, by the `t2v` in its model file name.
  */
 fn parse_config(text: &str) -> LocalConfig {
-    let value: Value = serde_json::from_str(text).unwrap_or(Value::Null);
+    let mut value: Value = serde_json::from_str(text).unwrap_or(Value::Null);
+    if let Some(models) = value.get_mut("models").and_then(Value::as_object_mut) {
+        if let Some(old) = models.remove(OLD_WAN_KEY) {
+            let text_to_video = old["diffusionModel"].as_str().is_some_and(|path| path.to_ascii_lowercase().contains("t2v"));
+            let key = if text_to_video { "wan-2.2-t2v" } else { "wan-2.2-i2v" };
+            models.entry(key).or_insert(old);
+        }
+    }
     let mut config: LocalConfig = serde_json::from_value(value.clone()).unwrap_or_default();
     if value.is_object() && value.get("models").is_none() {
         if let Ok(old) = serde_json::from_value::<ModelConfig>(value) {
@@ -432,10 +573,10 @@ pub fn local_status(app: AppHandle, engine: State<'_, LocalEngine>) -> Result<Lo
     Ok(LocalStatus {
         engine_installed: engine_installed(&engines_dir(&app)?.join(ENGINE_BUILD)),
         engine_size_bytes: ENGINE_ZIPS.iter().map(|zip| zip.size).sum(),
-        missing: LOCAL_MODELS.into_iter().map(|model| (model, config.model(model).missing())).collect(),
+        missing: LOCAL_MODELS.into_iter().map(|model| (model, config.model(model).missing(model))).collect(),
         config,
         running: engine.lock().as_ref().filter(|server| server.ready).map(|server| server.model),
-        default_negative_prompt: DEFAULT_NEGATIVE_PROMPT,
+        default_negative_prompts: LOCAL_MODELS.into_iter().map(|model| (model, model.default_negative_prompt())).collect(),
         default_prompt_prefixes: LOCAL_MODELS.into_iter().map(|model| (model, model.default_prompt_prefix())).collect(),
     })
 }
@@ -459,10 +600,14 @@ pub fn local_config_set(app: AppHandle, engine: State<'_, LocalEngine>, config: 
     Ok(())
 }
 
-/// The engine's start settings: its model files and the LoRA folder. The LoRA and its strength apply per image.
+/// The engine's start settings: its model files and the LoRA folder. The LoRAs and their strength apply per job.
 fn same_files(a: &ModelConfig, b: &ModelConfig) -> bool {
-    let lora_dir = |files: &ModelConfig| files.lora_parts().map(|(dir, _)| dir);
-    a.diffusion_model == b.diffusion_model && a.text_encoder == b.text_encoder && a.vae == b.vae && lora_dir(a) == lora_dir(b)
+    let lora_dir = |files: &ModelConfig| files.lora_dir();
+    a.diffusion_model == b.diffusion_model
+        && a.high_noise_model == b.high_noise_model
+        && a.text_encoder == b.text_encoder
+        && a.vae == b.vae
+        && lora_dir(a) == lora_dir(b)
 }
 
 /// Finds a local model's files in a ComfyUI folder (its root, or its `models` folder).
@@ -483,6 +628,7 @@ fn find_models(folder: &Path, model: LocalModel) -> FoundModels {
     let encoders = ["text_encoders", "clip"];
     match model {
         LocalModel::Chroma => FoundModels {
+            high_noise_model: None,
             diffusion_model: best_file(&root, &diffusion, |name| {
                 (model_file(name) && name.contains("chroma")).then(|| if name.contains("hd") { 0 } else { 1 })
             }),
@@ -495,6 +641,7 @@ fn find_models(folder: &Path, model: LocalModel) -> FoundModels {
         },
         /* Noct Q comes first, then the original model; the Turbo model needs other sampling settings. */
         LocalModel::Qwen => FoundModels {
+            high_noise_model: None,
             diffusion_model: best_file(&root, &diffusion, |name| {
                 if !model_file(name) {
                     None
@@ -509,6 +656,24 @@ fn find_models(folder: &Path, model: LocalModel) -> FoundModels {
             }),
             vae: best_file(&root, &["vae"], |name| (model_file(name) && name.contains("qwen_image_2.1_vae")).then_some(0)),
         },
+        /* Each Wan 2.2 model has a low-noise and a high-noise file, with `i2v` or `t2v` in the names. */
+        LocalModel::WanImage | LocalModel::WanText => {
+            let kind = if model.starts_from_picture() { "i2v" } else { "t2v" };
+            let part = |noise: &'static str| {
+                best_file(&root, &diffusion, move |name| {
+                    let plain = name.replace(['_', '-'], "");
+                    (model_file(name) && plain.contains("wan2.2") && plain.contains(kind) && plain.contains(noise)).then_some(0)
+                })
+            };
+            FoundModels {
+                diffusion_model: part("lownoise"),
+                high_noise_model: part("highnoise"),
+                text_encoder: best_file(&root, &encoders, |name| {
+                    (model_file(name) && name.contains("umt5")).then(|| if name.contains("fp16") { 0 } else if name.contains("fp8") { 1 } else { 2 })
+                }),
+                vae: best_file(&root, &["vae"], |name| (model_file(name) && name.contains("wan_2.1_vae")).then_some(0)),
+            }
+        }
     }
 }
 
@@ -656,6 +821,16 @@ fn spawn_server(dir: &Path, model: LocalModel, files: &ModelConfig, idle_minutes
         .args(["--diffusion-model", &files.diffusion_model])
         .args([model.encoder_flag(), &files.text_encoder])
         .args(["--vae", &files.vae]);
+    if model.video() {
+        command.args(["--high-noise-diffusion-model", &files.high_noise_model]);
+        /*
+         * Wan 2.2's two models are larger than the GPU memory together, so the
+         * engine keeps part of them outside it. Its default way to apply a LoRA
+         * (into the weights, at once) then stops the engine with an error; at
+         * run time it works.
+         */
+        command.args(["--lora-apply-mode", "at_runtime"]);
+    }
     command.args(["--conditioning-cache-size", "0"]);
     if let Some(args) = model.model_args() {
         command.args(["--model-args", args]);
@@ -663,7 +838,7 @@ fn spawn_server(dir: &Path, model: LocalModel, files: &ModelConfig, idle_minutes
     if let Some(shift) = model.flow_shift() {
         command.args(["--flow-shift", &shift.to_string()]);
     }
-    if let Some((dir, _)) = files.lora_parts() {
+    if let Some(dir) = files.lora_dir() {
         command.arg("--lora-model-dir").arg(dir);
     }
     command
@@ -744,7 +919,8 @@ impl Drop for Session {
 
 /**
  * Starts the engine with the model's saved files, or reuses it, and waits
- * until the model is loaded. An engine with another model stops first.
+ * until the model is loaded. An engine with another model stops first,
+ * but not while it has a job; the new job is then refused.
  */
 async fn open_session(app: &AppHandle, engine: &LocalEngine, reporter: &ProgressReporter, model: LocalModel) -> Result<Session, String> {
     let dir = engines_dir(app)?.join(ENGINE_BUILD);
@@ -763,7 +939,7 @@ async fn start_session(
         return Err("The local engine is not installed. Download it in Settings → Local.".into());
     }
     let files = config.model(model);
-    let missing = files.missing();
+    let missing = files.missing(model);
     if !missing.is_empty() {
         return Err(format!("Choose the {} {} in Settings → Local.", model.name(), missing.join(", ")));
     }
@@ -773,6 +949,10 @@ async fn start_session(
             server.model == model && same_files(&server.files, &files) && matches!(server.child.try_wait(), Ok(None))
         });
         if !reusable {
+            /* A job of another model must not stop the engine under a job that runs, such as a video. */
+            if slot.as_mut().is_some_and(|server| server.busy > 0 && matches!(server.child.try_wait(), Ok(None))) {
+                return Err("The local engine is busy with another job. Wait until that job is done, or cancel it.".into());
+            }
             if let Some(old) = slot.take() {
                 old.stop();
             }
@@ -845,6 +1025,30 @@ pub async fn local_load(
     .await
 }
 
+/**
+ * Explains a failed job. When the engine stopped during the job, the reason
+ * is the last line it printed, not the lost connection that the job saw.
+ */
+async fn job_error(engine: &LocalEngine, port: u16, error: String) -> String {
+    /* The connection closes a moment before Windows reports that the engine exited. */
+    for _ in 0..10 {
+        {
+            let mut slot = engine.lock();
+            let Some(server) = slot.as_mut().filter(|server| server.port == port) else { return error };
+            if let Ok(Some(status)) = server.child.try_wait() {
+                let reason = server.log.lock().unwrap_or_else(|error| error.into_inner()).last_error();
+                slot.take();
+                return match reason {
+                    Some(reason) => format!("The local engine stopped during the job ({status}): {reason}"),
+                    None => format!("The local engine stopped during the job ({status})."),
+                };
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    error
+}
+
 /// Asks the engine to stop a job when Image Sage stops waiting for it (cancel or error).
 struct CancelOnDrop(Option<String>);
 
@@ -907,8 +1111,9 @@ fn generate_body(model: LocalModel, prompt: &str, width: u32, height: u32, steps
     if let Some(image) = image {
         body["ref_images"] = json!([image]);
     }
-    if let Some((_, name)) = files.lora_parts().filter(|_| files.lora_strength != 0.0) {
-        body["lora"] = json!([{ "path": name, "multiplier": files.lora_strength }]);
+    let loras = files.job_loras();
+    if !loras.is_empty() {
+        body["lora"] = json!(loras);
     }
     body
 }
@@ -923,6 +1128,9 @@ pub async fn local_generate(
 ) -> Result<AiImage, String> {
     let (width, height) = parse_size(&request.size)?;
     let model = request.model;
+    if model.video() {
+        return Err(format!("{} makes video only; it cannot make an image.", model.name()));
+    }
     if request.image.is_some() && !model.edits() {
         return Err(format!("{} makes new images only; it cannot edit an image.", model.name()));
     }
@@ -936,7 +1144,7 @@ pub async fn local_generate(
         let files = load_config(&handle)?.model(model);
         reporter.progress("generating", 0.0);
         let body = generate_body(model, &prompt, width, height, steps, &files, image.as_deref());
-        let image = run_job(session.port, &body, |job| {
+        let made = run_image_job(session.port, &body, |job| {
             if job.step >= job.total {
                 reporter.stage("finishing");
             } else {
@@ -946,61 +1154,243 @@ pub async fn local_generate(
                 reporter.partial(job.step, format!("data:image/png;base64,{image}"));
             }
         })
-        .await?;
+        .await;
+        let image = match made {
+            Ok(image) => image,
+            Err(error) => return Err(job_error(&engine, session.port, error).await),
+        };
         Ok(AiImage { data_url: format!("data:image/png;base64,{image}"), usage: None })
     })
     .await
 }
 
-/// A new sampling step of a running job; `preview` is a small PNG of the image so far, as base64.
+fn parse_frames(frames: u32) -> Result<u32, String> {
+    if (5..=MAX_VIDEO_FRAMES).contains(&frames) && frames % 4 == 1 {
+        Ok(frames)
+    } else {
+        Err(format!("A clip of {frames} pictures is not valid for Wan 2.2."))
+    }
+}
+
+/**
+ * The engine's job request for one clip. Wan 2.2 samples with two models:
+ * the high-noise model starts the clip and the low-noise model finishes it.
+ * The engine divides the steps between them at `moe_boundary`. The flow
+ * shift and the boundary are the model makers' values: with a first picture
+ * (image-to-video) 5 and 0.9, from the prompt alone (text-to-video) 8 and 0.875.
+ */
+fn video_body(prompt: &str, width: u32, height: u32, frames: u32, files: &ModelConfig, image: Option<&str>) -> Value {
+    let (shift, boundary) = if image.is_some() { (5.0, 0.9) } else { (8.0, 0.875) };
+    let sample_params = |steps: i64| {
+        json!({
+            "sample_method": "euler",
+            "sample_steps": steps,
+            "flow_shift": shift,
+            "guidance": { "txt_cfg": LocalModel::WanImage.cfg_scale() }
+        })
+    };
+    let mut body = json!({
+        "prompt": prompt,
+        "negative_prompt": files.negative_prompt.trim(),
+        "width": width,
+        "height": height,
+        "seed": -1,
+        "video_frames": frames,
+        "fps": VIDEO_FPS,
+        "moe_boundary": boundary,
+        "sample_params": sample_params(i64::from(VIDEO_STEPS)),
+        /* -1 lets the engine take the high-noise steps from the boundary. */
+        "high_noise_sample_params": sample_params(-1),
+        "preview": "proj",
+        "preview_interval": 1,
+        "output_format": "webm"
+    });
+    if let Some(image) = image {
+        body["init_image"] = json!(image);
+    }
+    let loras = files.job_loras();
+    if !loras.is_empty() {
+        body["lora"] = json!(loras);
+    }
+    body
+}
+
+/**
+ * Makes a short video clip with Wan 2.2 on this computer and keeps it in
+ * memory as the app's current clip. The video window then reads it.
+ */
+#[tauri::command]
+pub async fn local_video(
+    app: AppHandle,
+    requests: State<'_, AiRequests>,
+    engine: State<'_, LocalEngine>,
+    request: LocalVideoRequest,
+) -> Result<LocalClip, String> {
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+
+    let (width, height) = parse_size(&request.size)?;
+    let frames = parse_frames(request.frames)?;
+    let prompt = request.prompt.trim().to_string();
+    let model = request.model;
+    if !model.video() {
+        return Err(format!("{} makes images only; it cannot make a video.", model.name()));
+    }
+    /* A clip that starts from a picture can have no prompt; the model then chooses the motion. */
+    if prompt.is_empty() && !model.starts_from_picture() {
+        return Err("Write what happens in the video first.".into());
+    }
+    let save_to = request.save_to;
+    if save_to.as_deref().is_some_and(|path| !crate::video::is_webm_name(path)) {
+        return Err("The video file name must end with .webm.".into());
+    }
+    let image = request.image.filter(|_| model.starts_from_picture());
+    if model.starts_from_picture() && image.is_none() {
+        return Err("Image-to-video starts from a picture. Right-click a layer in Image Sage and choose Make Video.".into());
+    }
+    let engine = engine.inner().clone();
+    let handle = app.clone();
+    requests::run_cancellable(app, &requests, request.request_id, move |reporter| async move {
+        let session = open_session(&handle, &engine, &reporter, model).await?;
+        let files = load_config(&handle)?.model(model);
+        reporter.progress("generating", 0.0);
+        let body = video_body(&prompt, width, height, frames, &files, image.as_deref());
+        let total = u64::from(VIDEO_STEPS);
+        let made = run_job(session.port, JobKind::Video, &body, |job| {
+            if job.step >= total {
+                reporter.stage("finishing");
+            } else {
+                reporter.progress("generating", job.step as f64 / total as f64);
+            }
+            if let Some(image) = job.preview {
+                reporter.partial(job.step, format!("data:image/png;base64,{image}"));
+            }
+        })
+        .await;
+        let result = match made {
+            Ok(result) => result,
+            Err(error) => return Err(job_error(&engine, session.port, error).await),
+        };
+        let encoded = result["b64_json"].as_str().ok_or("The local engine returned no video.")?;
+        let bytes = STANDARD.decode(encoded).map_err(|error| format!("The local engine returned a video that is not valid: {error}"))?;
+        match save_to {
+            Some(path) => std::fs::write(&path, &bytes).map_err(|error| format!("Could not save {path}: {error}"))?,
+            None => crate::video::keep_clip(&handle, bytes),
+        }
+        Ok(LocalClip {
+            fps: result["fps"].as_u64().unwrap_or(u64::from(VIDEO_FPS)),
+            frame_count: result["frame_count"].as_u64().unwrap_or(u64::from(frames)),
+        })
+    })
+    .await
+}
+
+/**
+ * A new sampling step of a running job; `preview` is a small PNG of the image
+ * so far, as base64. A clip samples in two passes, one for each Wan 2.2
+ * model: `step` and `total` count the steps of the passes up to now together.
+ */
 struct JobStep<'a> {
     step: u64,
     total: u64,
     preview: Option<&'a str>,
 }
 
+/// What a job makes; each kind has its own engine route.
+#[derive(Clone, Copy)]
+enum JobKind {
+    Image,
+    Video,
+}
+
+impl JobKind {
+    fn route(self) -> &'static str {
+        match self {
+            Self::Image => "img_gen",
+            Self::Video => "vid_gen",
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Image => "image",
+            Self::Video => "video",
+        }
+    }
+}
+
+/// Gives the engine one image job and waits for its image, which it returns as PNG base64.
+async fn run_image_job(port: u16, body: &Value, on_step: impl FnMut(JobStep<'_>) + Send) -> Result<String, String> {
+    let result = run_job(port, JobKind::Image, body, on_step).await?;
+    let image = result["images"][0]["b64_json"].as_str().ok_or("The local engine returned no image.")?;
+    Ok(image.to_string())
+}
+
 /**
- * Gives the engine one job and waits for its image, which it returns as PNG
- * base64. It calls `on_step` once for each new sampling step. If the caller
- * stops waiting, the engine is told to cancel the job.
+ * Gives the engine one job and waits for its result. It calls `on_step` once
+ * for each new sampling step. If the caller stops waiting, the engine is told
+ * to cancel the job.
  */
-async fn run_job(port: u16, body: &Value, mut on_step: impl FnMut(JobStep<'_>) + Send) -> Result<String, String> {
+async fn run_job(port: u16, kind: JobKind, body: &Value, mut on_step: impl FnMut(JobStep<'_>) + Send) -> Result<Value, String> {
     let client = requests::client()?;
     let base = format!("http://127.0.0.1:{port}/sdcpp/v1");
     let fail = |error: reqwest::Error| requests::describe_transport_error("the local engine", &error);
-    let created: Value = client.post(format!("{base}/img_gen")).json(body).send().await.map_err(fail)?.json().await.map_err(fail)?;
+    let created: Value = client.post(format!("{base}/{}", kind.route())).json(body).send().await.map_err(fail)?.json().await.map_err(fail)?;
     let id = created["id"]
         .as_str()
         .ok_or_else(|| format!("The local engine did not accept the job: {created}"))?
         .to_string();
     let mut cancel = CancelOnDrop(Some(format!("{base}/jobs/{id}/cancel")));
-    let mut shown_step = 0_u64;
+    let mut passes = PassSteps::default();
     loop {
         tokio::time::sleep(POLL_INTERVAL).await;
-        let job: Value = client.get(format!("{base}/jobs/{id}")).send().await.map_err(fail)?.json().await.map_err(fail)?;
+        let mut job: Value = client.get(format!("{base}/jobs/{id}")).send().await.map_err(fail)?.json().await.map_err(fail)?;
         match job["status"].as_str() {
             Some("completed") => {
                 cancel.0 = None;
-                let image = job["result"]["images"][0]["b64_json"]
-                    .as_str()
-                    .ok_or("The local engine returned no image.")?;
-                return Ok(image.to_string());
+                return Ok(job["result"].take());
             }
             Some("failed") | Some("cancelled") => {
                 cancel.0 = None;
                 let reason = job["error"]["message"].as_str().unwrap_or("no reason given");
-                return Err(format!("The local engine could not make the image: {reason}"));
+                return Err(format!("The local engine could not make the {}: {reason}", kind.name()));
             }
             _ => {
                 let preview = &job["preview"];
                 let (Some(step), Some(total)) = (preview["step"].as_u64(), preview["total_steps"].as_u64()) else { continue };
-                if step == shown_step || total == 0 {
-                    continue;
-                }
-                shown_step = step;
+                let Some((step, total)) = passes.next(preview["pass"].as_u64().unwrap_or(1), step, total) else { continue };
                 on_step(JobStep { step, total, preview: preview["b64_json"].as_str() });
             }
         }
+    }
+}
+
+/**
+ * Joins a job's sampling passes into one count. The engine restarts `step`
+ * at 1 in each pass; this adds the steps of the passes before.
+ */
+#[derive(Default)]
+struct PassSteps {
+    pass: u64,
+    step: u64,
+    /// The steps of the passes before this one.
+    before: u64,
+    /// The steps of this pass.
+    total: u64,
+}
+
+impl PassSteps {
+    /// The step and total over all passes up to now, or none when the engine shows the same step again.
+    fn next(&mut self, pass: u64, step: u64, total: u64) -> Option<(u64, u64)> {
+        if total == 0 || (pass == self.pass && step == self.step) {
+            return None;
+        }
+        if pass != self.pass {
+            self.before += self.total;
+            self.pass = pass;
+        }
+        self.step = step;
+        self.total = total;
+        Some((self.before + step, self.before + total))
     }
 }
 
@@ -1059,6 +1449,9 @@ fn plan_file_request(text: &str) -> Result<FilePlan, String> {
     }
     let (width, height) = parse_size(request.size.as_deref().unwrap_or("1024x1024"))?;
     let model = request.model.unwrap_or(LocalModel::Chroma);
+    if model.video() {
+        return Err(format!("{} makes video only. Use chroma1-hd or qwen-image-2.1.", model.name()));
+    }
     Ok(FilePlan { prompt, output_folder, count, width, height, steps: model.steps(quality), model })
 }
 
@@ -1165,7 +1558,7 @@ async fn make_plan_images(plan: &FilePlan, dir: &Path, config: &LocalConfig, eng
     let mut paths = Vec::new();
     for number in 1..=plan.count {
         let body = generate_body(plan.model, &plan.prompt, plan.width, plan.height, plan.steps, &files, None);
-        let image = run_job(session.port, &body, |job| {
+        let image = run_image_job(session.port, &body, |job| {
             tell(json!({ "event": "progress", "image": number, "count": plan.count, "step": job.step, "steps": job.total }));
         })
         .await?;
@@ -1250,6 +1643,7 @@ mod tests {
         assert!(refused(r#"{"prompt":"x","outputFolder":"C:\\Out","size":"1000x1000"}"#));
         assert!(refused(r#"{"prompt":"x","outputFolder":"C:\\Out","quality":"best"}"#));
         assert!(refused(r#"{"prompt":"x","outputFolder":"C:\\Out","model":"dall-e"}"#));
+        assert!(refused(r#"{"prompt":"x","outputFolder":"C:\\Out","model":"wan-2.2-t2v"}"#));
     }
 
     #[test]
@@ -1298,10 +1692,13 @@ mod tests {
         assert_eq!(chroma.sampler, "euler");
         assert_eq!(chroma.prompt_prefix.as_deref(), Some("A photo."));
         assert_eq!(config.model(LocalModel::Qwen).prompt_prefix.as_deref(), Some(""));
-        assert_eq!(chroma.missing(), vec!["diffusion model", "text encoder", "VAE"]);
+        assert_eq!(chroma.missing(LocalModel::Chroma), vec!["diffusion model", "text encoder", "VAE"]);
         let qwen = config.model(LocalModel::Qwen);
         assert_eq!(qwen.scheduler, "simple");
-        assert_eq!(qwen.missing(), vec!["diffusion model", "text encoder", "VAE"]);
+        assert_eq!(qwen.missing(LocalModel::Qwen), vec!["diffusion model", "text encoder", "VAE"]);
+        let wan = config.model(LocalModel::WanImage);
+        assert_eq!(wan.negative_prompt, DEFAULT_VIDEO_NEGATIVE_PROMPT);
+        assert_eq!(wan.missing(LocalModel::WanImage), vec!["low-noise model", "high-noise model", "text encoder", "VAE"]);
     }
 
     #[test]
@@ -1344,15 +1741,14 @@ mod tests {
     #[test]
     fn lora_goes_by_name_from_its_folder() {
         let mut files = ModelConfig::defaults(LocalModel::Chroma);
-        assert!(files.lora_parts().is_none());
+        assert!(files.lora_dir().is_none());
         assert!(generate_body(LocalModel::Chroma, "a cat", 1024, 768, 30, &files, None).get("lora").is_none());
         files.lora = "D:\\models\\loras\\FineArtPhoto2.safetensors".into();
-        let (dir, name) = files.lora_parts().unwrap();
-        assert_eq!(dir, PathBuf::from("D:\\models\\loras"));
-        assert_eq!(name, "FineArtPhoto2.safetensors");
+        assert_eq!(files.lora_dir(), Some(PathBuf::from("D:\\models\\loras")));
+        assert_eq!(files.lora_name(&files.lora).as_deref(), Some("FineArtPhoto2.safetensors"));
         let body = generate_body(LocalModel::Chroma, "a cat", 1024, 768, 30, &files, None);
         assert_eq!(body["lora"], json!([{ "path": "FineArtPhoto2.safetensors", "multiplier": 0.75 }]));
-        assert!(files.missing().contains(&"LoRA"));
+        assert!(files.missing(LocalModel::Chroma).contains(&"LoRA"));
         files.lora_strength = 0.0;
         assert!(generate_body(LocalModel::Chroma, "a cat", 1024, 768, 30, &files, None).get("lora").is_none());
         let other_strength = ModelConfig { lora_strength: 1.0, ..files.clone() };
@@ -1376,13 +1772,96 @@ mod tests {
     }
 
     #[test]
+    fn a_clip_job_uses_both_wan_models() {
+        let files = ModelConfig::defaults(LocalModel::WanText);
+        let body = video_body("a fox runs", 832, 480, 81, &files, None);
+        assert_eq!(body["video_frames"], 81);
+        assert_eq!(body["fps"], 16);
+        assert_eq!(body["moe_boundary"], 0.875);
+        assert_eq!(body["sample_params"]["sample_steps"], 20);
+        assert_eq!(body["sample_params"]["flow_shift"], 8.0);
+        assert_eq!(body["high_noise_sample_params"]["sample_steps"], -1);
+        assert_eq!(body["negative_prompt"], DEFAULT_VIDEO_NEGATIVE_PROMPT);
+        assert_eq!(body["output_format"], "webm");
+        assert!(body.get("init_image").is_none());
+        let body = video_body("a fox runs", 832, 480, 33, &files, Some("data:image/png;base64,AAAA"));
+        assert_eq!(body["init_image"], "data:image/png;base64,AAAA");
+        assert_eq!(body["moe_boundary"], 0.9);
+        assert_eq!(body["sample_params"]["flow_shift"], 5.0);
+    }
+
+    #[test]
+    fn a_clip_job_has_a_lora_for_each_wan_model() {
+        let mut files = ModelConfig::defaults(LocalModel::WanImage);
+        assert!(video_body("a fox runs", 832, 480, 81, &files, None).get("lora").is_none());
+        files.lora = "D:\\models\\loras\\Motion_Low.safetensors".into();
+        files.high_noise_lora = "D:\\models\\loras\\Motion_High.safetensors".into();
+        files.high_noise_lora_strength = 0.8;
+        assert_eq!(files.lora_dir(), Some(PathBuf::from("D:\\models\\loras")));
+        let body = video_body("a fox runs", 832, 480, 81, &files, None);
+        assert_eq!(
+            body["lora"],
+            json!([
+                { "path": "Motion_Low.safetensors", "multiplier": 1.0 },
+                { "path": "Motion_High.safetensors", "multiplier": 0.8, "is_high_noise": true }
+            ])
+        );
+        assert_eq!(files.missing(LocalModel::WanImage)[4..], ["low-noise LoRA", "high-noise LoRA"]);
+        /* LoRAs in two folders: the engine reads them from the nearest folder that holds both. */
+        files.high_noise_lora = "D:\\models\\loras\\wan\\Motion_High.safetensors".into();
+        assert_eq!(files.lora_dir(), Some(PathBuf::from("D:\\models\\loras")));
+        assert_eq!(files.lora_name(&files.high_noise_lora).as_deref(), Some("wan/Motion_High.safetensors"));
+        /* Only the high-noise LoRA, at strength 0 for the other: one entry. */
+        files.lora = String::new();
+        let body = video_body("a fox runs", 832, 480, 81, &files, None);
+        assert_eq!(body["lora"], json!([{ "path": "Motion_High.safetensors", "multiplier": 0.8, "is_high_noise": true }]));
+    }
+
+    #[test]
+    fn clip_lengths_are_a_multiple_of_4_plus_1() {
+        assert_eq!(parse_frames(33), Ok(33));
+        assert_eq!(parse_frames(81), Ok(81));
+        assert!(parse_frames(32).is_err());
+        assert!(parse_frames(1).is_err());
+        assert!(parse_frames(85).is_err());
+    }
+
+    #[test]
+    fn one_saved_wan_entry_goes_to_its_kind() {
+        let saved = |name: &str| json!({ "models": { "wan-2.2": { "diffusionModel": format!("D:\\models\\{name}"), "lora": "D:\\loras\\a.safetensors" } } }).to_string();
+        let config = parse_config(&saved("wan2.2_t2v_low_noise_14B_fp8_scaled.safetensors"));
+        assert!(config.model(LocalModel::WanText).diffusion_model.ends_with("wan2.2_t2v_low_noise_14B_fp8_scaled.safetensors"));
+        assert_eq!(config.model(LocalModel::WanText).lora, "D:\\loras\\a.safetensors");
+        assert_eq!(config.model(LocalModel::WanImage), ModelConfig::defaults(LocalModel::WanImage));
+        let config = parse_config(&saved("wan2.2_i2v_low_noise_14B_fp8_scaled.safetensors"));
+        assert!(config.model(LocalModel::WanImage).diffusion_model.ends_with("wan2.2_i2v_low_noise_14B_fp8_scaled.safetensors"));
+        assert_eq!(config.model(LocalModel::WanText), ModelConfig::defaults(LocalModel::WanText));
+        assert!(LocalModel::WanImage.starts_from_picture());
+        assert!(!LocalModel::WanText.starts_from_picture());
+    }
+
+    #[test]
+    fn steps_of_two_passes_count_as_one() {
+        let mut passes = PassSteps::default();
+        assert_eq!(passes.next(1, 1, 10), Some((1, 10)));
+        assert_eq!(passes.next(1, 1, 10), None);
+        assert_eq!(passes.next(1, 10, 10), Some((10, 10)));
+        assert_eq!(passes.next(2, 1, 10), Some((11, 20)));
+        assert_eq!(passes.next(2, 10, 10), Some((20, 20)));
+        assert_eq!(passes.next(2, 10, 0), None);
+    }
+
+    #[test]
     fn finds_comfyui_models_from_the_root_folder() {
         let root = std::env::temp_dir().join(format!("imagesage-find-{}", std::process::id()));
         let models = root.join("ComfyUI").join("models");
         for (folder, name) in [
             ("diffusion_models", "Chroma1-Base.safetensors"),
             ("diffusion_models", "Chroma1-HD.safetensors"),
-            ("diffusion_models", "wan2.2.safetensors"),
+            ("diffusion_models", "wan2.2_t2v_low_noise_14B_fp8_scaled.safetensors"),
+            ("diffusion_models", "wan2.2_t2v_high_noise_14B_fp8_scaled.safetensors"),
+            ("diffusion_models", "Wan2.2-I2V-A14B-LowNoise-Q8_0.gguf"),
+            ("text_encoders", "umt5_xxl_fp8_e4m3fn_scaled.safetensors"),
             ("text_encoders", "t5xxl_fp8_e4m3fn.safetensors"),
             ("text_encoders", "t5xxl_fp16.safetensors"),
             ("vae", "ae.safetensors"),
@@ -1408,6 +1887,19 @@ mod tests {
         assert_eq!(name(&found.diffusion_model).as_deref(), Some("NoctQ_V4_int8_convrot.safetensors"));
         assert_eq!(name(&found.text_encoder).as_deref(), Some("qwen3vl_8b_int8_convrot.safetensors"));
         assert_eq!(name(&found.vae).as_deref(), Some("qwen_image_2.1_vae_bf16.safetensors"));
+        let found = find_models(&root, LocalModel::WanText);
+        assert_eq!(name(&found.diffusion_model).as_deref(), Some("wan2.2_t2v_low_noise_14B_fp8_scaled.safetensors"));
+        assert_eq!(name(&found.high_noise_model).as_deref(), Some("wan2.2_t2v_high_noise_14B_fp8_scaled.safetensors"));
+        assert_eq!(name(&found.text_encoder).as_deref(), Some("umt5_xxl_fp8_e4m3fn_scaled.safetensors"));
+        assert_eq!(name(&found.vae).as_deref(), Some("wan_2.1_vae.safetensors"));
+        /* Only the low-noise file of the image-to-video pair is there yet. */
+        let found = find_models(&root, LocalModel::WanImage);
+        assert_eq!(name(&found.diffusion_model).as_deref(), Some("Wan2.2-I2V-A14B-LowNoise-Q8_0.gguf"));
+        assert_eq!(found.high_noise_model, None);
+        std::fs::write(models.join("diffusion_models").join("Wan2.2-I2V-A14B-HighNoise-Q8_0.gguf"), b"x").unwrap();
+        let found = find_models(&root, LocalModel::WanImage);
+        assert_eq!(name(&found.diffusion_model).as_deref(), Some("Wan2.2-I2V-A14B-LowNoise-Q8_0.gguf"));
+        assert_eq!(name(&found.high_noise_model).as_deref(), Some("Wan2.2-I2V-A14B-HighNoise-Q8_0.gguf"));
         assert_eq!(find_models(&root.join("nowhere"), LocalModel::Qwen), FoundModels::default());
         let _ = std::fs::remove_dir_all(&root);
     }

@@ -18,6 +18,7 @@ import {
   Drop,
   Eye,
   EyeSlash,
+  FilmStrip,
   MagnifyingGlass,
   PencilSimple,
   Plus,
@@ -58,6 +59,7 @@ export type PartAction =
   | "delete"
   | "resize"
   | "duplicate"
+  | "make-video"
   | "click-select"
   | "wand-select"
   | "select-pixels"
@@ -1203,8 +1205,10 @@ Click to show its progress on the image.`}>
             <div className="steps-menu-head">{step ? "Edit layer" : "Original image"}</div>
             {/* The original image can only be duplicated; the copy is a normal layer. */}
             {!step && plain(<Copy size={15} />, <>Duplicate <small>Ctrl+J</small></>, () => onPartAction(menu.node, "mask", "duplicate"))}
+            {!step && plain(<FilmStrip size={15} />, "Make Video…", () => onPartAction(menu.node, "mask", "make-video"))}
             {step && plain(<CornersOut size={15} />, <>Transform <small>Ctrl+T</small></>, () => onPartAction(menu.node, "mask", "resize"))}
             {step && plain(<Copy size={15} />, <>Duplicate <small>Ctrl+J</small></>, () => onPartAction(menu.node, "mask", "duplicate"))}
+            {step && plain(<FilmStrip size={15} />, "Make Video…", () => onPartAction(menu.node, "mask", "make-video"))}
             {step && plain(<Trash size={15} />, <>Delete <small>Del</small></>, () => onDelete(menu.node), true)}
           </div>
         );

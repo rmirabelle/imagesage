@@ -36,6 +36,7 @@ Image Sage.
 
 - **New from prompt** — Generate a new image using GPT
 - **Local Chroma1-HD (optional)** — make new images on your own computer, free and offline, with Chroma1-HD and your own model files (for example from ComfyUI). Set it up in **Settings → Local**: the engine downloads once, and you can choose the sampler, the scheduler, and the negative prompt. Each image becomes a new layer; edits still use GPT Image.
+- **Local video (optional)** — **Edit → Animate Layer** opens a small video window that makes a short clip (2 to 5 seconds) from the selected layer with Wan 2.2 and your own model files, plays it in a loop, and saves it as a WebM file.
 - **Open** - Choose your own image to start with
 - **Edit the image** - Use professional image editing tools
 - **Send multiple edit generations at once** — send a new edit while others still run. Each one shows a waiting row in the layers list, with its progress and a Cancel button, and becomes a layer when it arrives.

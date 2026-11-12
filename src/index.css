@@ -193,6 +193,32 @@ select option:disabled { color: #777d8e; }
 
 /* The OpenAI status sits at the right of the title bar, before the window controls. */
 .titlebar-end { display: flex; align-items: center; padding-right: 8px; }
+/* The video window: the clip (or the layer it starts from) on top, the form under it. */
+.video-stage {
+  flex: 1 1 0;
+  min-height: 160px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 14px;
+  background: #16181f;
+}
+.video-stage img, .video-stage video { max-width: 100%; max-height: 100%; border-radius: 4px; object-fit: contain; }
+/* The engine's picture of a running clip is small; it fills the stage, soft. */
+.video-stage .video-preview { width: 100%; height: 100%; filter: blur(2px); }
+.video-empty { display: flex; flex-direction: column; align-items: center; gap: 8px; color: var(--muted); }
+.video-form { flex: 0 0 auto; display: flex; flex-direction: column; gap: 12px; padding: 16px 20px 18px; border-top: 1px solid var(--border); background: var(--panel); }
+.video-prompt { min-height: 78px; line-height: 1.5; resize: vertical; }
+.video-prompt:disabled { opacity: .6; }
+.video-actions { display: flex; align-items: center; gap: 10px; min-height: 32px; }
+.video-progress { display: flex; align-items: center; gap: 8px; margin-right: auto; color: #d4d7df; }
+.video-progress svg { color: var(--accent-hover); }
+.video-progress small { color: var(--muted); font-variant-numeric: tabular-nums; }
+.video-bar { flex: 0 0 auto; }
+.video-export-bar { flex: 0 0 auto; display: flex; align-items: center; gap: 10px; padding: 5px 12px; border-bottom: 1px solid #3f4554; background: #262a35; color: #d4d7df; font-size: 13px; }
+.video-export-bar > svg { flex: 0 0 auto; color: var(--accent-hover); }
+.video-export-bar .about-update-progress { flex: 1 1 120px; max-width: 260px; margin-left: auto; }
+.video-export-bar .button { padding: 3px 12px; }
 .titlebar-end .ai-status { height: 26px; }
 /* A tooltip for an element with a data-help text. */
 .tooltip {
@@ -2001,6 +2027,7 @@ select option:disabled { color: #777d8e; }
 .settings-help { color: #7f8595; font-size: 11px; line-height: 1.45; }
 /* Local engine model files: a wider label column, so "Free memory after" fits on one line. */
 .local-files .form-row { grid-template-columns: 116px minmax(0, 1fr); }
+.local-model-actions { display: flex; flex-wrap: wrap; gap: 8px; }
 .local-idle { display: flex; align-items: center; gap: 9px; color: #9298a7; font-size: 12px; }
 .local-idle .settings-input { width: 80px; }
 .local-negative { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; }

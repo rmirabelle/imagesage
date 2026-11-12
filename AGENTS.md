@@ -40,6 +40,11 @@
   only, and Qwen-Image-2.1 (or a merge such as Noct Q) for new images and,
   through Regenerate, edits of the selected layer into a new layer. It reads the user's own
   model files in place; see `docs/RELEASING.md`.
+- Video is not a layer type. Edit → Animate Layer sends the selected layer to
+  a second window (`src-tauri/src/video.rs`, `src/components/VideoWindow.tsx`),
+  which makes a short WebM clip with Wan 2.2 through the engine's `vid_gen`
+  route (`local_video` in `local.rs`). Clip size rules live in
+  `src/editor/clipSize.ts` and are unit-tested.
 - Another program can ask for local images with no window:
   `imagesage.exe --generate <request file>`. Chat Sage uses this. The request
   file and the answer lines are a contract with that program; read

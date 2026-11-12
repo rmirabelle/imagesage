@@ -38,6 +38,22 @@ export const LOCAL_STEPS: Record<string, Record<string, number>> = {
   "qwen-image-2.1": { low: 16, medium: 25, high: 35 }
 };
 
+/** Wan 2.2 image-to-video: a clip that starts from a layer's picture. */
+export const VIDEO_FROM_PICTURE = "wan-2.2-i2v";
+/** Wan 2.2 text-to-video: a clip from the prompt alone. */
+export const VIDEO_FROM_PROMPT = "wan-2.2-t2v";
+/**
+ * The local models that make short video clips, in the video window. They
+ * are not in `LOCAL_MODELS`, so the image model lists do not show them.
+ */
+export const VIDEO_MODELS: ImageModel[] = [
+  { id: VIDEO_FROM_PICTURE, label: "From the layer's picture", note: "Wan 2.2 image-to-video", qualities: [], local: true },
+  { id: VIDEO_FROM_PROMPT, label: "From the prompt alone", note: "Wan 2.2 text-to-video", qualities: [], local: true }
+];
+export const isVideoModel = (id: string) => VIDEO_MODELS.some((model) => model.id === id);
+/** The models with files in Settings → Local. */
+export const LOCAL_SETTINGS_MODELS: ImageModel[] = [...LOCAL_MODELS, ...VIDEO_MODELS];
+
 const ALL_MODELS = [...IMAGE_MODELS, ...LOCAL_MODELS];
 export const isLocalModel = (id: string) => LOCAL_MODELS.some((model) => model.id === id);
 /** A local model that edits the whole image, as GPT Image does. */
@@ -144,7 +160,7 @@ export interface WholeEditPayload extends GeneratePayload {
 export const CANCELLED_MESSAGE = "The request was cancelled.";
 
 export async function runWithProgress<T = AiImage>(
-  command: "ai_generate" | "ai_edit_whole" | "model_download" | "music_download" | "sam_encode" | "local_generate" | "local_engine_download" | "local_load",
+  command: "ai_generate" | "ai_edit_whole" | "model_download" | "music_download" | "sam_encode" | "local_generate" | "local_video" | "local_engine_download" | "local_load",
   requestId: string,
   payload: GeneratePayload | WholeEditPayload | Record<string, unknown>,
   onProgress: (progress: AiProgress) => void
@@ -191,7 +207,10 @@ export const cancelAiRequest = (requestId: string) => invoke<void>("ai_cancel", 
 
 /** One local model's files and image settings, as saved on this computer. */
 export interface LocalModelConfig {
+  /** For Wan 2.2, the low-noise model. */
   diffusionModel: string;
+  /** Wan 2.2 only: the high-noise model. */
+  highNoiseModel: string;
   textEncoder: string;
   vae: string;
   /** What every image avoids. */
@@ -206,6 +225,9 @@ export interface LocalModelConfig {
   lora: string;
   /** How strongly the LoRA applies: 1 is full strength, 0 turns it off. */
   loraStrength: number;
+  /** Wan 2.2 only: an optional LoRA file for the high-noise model; `lora` is then the low-noise model's. */
+  highNoiseLora: string;
+  highNoiseLoraStrength: number;
 }
 
 export interface LocalConfig {
@@ -223,8 +245,8 @@ export interface LocalStatus {
   missing: Record<string, string[]>;
   /** The local model the engine has loaded, if any. */
   running: string | null;
-  /** The negative prompt a new config starts with. */
-  defaultNegativePrompt: string;
+  /** Each local model's negative prompt in a new config, by local model id. */
+  defaultNegativePrompts: Record<string, string>;
   /** Each local model's prompt start in a new config, by local model id. */
   defaultPromptPrefixes: Record<string, string>;
 }
@@ -239,12 +261,36 @@ export const localReady = (status: LocalStatus | null) => readyLocalModels(statu
 export const localStatus = () => invoke<LocalStatus>("local_status");
 export const saveLocalConfig = (config: LocalConfig) => invoke<void>("local_config_set", { config });
 export const findLocalModels = (folder: string, model: string) =>
-  invoke<{ diffusionModel: string | null; textEncoder: string | null; vae: string | null }>("local_find_models", { folder, model });
+  invoke<{ diffusionModel: string | null; highNoiseModel: string | null; textEncoder: string | null; vae: string | null }>("local_find_models", { folder, model });
 export const downloadLocalEngine = (requestId: string, onProgress: (progress: AiProgress) => void) =>
   runWithProgress<void>("local_engine_download", requestId, {}, onProgress);
 /** Starts the engine and loads the model; returns a short success message. */
 export const loadLocalModel = (requestId: string, model: string, onProgress: (progress: AiProgress) => void) =>
   runWithProgress<string>("local_load", requestId, { model }, onProgress);
+
+/** A finished clip; the video window reads its file with `readClip`. */
+export interface LocalClip {
+  fps: number;
+  frameCount: number;
+}
+
+export interface VideoPayload {
+  /** `VIDEO_FROM_PICTURE` or `VIDEO_FROM_PROMPT`. */
+  model: string;
+  prompt: string;
+  /** Width and height of the clip, such as "832x480". */
+  size: string;
+  /** How many pictures the clip has: a multiple of 4, plus 1. */
+  frames: number;
+  /** The first picture, as a PNG data URL at `size`; only image-to-video uses it. */
+  image: string | null;
+  /** A `.webm` file to write the clip to; without it, the clip is the video window's current clip. */
+  saveTo?: string;
+}
+
+/** Makes a short video clip with Wan 2.2 on this computer. */
+export const makeLocalVideo = (requestId: string, payload: VideoPayload, onProgress: (progress: AiProgress) => void) =>
+  runWithProgress<LocalClip>("local_video", requestId, { ...payload }, onProgress);
 
 export const stageLabel = (stage: AiStage | null, service = "OpenAI") => {
   switch (stage) {

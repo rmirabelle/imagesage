@@ -12,6 +12,7 @@ mod requests;
 mod sam;
 mod spend;
 mod updater;
+mod video;
 
 use std::{path::Path, sync::Mutex};
 use tauri::{Emitter, Manager, State};
@@ -95,6 +96,18 @@ pub fn run() {
         .manage(requests::AiRequests::default())
         .manage(sam::SamModel::default())
         .manage(local::LocalEngine::default())
+        .manage(video::PendingVideoSource::default())
+        .manage(video::CurrentClip::default())
+        .on_window_event(|window, event| {
+            if !matches!(event, tauri::WindowEvent::Destroyed) {
+                return;
+            }
+            match window.label() {
+                "main" => video::main_window_closed(window.app_handle()),
+                video::WINDOW => video::discard_clip(window.app_handle()),
+                _ => {}
+            }
+        })
         .setup(|app| {
             local::watch_idle(app.state::<local::LocalEngine>().inner().clone());
             restore_main_window(app.handle());
@@ -126,6 +139,11 @@ pub fn run() {
             local::local_engine_download,
             local::local_load,
             local::local_generate,
+            local::local_video,
+            video::video_open,
+            video::video_take_source,
+            video::video_read,
+            video::video_save,
             pricing::fetch_prices,
             spend::spend_record,
             recovery::recovery_save,

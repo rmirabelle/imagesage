@@ -3,11 +3,11 @@ import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { open, save } from "@tauri-apps/plugin-dialog";
-import { ArrowClockwise, ArrowCounterClockwise, ArrowsOut, Camera, CheckCircle, CornersOut, DownloadSimple, FilePlus, FilmStrip, FloppyDisk, FolderOpen, GearSix, ImageSquare, Info, Keyboard, SpinnerGap, Stack, Warning, WarningCircle, X } from "@phosphor-icons/react";
+import { ArrowClockwise, ArrowCounterClockwise, ArrowsOut, Camera, CheckCircle, CornersOut, DownloadSimple, FilePlus, FilmStrip, FloppyDisk, FolderOpen, GearSix, ImageSquare, Info, Keyboard, SpinnerGap, Stack, VideoCamera, Warning, WarningCircle, X } from "@phosphor-icons/react";
 import { AboutDialog } from "./components/AboutDialog";
 import { ShortcutsDialog } from "./components/ShortcutsDialog";
 import { ConnectDialog, type SettingsSection } from "./components/ConnectDialog";
-import { Editor, type EditorCommand, type LayerExport, type Notice } from "./components/Editor";
+import { Editor, type EditorCommand, type LayerExport, type LayerVideoSource, type Notice } from "./components/Editor";
 import { NewImageDialog } from "./components/NewImageDialog";
 import { OpenDialog } from "./components/OpenDialog";
 import { Tooltips } from "./components/Tooltips";
@@ -19,11 +19,17 @@ import { exceedsWholeImageLimits, fitWithinWholeImageLimits } from "./editor/reg
 import { createManifest, parseManifest, type HistoryTile } from "./editor/document";
 import { documentSpend, isDocumentDirty, type ImageDocument } from "./editor/imageDocument";
 import type { DocumentOrigin } from "./editor/types";
+import { clipFrames } from "./editor/clipSize";
 import {
+  CANCELLED_MESSAGE,
   DISCONNECTED,
+  VIDEO_FROM_PICTURE,
   apiKeyStatus,
+  cancelAiRequest,
   loadAiSettings,
+  localModelReady,
   localStatus,
+  makeLocalVideo,
   readyLocalModels,
   storeAiSettings,
   type AiSettings,
@@ -66,6 +72,8 @@ const folderOf = (path: string) => path.replace(/[\\/][^\\/]*$/, "");
 /** A suggested export path: the file name in the last export folder, when there is one. */
 const inLastExportFolder = (path: string) => lastExportFolder ? `${lastExportFolder}\\${fileName(path)}` : path;
 /** Characters that Windows does not allow in file names become spaces. */
+/** How many clips Export Layer Videos makes from each layer. */
+const LAYER_VIDEO_COUNT = 3;
 const safeFileName = (name: string) => name.replace(/[<>:"/\\|?*\u0000-\u001f]/g, " ").replace(/\s+/g, " ").trim().replace(/[. ]+$/, "");
 
 type DocumentPanelProps = {
@@ -84,6 +92,8 @@ type DocumentPanelProps = {
   onExport: (id: string, dataUrl: string, format: SaveFormat) => Promise<boolean>;
   onExportVideo: (id: string, video: Blob) => Promise<boolean>;
   onExportLayers: (id: string, layers: LayerExport[]) => Promise<boolean>;
+  onExportLayerVideos: (id: string, size: string, prepare: () => Promise<LayerVideoSource[]>) => Promise<void>;
+  videoExportRunning: boolean;
   onNotice: (notice: Notice) => void;
   onFileTask: <T>(label: string, work: () => Promise<T>) => Promise<T>;
   command: EditorCommand | null;
@@ -218,6 +228,9 @@ export default function App() {
     return show;
   };
   /** Labels of the file reads and writes now running; the loader shows the newest. */
+  /** The Export Layer Videos run, for the bar below the tabs: which clip it makes now, and how far that clip is (0 to 1). */
+  const [videoExport, setVideoExport] = useState<{ name: string; layer: number; layers: number; clip: number; made: number; total: number; progress: number } | null>(null);
+  const videoExportRef = useRef<{ running: boolean; cancelled: boolean; requestId: string | null }>({ running: false, cancelled: false, requestId: null });
   const [fileTasks, setFileTasks] = useState<{ id: number; label: string }[]>([]);
   const fileTaskIdRef = useRef(0);
   const runFileTask = useCallback(async <T,>(label: string, work: () => Promise<T>): Promise<T> => {
@@ -700,6 +713,87 @@ export default function App() {
     return true;
   }, [runFileTask, showNotice]);
 
+  /**
+   * File, Export Layer Videos: asks for a folder, then makes
+   * `LAYER_VIDEO_COUNT` clips of 5 seconds from each layer, one at a time,
+   * and writes each clip as soon as it is complete. The files are named
+   * "<image>-<layer number>-<clip number>.webm". The run does not block the
+   * window: a bar below the tabs shows the progress and has Cancel. Cancel
+   * stops the clip that runs and makes no more; the finished files stay.
+   */
+  const exportLayerVideos = useCallback(async (documentId: string, size: string, prepare: () => Promise<LayerVideoSource[]>) => {
+    if (!isTauri()) {
+      showNotice({ tone: "error", message: "Exporting is available in the Image Sage desktop app." });
+      return;
+    }
+    const document = documentsRef.current.find((candidate) => candidate.id === documentId);
+    if (!document) return;
+    if (videoExportRef.current.running) {
+      showNotice({ tone: "error", message: "Image Sage makes layer videos now. Wait until they are done, or cancel the video export." });
+      return;
+    }
+    const status = await localStatus().catch(() => null);
+    if (!localModelReady(status, VIDEO_FROM_PICTURE)) {
+      showNotice({ tone: "error", message: "Choose the Wan 2.2 image-to-video files first. Open File, Settings, Local." });
+      return;
+    }
+    const picked = await open({
+      title: "Export layer videos to a folder",
+      directory: true,
+      multiple: false,
+      defaultPath: lastExportFolder ?? (document.path ? folderOf(document.path) : undefined)
+    });
+    if (typeof picked !== "string" || videoExportRef.current.running) return;
+    const folder = picked.replace(/[\\/]+$/, "");
+    lastExportFolder = folder;
+    const prefix = safeFileName(document.name.replace(/\.[^.]+$/, "")) || "Image Sage";
+    const run = videoExportRef.current;
+    run.running = true;
+    run.cancelled = false;
+    let made = 0;
+    let total = 0;
+    try {
+      const layers = await runFileTask("Preparing the layer videos…", prepare);
+      total = layers.length * LAYER_VIDEO_COUNT;
+      for (const [index, layer] of layers.entries()) {
+        for (let clip = 1; clip <= LAYER_VIDEO_COUNT; clip += 1) {
+          if (run.cancelled) throw new Error(CANCELLED_MESSAGE);
+          const requestId = crypto.randomUUID();
+          run.requestId = requestId;
+          const shown = { name: prefix, layer: index + 1, layers: layers.length, clip, made, total };
+          setVideoExport({ ...shown, progress: 0 });
+          await makeLocalVideo(requestId, {
+            model: VIDEO_FROM_PICTURE,
+            prompt: layer.prompt,
+            size,
+            frames: clipFrames(5),
+            image: layer.image,
+            saveTo: `${folder}\\${prefix}-${index + 1}-${clip}.webm`
+          }, (progress) => {
+            if (progress.stage !== "partial" && progress.progress != null) setVideoExport({ ...shown, progress: progress.progress });
+          });
+          made += 1;
+        }
+      }
+      showNotice({ tone: "success", message: `Exported ${made} videos to ${folder}` });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const kept = made ? ` ${made} of ${total} videos are in ${folder}.` : "";
+      if (message === CANCELLED_MESSAGE) showNotice({ tone: "success", message: `The video export was cancelled.${kept}` });
+      else showNotice({ tone: "error", message: `${message}${kept}` });
+    } finally {
+      run.running = false;
+      run.requestId = null;
+      setVideoExport(null);
+    }
+  }, [runFileTask, showNotice]);
+
+  /** Cancel in the video export bar: stops the clip that runs; the run then makes no more. */
+  const cancelVideoExport = useCallback(() => {
+    videoExportRef.current.cancelled = true;
+    if (videoExportRef.current.requestId) void cancelAiRequest(videoExportRef.current.requestId);
+  }, []);
+
   const requestCloseDocument = useCallback((documentId: string) => {
     const document = documentsRef.current.find((candidate) => candidate.id === documentId);
     if (!document) return;
@@ -798,6 +892,7 @@ export default function App() {
         { label: "Export Image…", icon: <ImageSquare size={15} />, shortcut: "Ctrl+E", disabled: !activeDocument, run: () => sendCommand("export-image") },
         { label: "Export All Layers…", icon: <Stack size={15} />, disabled: !activeDocument, run: () => sendCommand("export-layers") },
         { label: "Export Video Slideshow…", icon: <FilmStrip size={15} />, disabled: !activeDocument, run: () => sendCommand("export-video") },
+        { label: "Export Layer Videos…", icon: <VideoCamera size={15} />, disabled: !activeDocument, run: () => sendCommand("export-layer-videos") },
         "separator",
         { label: "Settings…", icon: <GearSix size={15} />, run: openConnect }
       ]
@@ -810,6 +905,7 @@ export default function App() {
         { label: "Redo", icon: <ArrowClockwise size={15} />, shortcut: "Ctrl+Y", disabled: !activeDocument, run: () => sendCommand("redo") },
         "separator",
         { label: "Snapshot Visible Layers", icon: <Camera size={15} />, shortcut: "Ctrl+Alt+S", disabled: !activeDocument, run: () => sendCommand("snapshot") },
+        { label: "Animate Layer…", icon: <VideoCamera size={15} />, disabled: !activeDocument, run: () => sendCommand("animate-layer") },
         "separator",
         { label: "Image Size…", icon: <ArrowsOut size={15} />, disabled: !activeDocument, run: () => sendCommand("image-size") },
         { label: "Canvas Size…", icon: <CornersOut size={15} />, disabled: !activeDocument, run: () => sendCommand("canvas-size") }
@@ -897,6 +993,15 @@ export default function App() {
         </div>
       )}
 
+      {videoExport && (
+        <div className="video-export-bar" role="status">
+          <SpinnerGap className="spin" size={15} />
+          <span>Layer videos of {videoExport.name}: layer {videoExport.layer} of {videoExport.layers}, video {videoExport.clip} of {LAYER_VIDEO_COUNT}. {videoExport.made} of {videoExport.total} are done.</span>
+          <div className="about-update-progress"><i style={{ width: `${Math.round(videoExport.progress * 100)}%` }} /></div>
+          <button className="button secondary" onClick={cancelVideoExport}>Cancel</button>
+        </div>
+      )}
+
       <div className="app-content">
         {documents.length === 0 && (
           <section className="empty-state">
@@ -943,6 +1048,8 @@ export default function App() {
             onExport={exportImage}
             onExportVideo={exportVideo}
             onExportLayers={exportLayers}
+            onExportLayerVideos={exportLayerVideos}
+            videoExportRunning={videoExport !== null}
             onNotice={noticeFor(document.id)}
             onFileTask={runFileTask}
             command={editorCommand?.documentId === document.id ? editorCommand : null}

@@ -1,7 +1,9 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invoke, isTauri } from "@tauri-apps/api/core";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { Component, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
 import App from "./App";
+import { VideoWindow } from "./components/VideoWindow";
 import "./index.css";
 
 /**
@@ -78,4 +80,7 @@ class CrashScreen extends Component<{ children: ReactNode }, { error: Error | nu
   }
 }
 
-createRoot(document.getElementById("root")!).render(<CrashScreen><App /></CrashScreen>);
+/** The video window loads the same page as the editor; its window label tells the two apart. */
+const isVideoWindow = isTauri() && getCurrentWindow().label === "video";
+
+createRoot(document.getElementById("root")!).render(<CrashScreen>{isVideoWindow ? <VideoWindow /> : <App />}</CrashScreen>);
