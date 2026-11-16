@@ -38,19 +38,29 @@ interface LearnedPrices {
   openaiInputTokensPerMegapixel: Record<string, number>;
 }
 
-export const BUILT_IN_PRICES_DATE = "2026-10-02";
+export const BUILT_IN_PRICES_DATE = "2026-11-15";
 const BUILT_IN: PriceBook = {
   openai: {
+    "gpt-image-2.6-sunburst": { textInput: 5, imageInput: 8, imageOutput: 30 },
+    "gpt-image-2.6-flare": { textInput: 5, imageInput: 8, imageOutput: 30 },
     "gpt-image-2.5-sunburst": { textInput: 5, imageInput: 8, imageOutput: 30 },
     "gpt-image-2.5-flare": { textInput: 5, imageInput: 8, imageOutput: 30 },
     "gpt-image-2": { textInput: 5, imageInput: 8, imageOutput: 30 }
   },
   openaiTokenFactors: {
     "gpt-image-2": { low: 16, medium: 48, high: 96 },
-    "gpt-image-2.5": { low: 16, medium: 24, high: 48, xhigh: 64, max: 96 }
+    "gpt-image-2.5": { low: 16, medium: 24, high: 48, xhigh: 64, max: 96 },
+    "gpt-image-2.6": { low: 16, medium: 24, high: 48, xhigh: 64, max: 96 }
   },
   checkedAt: null,
   problems: []
+};
+/**
+ * OpenAI's calculator multiplies the token count by these values after the
+ * formula, for GPT Image 2.6 only. A quality with no value here uses 1.
+ */
+const OUTPUT_TOKEN_SCALE: Record<string, Record<string, number>> = {
+  "gpt-image-2.6": { low: 4.2, medium: 3.3 }
 };
 
 const CACHE_KEY = "imagesage.price-book";
@@ -129,7 +139,8 @@ export async function refreshPrices(force = false) {
 
 export const priceProblems = () => book.problems;
 
-const familyOf = (model: string) => (model.startsWith("gpt-image-2.5") ? "gpt-image-2.5" : "gpt-image-2");
+const familyOf = (model: string) =>
+  model.startsWith("gpt-image-2.6") ? "gpt-image-2.6" : model.startsWith("gpt-image-2.5") ? "gpt-image-2.5" : "gpt-image-2";
 const ratesFor = (model: string) => book.openai[model] ?? BUILT_IN.openai[model] ?? BUILT_IN.openai["gpt-image-2"];
 /** Each streamed partial image adds 100 output tokens; Image Sage asks for 3. */
 const PARTIAL_IMAGE_TOKENS = 3 * 100;
@@ -145,7 +156,8 @@ export function outputTokens(model: string, quality: string, width: number, heig
   const shorter = factor / (Math.max(width, height) / Math.min(width, height));
   const floor = Math.floor(shorter);
   const rounded = shorter - floor === 0.5 ? floor + (floor % 2) : Math.round(shorter);
-  return Math.ceil((factor * rounded * (2e6 + width * height)) / 4e6);
+  const tokens = Math.ceil((factor * rounded * (2e6 + width * height)) / 4e6);
+  return Math.round(tokens * (OUTPUT_TOKEN_SCALE[familyOf(model)]?.[quality] ?? 1));
 }
 
 /** Estimated cost of one new OpenAI image, including the prompt and streamed previews. */

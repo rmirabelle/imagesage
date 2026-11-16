@@ -4867,11 +4867,11 @@ export function Editor({
   };
   const confirmRegenStep = confirmRegen ? imageDocument.history.find((item) => item.id === confirmRegen.stepId) : undefined;
   /**
-   * Models in the prompt bar: the GPT Image 2.5 models (plus the current one if
-   * it is older), and each local model whose files are set.
+   * Models in the prompt bar: the GPT Image 2.5 and 2.6 models (plus the
+   * current one if it is older), and each local model whose files are set.
    */
   const editModels = [
-    ...IMAGE_MODELS.filter((model) => model.id.startsWith("gpt-image-2.5") || model.id === settings.wholeModel),
+    ...IMAGE_MODELS.filter((model) => model.id.startsWith("gpt-image-2.") || model.id === settings.wholeModel),
     ...LOCAL_MODELS.filter((model) => readyLocalModels.includes(model.id) || model.id === settings.wholeModel)
   ];
 

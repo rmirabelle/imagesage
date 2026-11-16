@@ -5,6 +5,8 @@ describe("pricing", () => {
   it("matches the token counts and prices OpenAI publishes", () => {
     expect(outputTokens("gpt-image-2", "high", 1024, 1024)).toBe(7024);
     expect(outputTokens("gpt-image-2.5-sunburst", "high", 1024, 1024)).toBe(1756);
+    expect(outputTokens("gpt-image-2.6-flare", "low", 1024, 1024)).toBe(823);
+    expect(outputTokens("gpt-image-2.6-sunburst", "high", 1024, 1024)).toBe(1756);
     /** OpenAI's price table: GPT Image 2 is $0.211, $0.165, $0.053, $0.041 for these. */
     expect((outputTokens("gpt-image-2", "high", 1024, 1024) * 30) / 1e6).toBeCloseTo(0.211, 3);
     expect((outputTokens("gpt-image-2", "high", 1536, 1024) * 30) / 1e6).toBeCloseTo(0.165, 3);

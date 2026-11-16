@@ -19,6 +19,8 @@ const BASIC_QUALITIES = ["auto", "low", "medium", "high"];
 const EXTENDED_QUALITIES = [...BASIC_QUALITIES, "xhigh", "max"];
 
 export const IMAGE_MODELS: ImageModel[] = [
+  { id: "gpt-image-2.6-sunburst", label: "GPT Image 2.6 Sunburst", note: "Newest, most detail", qualities: EXTENDED_QUALITIES },
+  { id: "gpt-image-2.6-flare", label: "GPT Image 2.6 Flare", note: "Newest, fast", qualities: EXTENDED_QUALITIES },
   { id: "gpt-image-2.5-sunburst", label: "GPT Image 2.5 Sunburst", note: "Most precise", qualities: EXTENDED_QUALITIES },
   { id: "gpt-image-2.5-flare", label: "GPT Image 2.5 Flare", note: "Fast, high quality", qualities: EXTENDED_QUALITIES },
   { id: "gpt-image-2", label: "GPT Image 2", note: "Previous generation", qualities: BASIC_QUALITIES }
@@ -75,9 +77,9 @@ export interface AiSettings {
 }
 
 export const DEFAULT_AI_SETTINGS: AiSettings = {
-  generateModel: "gpt-image-2.5-sunburst",
+  generateModel: "gpt-image-2.6-sunburst",
   quality: "high",
-  wholeModel: "gpt-image-2.5-sunburst",
+  wholeModel: "gpt-image-2.6-sunburst",
   wholeQuality: "high"
 };
 
