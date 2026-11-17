@@ -26,6 +26,9 @@ const clientLog = {
  * Dev only: `curl http://localhost:14410/__help-shots` tells the dev app
  * window to make the help pictures again (src/help/capture.ts). Add
  * `?only=paint` to make only the pictures whose name starts with "paint".
+ * Pictures named "readme-..." are for README.md: they are made only when
+ * asked for by name, and `&sample=/docs/readme/example-cabin.jpg` uses that
+ * picture as the sample image. Move them from public/help to docs/readme.
  *
  * `curl "http://localhost:14410/__help-preview?chapter=paint-tools&scroll=600"`
  * opens the help window at that chapter and writes a picture of the window
@@ -37,8 +40,8 @@ const helpShots = {
   name: "imagesage-help-shots",
   configureServer(server: import("vite").ViteDevServer) {
     server.middlewares.use("/__help-shots", (request, response) => {
-      const only = new URL(request.url ?? "", "http://localhost").searchParams.get("only") ?? "";
-      server.ws.send({ type: "custom", event: "imagesage:help-shots", data: { only } });
+      const query = new URL(request.url ?? "", "http://localhost").searchParams;
+      server.ws.send({ type: "custom", event: "imagesage:help-shots", data: { only: query.get("only") ?? "", sample: query.get("sample") ?? "" } });
       response.end("The dev app makes the help pictures now. The dev log shows each one.\n");
     });
     server.middlewares.use("/__help-preview", (request, response) => {

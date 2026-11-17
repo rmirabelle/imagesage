@@ -2408,6 +2408,8 @@ select option:disabled { color: #777d8e; }
 
 /* The capture run that makes the help pictures (src/help/capture.ts): no tooltips, and a ring on the part a picture points at. */
 .help-capturing .tooltip { display: none !important; }
+/* Other images that are open do not belong in a picture. */
+.help-capturing .doc-tab:not(.active) { display: none; }
 .help-shot-mark { outline: 2px solid #ffb84d !important; outline-offset: 2px; border-radius: 6px; }
 .help-article ol { margin: 0 0 18px; padding-left: 24px; }
 .help-article ol li { margin-bottom: 4px; padding-left: 4px; }

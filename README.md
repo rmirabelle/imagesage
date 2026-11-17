@@ -1,122 +1,168 @@
-# Image Sage
+<p align="center">
+  <img src="public/app-icon.png" width="112" alt="">
+</p>
 
-An AI image generator and editor for Windows. 
+<h1 align="center">Image Sage</h1>
 
-Image Sage generates an image from a prompt, then lets you edit the generated image using professional-grade tools. Each additional generation becomes its own layer, so you can mask it, adjust it, transform it, regenerate it with a better prompt, delete it, etc.
+<p align="center">
+  <b>Prompt. Refine. Repeat.</b><br>
+  A focused, layer-based editor for generating and editing images with AI, for Windows.
+</p>
 
-The current frontier LLM for image generation is *ChatGPT Seedance 2.5*. No other model comes close.  
+<p align="center">
+  <a href="https://github.com/rmirabelle/imagesage/releases/latest"><img src="https://img.shields.io/github/v/release/rmirabelle/imagesage?label=Download%20for%20Windows&style=for-the-badge&color=4b76f7" alt="Download the latest release for Windows"></a>
+</p>
 
-But even GPT has a weakness:
+<p align="center">
+  <img src="docs/readme/window.jpg" alt="The Image Sage window: an image, its layers, and the prompt bar">
+</p>
 
-## Diminishing Returns
+Image Sage generates and edits images with **OpenAI GPT Image**, and with **Chroma1-HD**, **Qwen-Image** and
+**Wan 2.2** on your own computer. Every result is a layer, so you can mask it, adjust it, transform it,
+regenerate it, or remove it.
 
-You generate an image using GPT. The results are amazing. 
+## Why Image Sage exists
 
-You then ask GPT to edit your image, making an adjustment to one area. This engages GPT in an entirely new way. Your first generation was *text-to-image*. This and future edits are *image-to-image*.
+Image Sage was designed to solve one specific problem: **inpainting**, the editing of one part of an existing
+image.
 
-GPT faithfully adjusts the original image, making the edit you specify, initially with excellent results.
+No current AI image generator does this well. The frontier model, GPT Image 2.6, can modify an existing image
+with excellent results, but it recreates the entire image and merges its edit into the copy. The areas that it
+did not edit are not exact duplicates of the original. Small amounts of color noise appear in them, and the
+noise increases with every edit. GPT can inpaint, but the process is highly lossy.
 
-But there's a problem. 
+Image Sage removes that loss:
 
-If you look carefully, GPT's modified image is returned with brand new subtle artifacts. Color in existing areas of the image becomes "patchy". Previously sharp edges lose definition. Lines lose precision. Noise appears. These are subtle imperfections, but they are additive. Each new generation loses more quality.
+1. **Prompt.** Ask GPT Image for a change. The result arrives as a new layer above the original.
+2. **Refine.** Mask the new layer, so that only the area that was meant to change shows. Everything else comes
+   from the untouched layers below.
+3. **Repeat.** Edit the same image any number of times, with no perceptible loss of quality.
 
-You may consider sending only a portion of your image to GPT (the area you want changed), so it can't screw up existing areas. But this doesn't work either, because it instructs GPT to do "inpainting" instead of generation. GPT doesn't do inpainting well. Without your full image as context, GPT will add elements that are the wrong size, or wrong color, etc.  
+Since then, Image Sage has gained a set of photo editing and video tools, and more are added as the need arises.
 
-Other LLMs that do accurate inpainting, such as FLUX 3, produce amateur results. 
+## Made with Image Sage
 
-So, GPT produces the best quality images, but it doesn't do edits well. What's a designer to do?
-
-Image Sage.
-
----
+<table>
+  <tr>
+    <td><img src="docs/readme/example-fantasy.jpg" alt="Two figures face each other between a bright world and a burning world"></td>
+    <td><img src="docs/readme/example-cabin.jpg" alt="A cabin and a campfire in a forest clearing at night"></td>
+  </tr>
+  <tr>
+    <td><img src="docs/readme/example-desert.jpg" alt="An armored vehicle crosses desert dunes in a sandstorm"></td>
+    <td><img src="docs/readme/example-mountains.jpg" alt="A pencil drawing of hikers on a snow slope above a mountain valley"></td>
+  </tr>
+</table>
 
 ## Features
 
-### Create and edit with AI
+### Generate and edit with AI
 
-- **New from prompt** — Generate a new image using GPT
-- **Local Chroma1-HD (optional)** — make new images on your own computer, free and offline, with Chroma1-HD and your own model files (for example from ComfyUI). Set it up in **Settings → Local**: the engine downloads once, and you can choose the sampler, the scheduler, and the negative prompt. Each image becomes a new layer; edits still use GPT Image.
-- **Local video (optional)** — **Edit → Animate Layer** opens a small video window that makes a short clip (2 to 5 seconds) from the selected layer with Wan 2.2 and your own model files, plays it in a loop, and saves it as a WebM file.
-- **Open** - Choose your own image to start with
-- **Edit the image** - Use professional image editing tools
-- **Send multiple edit generations at once** — send a new edit while others still run. Each one shows a waiting row in the layers list, with its progress and a Cancel button, and becomes a layer when it arrives.
-- **Regenerate with a new prompt** — regenerate a layer, change the prompt in the prompt bar first, and the result replaces that layer in place. It keeps the layer's name, masks, and adjustments. If it fails, the old layer comes back.
-- **Cost estimates** — every edit button shows the estimated price, and the toolbar shows what the image has cost so far.
-- **Monthly spend** — the OpenAI button at the top right shows what Image Sage was charged this month; its tooltip also shows today. Use in other apps is not counted.
+<img align="right" width="360" src="public/help/prompt-controls.png" alt="The model list, the quality list, and the Generate and Regenerate buttons">
+
+Write a prompt, select a model and a quality, and generate. The quality list shows the estimated cost before
+you send, and each result reports its actual charge. Several requests can run at the same time; each one
+appears in the Layers panel with its progress.
+
+**Regenerate** replaces an AI layer with a new result from a better prompt. Image Sage tracks what you spend:
+the title bar shows the month, and each image tab shows that image.
+
+<br clear="both">
 
 ### Layers
 
-- **Each edit is a layer** above the original image. Show, hide, solo (`Ctrl`+click the eye), rename, reorder (drag), duplicate, regenerate, or delete each layer.
-- **Import** an image file as a new layer.
-- **Layer masks** — Paint to mask out existing areas of your image that you want to preserve. This is how you overcome GPTs limitations to make edits look like they were perfectly inpainted without artifacts. `Ctrl`+click a mask to turn it off or on.
-- **Mask tools** — a Show and a Hide brush with size and opacity controls, linear and radial gradients, Click to auto-select the subject, invert, and copy and paste between layers and images. A red view shows where the mask hides.
-- **Blend modes** — Normal, Screen, or Overlay for each layer. Click the blend mode on the layer card to change it.
-- **Transform** — move, scale, and rotate a layer with handles on its bounds (`Shift` turns in 15° steps). The layer's masks move with it.
+<img align="right" width="320" src="public/help/layers-panel.png" alt="The Layers panel with three layers">
+
+Each AI result, imported file, snapshot, and painted layer is separate. Show, hide, rename, reorder,
+duplicate, or delete any of them without effect on the others. A **Snapshot** combines the visible layers
+into a new layer. Each layer has a blend mode: Normal, Screen, or Overlay.
+
+<br clear="both">
+
+### Masks
+
+<img align="right" width="400" src="public/help/mask-toolbar.png" alt="The toolbar of the Mask tool">
+
+A layer mask hides parts of a layer without changing its pixels. Paint it with a soft or precise brush, fill
+a selection, or fade it with a linear or radial gradient. The red view shows the edge of the mask against the
+image. Masks can be turned off, inverted, copied, and pasted between layers.
+
+<br clear="both">
+
+### Selections and paint
+
+<img align="right" width="430" src="public/help/paint-toolbar-gradient.png" alt="The toolbar of the Paint tools with a gradient active">
+
+Select with a rectangle, an ellipse, a polygon lasso, or the Magic wand, and add to or subtract from the
+selection. Paint, erase, fill, and draw gradients directly on a layer. Cut, copy, and paste a selection as a
+new layer. **Transform** moves, scales, and rotates a layer, and never softens it.
+
+<br clear="both">
 
 ### Adjustments
 
-- **Brightness**, **Contrast**, **Blur**, **Hue/Saturation**, and **Opacity**, on any layer, the original image included.
-- **Each adjustment has its own optional mask**, painted or filled with a gradient, so it applies only where you want it.
-- **Several adjustments per layer**, even of the same kind, applied in order. Turn each one off, or all of a layer's adjustments at once. Right-click the adjustments switch to delete them all.
+<img align="right" width="360" src="public/help/adjust-contrast.png" alt="The controls of a Contrast adjustment">
 
-### Documents
+Brightness, Contrast, Hue/Saturation, Opacity, Blur, and Sharpen are non-destructive: each can be edited,
+turned off, or removed at any time. A layer can hold several adjustments, and each adjustment can have a mask
+of its own, so that it applies only where you want it.
 
-- **`.imagesage` documents** keep the original image, every layer, mask, and adjustment, and the prompts. Double-click a document to open it.
-- **Automatic recovery** — two seconds after a change, unsaved work is copied to the app's data folder. After a crash or restart, Image Sage offers to restore it.
-- **Export** the combined image as PNG or JPEG, with an optional largest width and height.
-- **Video slideshow** — export an MP4 (1080p) that shows the original image, then each visible layer fading in with its name. The **Standard** style shows each picture once, in order, with 2-second crossfades and no names or title box.
-- **Tabs** — open several images at once.
+<br clear="both">
 
-### Workspace
+### Local models
 
-- **Zoom and pan** like Photoshop: `Space` + drag pans, `Ctrl` + wheel zooms, and with `Space` held, `Ctrl`+click zooms in and `Ctrl`+`Alt`+click zooms out.
-- **Tooltips** on every control.
-- **API keys stay safe** — the OpenAI key is stored in Windows Credential Manager. All AI calls run in the Rust side of the app; the keys never reach the user interface.
-- **In-app updates** — Image Sage checks GitHub releases and can download and run the new installer.
+<img align="right" width="360" src="public/help/settings-local-engine.png" alt="The Engine group of the Local settings">
 
----
+With an NVIDIA graphics card, Image Sage runs models on your own computer, free and offline. **Chroma1-HD**
+creates new images. **Qwen-Image-2.1** creates new images and edits a layer. Image Sage installs the engine,
+and reads the model files that you already have, for example from ComfyUI.
 
-## Keyboard shortcuts
+<br clear="both">
 
-| Shortcut | Action |
-| --- | --- |
-| `Ctrl+Enter` | Send the edit |
-| `M` | Mask tool: paint the selected mask (a layer without a mask gets one when you paint) |
-| `Ctrl+T` | Transform the selected layer |
-| `Ctrl+J` | Duplicate the selected layer |
-| `Del` | Delete the selected layer (asks first) |
-| `[` / `]` | Smaller / larger brush |
-| `1`–`9`, `0` | Mask brush opacity 10%–90%, 100% |
-| `+` / `-` (number row) | Mask brush opacity up / down by 10% |
-| `X` | Swap the mask brush between Show and Hide |
-| `Alt` (held) | Paint the other of Show and Hide (Mask) |
-| `R` | Show or hide the red mask view |
-| `P` | Switch the mask brush between soft and precise (Mask) |
-| `L` | Polygon lasso on or off (Mask): click corners, then click the first corner, double-click, or press `Enter` to fill |
-| `Ctrl+I` | Invert the selected mask (Mask tool on) |
-| `Ctrl+Z` / `Ctrl+Y` (or `Ctrl+R`) | Undo / redo a mask change |
-| `Esc` | Turn off the Mask tool, or cancel Regenerate |
-| `Enter` / `Esc` | Apply / cancel a Transform |
-| `Ctrl+S` / `Ctrl+Shift+S` | Save / Save As |
-| `Space` + drag | Pan |
-| `Ctrl` + wheel | Zoom around the pointer |
-| `Space` + `Ctrl`+click / `Space` + `Ctrl`+`Alt`+click | Zoom in / out |
+### Video
 
----
+<img align="right" width="340" src="public/help/slideshow-dialog.png" alt="The Export video slideshow dialog">
 
-## Requirements
+**Export Video Slideshow** turns the layers of an image into an MP4 that shows how the image was built, with
+optional music. **Animate Layer** makes a short clip from one layer with Wan 2.2, and **Export Layer Videos**
+does the same for every layer.
 
-- Windows 10 or 11 (64-bit).
-- An **OpenAI API key** for creating and editing images.
-- Optional, for local Chroma: an NVIDIA graphics card (24 GB or more of graphics memory works best) and Chroma1-HD's model files.
+<br clear="both">
 
-Enter the key in **Settings** (the OpenAI button at the top right of the app). When no key is saved, Settings has a link to the OpenAI API keys page.
+### Documents and export
+
+<img align="right" width="320" src="public/help/export-dialog.png" alt="The Export Image dialog">
+
+An `.imagesage` document keeps every layer, mask, adjustment, and prompt. Unsaved work is recovered after an
+unexpected stop. Export the finished image as PNG or JPEG, or export every layer as its own PNG. Several
+images can be open at once, each in a tab.
+
+<br clear="both">
+
+### Help is built in
+
+Press <kbd>F1</kbd> for the illustrated help: fourteen short chapters that cover every tool. The work area
+also shows the shortcuts of the active tool below the image.
 
 ## Install
 
-Download the latest `ImageSage_x.y.z_x64-setup.exe` from the [releases page](https://github.com/rmirabelle/imagesage/releases/latest) and run it. Image Sage installs for the current user only and does not need administrator rights.
+Download the latest `ImageSage_x.y.z_x64-setup.exe` from the
+[releases page](https://github.com/rmirabelle/imagesage/releases/latest) and run it. Image Sage installs for
+the current user only and does not need administrator rights. Later updates install from inside the
+application.
 
----
+### Requirements
+
+- Windows 10 or 11 (64-bit).
+- For GPT Image: an **OpenAI API key**. OpenAI charges your account for each image. Enter the key in
+  **File → Settings**.
+- For local models (optional): an NVIDIA graphics card, 24 GB or more of graphics memory for the best results,
+  and the model files.
+
+### Privacy
+
+The OpenAI key is stored in Windows Credential Manager. All AI requests are made by the native side of the
+application, and the key never reaches the user interface. Image Sage has no account and no telemetry; it
+contacts OpenAI for your requests and for prices, and GitHub for updates and the optional downloads.
 
 ## Development
 
@@ -125,10 +171,9 @@ npm install
 npm run tauri dev
 ```
 
-- `npm test` runs the unit tests (GPT Image size rules, prices, layers, adjustments, the slideshow, and the document format).
+- `npm test` runs the unit tests; `cargo test` in `src-tauri` runs the Rust tests.
 - `.\kill-dev.ps1` stops the dev app and frees the Vite port (14410).
-- All AI HTTP calls live in Rust: `src-tauri/src/openai.rs`.
-- GPT Image size rules live in `src/editor/region.ts`, free of DOM code.
-- Click to select runs locally with SAM 2.1 (`src-tauri/src/sam.rs`); the app downloads the model on first use.
+- All AI HTTP calls live in Rust: `src-tauri/src/openai.rs` (GPT Image) and `src-tauri/src/local.rs` (local models).
+- The help chapters are in `src/help/chapters`. The dev app makes their pictures by itself; see `AGENTS.md`.
 
-Releases follow [docs/RELEASING.md](docs/RELEASING.md): `set-version.ps1`, a local installer build that is checked by hand, then `publish.ps1`.
+Releases follow [docs/RELEASING.md](docs/RELEASING.md): `set-version.ps1`, then `publish.ps1`.

@@ -887,7 +887,7 @@ export default function App() {
    * Dev only: makes the help pictures (src/help/capture.ts). The run opens a
    * sample image in a new tab and closes it again; other open images stay.
    */
-  const captureHelp = useCallback(async (only?: string) => {
+  const captureHelp = useCallback(async (only?: string, sample?: string) => {
     if (!import.meta.env.DEV || !isTauri()) return;
     const { captureHelpShots, sampleImage } = await import("./help/capture");
     const sampleId = "help-sample";
@@ -900,8 +900,9 @@ export default function App() {
           name: "Sunset.imagesage",
           path: null,
           createdAt: new Date().toISOString(),
-          origin: { kind: "imported", fileName: "Sunset.png" },
-          surface: sampleImage(),
+          origin: { kind: "imported", fileName: sample ? "Cabin.png" : "Sunset.png" },
+          /** `sample` is a picture in the project folder, which the dev server serves by its path. */
+          surface: sample ? await canvasFromDataUrl(sample) : sampleImage(),
           history: [],
           historyIndex: 0,
           startsDirty: false
@@ -915,7 +916,7 @@ export default function App() {
   useEffect(() => {
     const hot = import.meta.hot;
     if (!hot || !isTauri()) return;
-    const run = (data: { only?: string }) => void captureHelp(data?.only || undefined);
+    const run = (data: { only?: string; sample?: string }) => void captureHelp(data?.only || undefined, data?.sample || undefined);
     /** The layout check (see vite.config.ts) needs the help window open at the chapter. */
     const preview = (data: { chapter?: string }) => void invoke("help_open", { chapter: data?.chapter || null, quiet: true }).catch(() => {});
     hot.on("imagesage:help-shots", run);

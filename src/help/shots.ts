@@ -134,6 +134,9 @@ export const SHOTS: Shot[] = [
     cleanup: (page) => page.press(".about-dialog-close")
   },
 
+  // For README.md; see vite.config.ts
+  { name: "readme-window", needs: "image", setup: (page) => page.select(toolButton("Select")), target: ".app-shell", margin: 0 },
+
   // The window, with the sample image
   { name: "window-overview", needs: "image", setup: (page) => page.select(toolButton("Select")), target: ".app-shell", margin: 0 },
   { name: "prompt-controls", needs: "image", target: ".prompt-controls", margin: 10 },

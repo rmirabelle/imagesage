@@ -179,7 +179,8 @@ export async function captureHelpShots(stage: Stage, log: (message: string) => v
   let made = 0;
   let failed = 0;
   const count = (ok: boolean) => { if (ok) made += 1; else failed += 1; };
-  const wanted = SHOTS.filter((shot) => !only || shot.name.startsWith(only));
+  /** Pictures for README.md ("readme-...") are made only when asked for by name; the app does not ship them. */
+  const wanted = SHOTS.filter((shot) => only ? shot.name.startsWith(only) : !shot.name.startsWith("readme-"));
   try {
     /** Every run draws the page at one size, so the pictures do not depend on the screen. The window itself does not change or take the focus. */
     await invoke("help_stage", { on: true });
@@ -195,13 +196,29 @@ export async function captureHelpShots(stage: Stage, log: (message: string) => v
 
     const withImage = wanted.filter((shot) => shot.needs === "image");
     if (withImage.length) {
-      await stage.openSample();
+      /** The Layers panel has its standard width and is open, whatever the user set; the user's own values come back after the run. */
+      const panelKeys = ["imagesage.steps-width", "imagesage.steps-collapsed"];
+      const panelBefore = panelKeys.map((key) => localStorage.getItem(key));
+      localStorage.setItem(panelKeys[0], "300");
+      localStorage.setItem(panelKeys[1], "0");
+      const restorePanel = () => panelKeys.forEach((key, index) => {
+        const value = panelBefore[index];
+        if (value === null) localStorage.removeItem(key);
+        else localStorage.setItem(key, value);
+      });
+      try {
+        await stage.openSample();
+      } catch (error) {
+        restorePanel();
+        throw error;
+      }
       await page.waitFor(".editor-toolbar");
       await page.settle(500);
       try {
         for (const shot of withImage) count(await takeShot(shot, log));
       } finally {
         stage.closeSample();
+        restorePanel();
       }
     }
   } catch (error) {
