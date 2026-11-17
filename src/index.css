@@ -2354,3 +2354,60 @@ select option:disabled { color: #777d8e; }
 .music-playhead { position: absolute; top: 0; bottom: 0; width: 2px; margin-left: -1px; background: #ffffff; pointer-events: none; }
 .music-picker-info { display: flex; align-items: center; gap: 10px; color: #9298a7; font-size: 11px; font-variant-numeric: tabular-nums; }
 .music-picker-info .music-play { min-height: 26px; padding: 0 10px; gap: 5px; font-size: 11px; }
+
+/**
+ * The help window: the chapter list at the left, the chapter at the right.
+ * The text reads like a book page: pictures sit in the text, and the text
+ * flows around them.
+ */
+.help-layout { flex: 1; min-height: 0; display: flex; }
+.help-nav { flex: 0 0 210px; display: flex; flex-direction: column; gap: 2px; padding: 14px 8px; overflow-y: auto; border-right: 1px solid var(--border); background: #1f222b; }
+.help-nav button { display: flex; align-items: center; gap: 9px; padding: 7px 10px; border-radius: 6px; color: #b9bdc9; background: transparent; font-size: 12.5px; text-align: left; cursor: default; }
+.help-nav button:hover { color: #f1f2f4; background: rgba(255,255,255,.06); }
+.help-nav button.active { color: #ffffff; background: rgba(75,118,247,.28); }
+.help-nav-number { flex: 0 0 18px; color: #7f8595; font-size: 11px; font-variant-numeric: tabular-nums; text-align: right; }
+.help-nav button.active .help-nav-number { color: var(--secondary); }
+.help-page { flex: 1; min-width: 0; overflow-y: auto; }
+.help-article { max-width: 720px; margin: 0 auto; padding: 30px 40px 40px; color: #d3d6de; font-size: 14.5px; line-height: 1.65; user-select: text; cursor: auto; }
+.help-article h1 { margin: 0 0 10px; color: #ffffff; font-size: 28px; font-weight: 800; letter-spacing: -.01em; line-height: 1.2; }
+.help-article h2 { clear: both; margin: 0 0 8px; padding-top: 26px; color: var(--secondary); font-size: 18px; font-weight: 750; line-height: 1.3; }
+.help-article p { margin: 0 0 18px; }
+.help-article b { color: #f4f5f8; font-weight: 650; }
+.help-lead { color: #e8eaf0; font-size: 16.5px; line-height: 1.55; }
+
+/* Pictures. Each one has a thin frame, so a dark picture stands out from the dark page. */
+.help-shot { margin: 0; }
+.help-shot img { display: block; max-width: 100%; height: auto; border: 1px solid #4a5066; border-radius: 7px; box-shadow: 0 6px 22px rgba(0,0,0,.4); user-select: none; }
+.help-shot.right { float: right; clear: right; max-width: 55%; margin: 4px 0 12px 22px; }
+.help-shot.left { float: left; clear: left; max-width: 55%; margin: 4px 22px 12px 0; }
+.help-shot.block { clear: both; margin: 6px 0 16px; }
+.help-shot.block img { margin: 0 auto; }
+.help-shot.inline { display: inline-block; margin: -5px 1px; vertical-align: middle; }
+/* A picture in a sentence is as tall as the text line, so the lines keep their distance. */
+.help-shot.inline img { height: 26px; width: auto; border-radius: 5px; box-shadow: none; }
+.help-shot figcaption { margin-top: 6px; color: #8c91a1; font-size: 12px; line-height: 1.4; text-align: center; }
+.help-shot-missing { display: inline-block; padding: 6px 10px; border: 1px dashed #6a7087; border-radius: 6px; color: #8c91a1; font: 11px/1.4 "Cascadia Mono", Consolas, monospace; }
+.help-shot-missing.right { float: right; margin: 4px 0 12px 22px; }
+.help-shot-missing.left { float: left; margin: 4px 22px 12px 0; }
+.help-shot-missing.block { display: block; margin: 6px 0 16px; text-align: center; }
+
+.help-keys { white-space: nowrap; }
+.help-keys i { margin: 0 2px; color: #7f8595; font-style: normal; }
+.help-article kbd { display: inline-block; min-width: 22px; padding: 0 6px; border: 1px solid #5a6074; border-bottom-width: 2px; border-radius: 4px; color: #a9ddf8; background: #1d2029; font: 600 11.5px/1.6 "Cascadia Mono", Consolas, monospace; text-align: center; vertical-align: 1px; }
+.help-menu-path { white-space: nowrap; }
+.help-menu-path i { margin: 0 5px; color: #7f8595; font-style: normal; }
+.help-tip { clear: both; margin: 24px 0; padding: 10px 14px; border-left: 3px solid var(--accent); border-radius: 0 6px 6px 0; color: #dfe2ea; background: rgba(75,118,247,.12); font-size: 13.5px; }
+.help-shortcuts { clear: both; display: grid; grid-template-columns: max-content 1fr; gap: 7px 18px; margin: 0; }
+.help-shortcuts > div { display: contents; }
+.help-shortcuts dt { white-space: nowrap; }
+.help-shortcuts dt > span > i { margin: 0 5px; color: #7f8595; font-style: normal; }
+.help-shortcuts dd { margin: 0; }
+.help-turn { clear: both; display: flex; justify-content: space-between; gap: 12px; margin-top: 34px; padding-top: 16px; border-top: 1px solid var(--border); }
+.help-turn button { padding: 6px 10px; border-radius: 6px; color: var(--secondary); background: transparent; font-size: 13px; cursor: default; }
+.help-turn button:hover { color: #ffffff; background: rgba(255,255,255,.07); }
+
+/* The capture run that makes the help pictures (src/help/capture.ts): no tooltips, and a ring on the part a picture points at. */
+.help-capturing .tooltip { display: none !important; }
+.help-shot-mark { outline: 2px solid #ffb84d !important; outline-offset: 2px; border-radius: 6px; }
+.help-article ol { margin: 0 0 18px; padding-left: 24px; }
+.help-article ol li { margin-bottom: 4px; padding-left: 4px; }

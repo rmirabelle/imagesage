@@ -53,3 +53,11 @@
   (`npm test`). Keep them free of DOM code.
 - In managed Codex sessions, prefer process-local Git `safe.directory` variables
   documented in `docs/RELEASING.md`; never alter the user's global Git config.
+- Help → Image Sage Help (F1) opens the help window (`src-tauri/src/help.rs`,
+  `src/components/HelpWindow.tsx`). Chapters are in `src/help/chapters/`; add
+  each one to `src/help/chapters.ts`. The pictures in `public/help/` are not
+  made by hand: add a shot to `src/help/shots.ts`, then, with the dev app
+  open, run `curl http://localhost:14410/__help-shots`. The dev app drives
+  itself and writes the pictures. Run it again after a UI change. Keep each
+  shot cropped to the part the text discusses, so the text can flow around it.
+  `vite.config.ts` describes `__help-preview`, which checks a chapter's layout.

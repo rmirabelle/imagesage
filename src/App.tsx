@@ -3,7 +3,7 @@ import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { open, save } from "@tauri-apps/plugin-dialog";
-import { ArrowClockwise, ArrowCounterClockwise, ArrowsOut, Camera, CheckCircle, CornersOut, DownloadSimple, FilePlus, FilmStrip, FloppyDisk, FolderOpen, GearSix, ImageSquare, Info, Keyboard, SpinnerGap, Stack, VideoCamera, Warning, WarningCircle, X } from "@phosphor-icons/react";
+import { ArrowClockwise, ArrowCounterClockwise, ArrowsOut, Camera, CheckCircle, CornersOut, DownloadSimple, FilePlus, FilmStrip, FloppyDisk, FolderOpen, GearSix, ImageSquare, Info, Keyboard, Question, SpinnerGap, Stack, VideoCamera, Warning, WarningCircle, X } from "@phosphor-icons/react";
 import { AboutDialog } from "./components/AboutDialog";
 import { ShortcutsDialog } from "./components/ShortcutsDialog";
 import { ConnectDialog, type SettingsSection } from "./components/ConnectDialog";
@@ -867,6 +867,65 @@ export default function App() {
     return () => { delete devWindow.imagesageDevOpen; };
   }, [addDocument]);
 
+  const openHelp = useCallback(() => {
+    void invoke("help_open", {}).catch((error) => showNotice({ tone: "error", message: String(error) }));
+  }, [showNotice]);
+
+  /** F1 opens the help window. */
+  useEffect(() => {
+    if (!isTauri()) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "F1") return;
+      event.preventDefault();
+      openHelp();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [openHelp]);
+
+  /**
+   * Dev only: makes the help pictures (src/help/capture.ts). The run opens a
+   * sample image in a new tab and closes it again; other open images stay.
+   */
+  const captureHelp = useCallback(async (only?: string) => {
+    if (!import.meta.env.DEV || !isTauri()) return;
+    const { captureHelpShots, sampleImage } = await import("./help/capture");
+    const sampleId = "help-sample";
+    const log = (message: string) => import.meta.hot?.send("imagesage:log", { message });
+    const result = await captureHelpShots({
+      isEmpty: () => documentsRef.current.length === 0,
+      openSample: async () => {
+        addDocument({
+          id: sampleId,
+          name: "Sunset.imagesage",
+          path: null,
+          createdAt: new Date().toISOString(),
+          origin: { kind: "imported", fileName: "Sunset.png" },
+          surface: sampleImage(),
+          history: [],
+          historyIndex: 0,
+          startsDirty: false
+        });
+      },
+      closeSample: () => removeDocument(sampleId)
+    }, log, only);
+    showNotice({ tone: result.failed ? "error" : "success", message: `Help pictures: ${result.made} made, ${result.failed} failed. The dev log shows each one.` });
+  }, [addDocument, removeDocument, showNotice]);
+
+  useEffect(() => {
+    const hot = import.meta.hot;
+    if (!hot || !isTauri()) return;
+    const run = (data: { only?: string }) => void captureHelp(data?.only || undefined);
+    /** The layout check (see vite.config.ts) needs the help window open at the chapter. */
+    const preview = (data: { chapter?: string }) => void invoke("help_open", { chapter: data?.chapter || null, quiet: true }).catch(() => {});
+    hot.on("imagesage:help-shots", run);
+    hot.on("imagesage:help-preview", preview);
+    return () => {
+      hot.off("imagesage:help-shots", run);
+      hot.off("imagesage:help-preview", preview);
+    };
+  }, [captureHelp]);
+
   const openConnect = useCallback(() => setConnectSection("new"), []);
   const openLocalSettings = useCallback(() => setConnectSection("local"), []);
   const dirtyCount = documents.filter(isDocumentDirty).length;
@@ -915,8 +974,11 @@ export default function App() {
       id: "help",
       label: "Help",
       items: [
+        { label: "Image Sage Help", icon: <Question size={15} />, shortcut: "F1", run: openHelp },
         { label: "Keyboard shortcuts", icon: <Keyboard size={15} />, run: () => setShortcutsOpen(true) },
-        { label: "About Image Sage", icon: <Info size={15} />, run: () => setAboutOpen(true) }
+        "separator",
+        { label: "About Image Sage", icon: <Info size={15} />, run: () => setAboutOpen(true) },
+        ...(import.meta.env.DEV ? ["separator" as const, { label: "Capture Help Pictures", icon: <Camera size={15} />, run: () => void captureHelp() }] : [])
       ]
     }
   ];

@@ -20,6 +20,9 @@ lasso-poly.zip
 /*.jpg
 /*.jpeg
 
+# The help layout check (see vite.config.ts)
+/public/help/preview.png
+
 # Slideshow music tried in dev builds; published tracks live in music-* releases
 /music/
 

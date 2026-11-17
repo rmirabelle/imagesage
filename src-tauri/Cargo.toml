@@ -1,6 +1,6 @@
 [package]
 name = "imagesage"
-version = "0.16.0"
+version = "0.17.0"
 description = "Generate images with OpenAI and refine them one region at a time"
 authors = ["Rob Mirabelle"]
 edition = "2021"
@@ -31,6 +31,8 @@ sha2 = "0.10"
 
 [target.'cfg(windows)'.dependencies]
 tauri-plugin-single-instance = "2"
+# Dev builds call the webview directly to make the help pictures (src/help.rs); Tauri already uses this crate.
+webview2-com = "0.39"
 windows = { version = "0.61.3", features = [
   "Win32_Foundation",
   "Win32_System_DataExchange",

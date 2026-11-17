@@ -2,6 +2,7 @@ mod browse;
 mod credentials;
 mod document;
 mod files;
+mod help;
 mod local;
 mod openai;
 mod pricing;
@@ -103,7 +104,10 @@ pub fn run() {
                 return;
             }
             match window.label() {
-                "main" => video::main_window_closed(window.app_handle()),
+                "main" => {
+                    help::main_window_closed(window.app_handle());
+                    video::main_window_closed(window.app_handle());
+                }
                 video::WINDOW => video::discard_clip(window.app_handle()),
                 _ => {}
             }
@@ -144,6 +148,9 @@ pub fn run() {
             video::video_take_source,
             video::video_read,
             video::video_save,
+            help::help_open,
+            help::help_capture,
+            help::help_stage,
             pricing::fetch_prices,
             spend::spend_record,
             recovery::recovery_save,
