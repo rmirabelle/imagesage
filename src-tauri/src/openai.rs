@@ -233,6 +233,8 @@ where
         return Ok(AiImage {
             data_url: png_data_url(&b64),
             usage: value.get("usage").cloned(),
+            seed: None,
+            recipe: None,
         });
     }
 
@@ -266,6 +268,8 @@ where
                     return Ok(AiImage {
                         data_url: png_data_url(&b64),
                         usage,
+                        seed: None,
+                        recipe: None,
                     });
                 }
                 StreamEvent::Failed(message) => {
@@ -368,6 +372,8 @@ where
             Ok(AiImage {
                 data_url: solid_png(&size, [120, 120, 120])?,
                 usage: None,
+                seed: None,
+                recipe: None,
             })
         }
     }

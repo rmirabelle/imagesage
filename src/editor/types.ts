@@ -89,10 +89,43 @@ export interface EditStep {
   /** The node this step was made from (0 is the original image, n is history[n - 1]); absent means the previous step. */
   parent?: number;
   cost?: number;
+  /** The local engine's seed for the layer; the same seed and prompt make the same image again. */
+  seed?: number;
+  /** A local layer's full settings, so it can be inspected and made again; GPT Image layers have none. */
+  recipe?: LocalRecipe;
   /** The area the tiles cover when it is not the selection square; a whole-image edit covers the whole image. */
   area?: Rect;
   /** The layer before its transforms, so Transform can bring back pixels moved past the image edge. */
   transformSource?: TransformSource;
+}
+
+/**
+ * Everything the local engine used to make a layer, read from its job
+ * request: the engine build, the model files, the LoRAs, the exact prompts
+ * (the positive prompt includes the model's prompt start), the seed, the
+ * sampling settings and the size it made. `edit` means the job edited the
+ * layer below instead of making a new image. `flowShift` null is the
+ * engine's own shift for the size.
+ */
+export interface LocalRecipe {
+  engine: string;
+  model: string;
+  /** The model's id, such as "chroma1-hd"; recipes saved before Use These Settings have none. */
+  modelId?: string;
+  files: { diffusionModel: string; textEncoder: string; vae: string };
+  loras: { file: string; strength: number; highNoise?: boolean }[];
+  prompt: string;
+  negativePrompt: string;
+  seed: number;
+  sampler: string;
+  scheduler: string;
+  steps: number;
+  cfgScale: number;
+  flowShift: number | null;
+  modelArgs: string | null;
+  width: number;
+  height: number;
+  edit: boolean;
 }
 
 /**

@@ -60,6 +60,7 @@ export type PartAction =
   | "resize"
   | "duplicate"
   | "make-video"
+  | "inspect"
   | "click-select"
   | "wand-select"
   | "select-pixels"
@@ -1209,6 +1210,7 @@ Click to show its progress on the image.`}>
             {step && plain(<CornersOut size={15} />, <>Transform <small>Ctrl+T</small></>, () => onPartAction(menu.node, "mask", "resize"))}
             {step && plain(<Copy size={15} />, <>Duplicate <small>Ctrl+J</small></>, () => onPartAction(menu.node, "mask", "duplicate"))}
             {step && plain(<FilmStrip size={15} />, "Make Video…", () => onPartAction(menu.node, "mask", "make-video"))}
+            {step && plain(<MagnifyingGlass size={15} />, "Inspect…", () => onPartAction(menu.node, "mask", "inspect"))}
             {step && plain(<Trash size={15} />, <>Delete <small>Del</small></>, () => onDelete(menu.node), true)}
           </div>
         );

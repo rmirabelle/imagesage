@@ -1,3 +1,4 @@
+import { parseRecipe } from "./recipe";
 import type { Adjustment, DocumentOrigin, EditStep, LayerAdjust, MaskImage, MaskStroke, SentRegion, SquareSelection, TransformSource } from "./types";
 
 export const IMAGESAGE_DOCUMENT_FORMAT = "imagesage-document";
@@ -277,7 +278,9 @@ const parseStep = (value: unknown): ManifestStep => {
         }
       }
       : {}),
-    ...optionalCost(value)
+    ...optionalCost(value),
+    ...(typeof value.seed === "number" && Number.isInteger(value.seed) && value.seed >= 0 ? { seed: value.seed } : {}),
+    ...(parseRecipe(value.recipe) ? { recipe: parseRecipe(value.recipe)! } : {})
   };
 };
 

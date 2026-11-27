@@ -69,6 +69,46 @@ export function LocalModels() {
         Proportions beyond 4:1 are not supported.
       </p>
 
+      <h2>Make a similar image</h2>
+      <p>
+        Each local image starts from random noise, so the same prompt gives a different image each time. The
+        <i> seed</i> sets that noise, and Image Sage keeps the seed of each layer that a local model makes.
+        Select such a layer and turn on <b>Same seed</b> in the prompt bar: the next image uses the seed of
+        that layer. With the same prompt and model options, the result is the same image. A small change to
+        the prompt or the LoRA gives an image close to the first.
+      </p>
+      <p>
+        Layers made by earlier versions of Image Sage have no saved seed, so <b>Same seed</b> is not
+        available for them.
+      </p>
+
+      <h2>Inspect a layer's settings</h2>
+      <p>
+        Each layer that a local model makes keeps every setting of its job: the positive prompt as sent
+        (with the prompt start), the negative prompt, the seed, the sampler, the scheduler, the steps, the
+        CFG scale, the resolution and aspect ratio, each LoRA with its strength, the model files and the
+        engine release. Select the layer and open <MenuPath path="Edit > Inspect Layer" />, or right-click the
+        layer and choose <b>Inspect</b>. <b>Copy Text</b> and <b>Copy JSON</b> put all of the settings on
+        the clipboard. With the same model files and engine, these settings make the same image again.
+      </p>
+      <p>
+        <b>Use These Settings</b> sets up the prompt bar to make the image again: it selects the model and
+        puts the exact positive prompt in the prompt box. In place of the quality list, the prompt bar then
+        shows <b>Saved settings</b> with the seed. The next local images use the saved model files, LoRAs,
+        negative prompt, seed and sampling settings in place of those in Settings → Local; your own settings
+        do not change. Change the prompt to make a close variation. Click <b>×</b> on the chip, or pick
+        another model, to go back to your own settings.
+      </p>
+      <p>
+        <MenuPath path="Edit > Use Settings From JSON" /> does the same with settings that Copy JSON made, for
+        example in another document. Each model file and LoRA must be on this computer at the saved path.
+        The saved size must have the shape of the image; for another shape, make a new image of that size first.
+      </p>
+      <p>
+        GPT Image does not report a seed or its sampling settings, so for its layers the dialog shows the
+        prompt, the model, the quality and the size only.
+      </p>
+
       <h2>Model options</h2>
       <p>
         Each image model has a <b>Sampler</b> and a <b>Scheduler</b>, with the recommended scheduler marked.

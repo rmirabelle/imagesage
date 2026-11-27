@@ -144,6 +144,10 @@ export interface AiProgress {
 export interface AiImage {
   dataUrl: string;
   usage: unknown;
+  /** The local engine's seed for the image; GPT Image has none. */
+  seed: number | null;
+  /** The local engine's full settings for the image; GPT Image has none. */
+  recipe: unknown;
 }
 
 export interface GeneratePayload {
@@ -151,6 +155,10 @@ export interface GeneratePayload {
   model: string;
   quality: string;
   size: string;
+  /** Local models only: an earlier image's seed, to make a similar image; absent picks a new seed. */
+  seed?: number;
+  /** Local models only: a layer's saved settings, used in place of Settings → Local for this job. */
+  recipe?: unknown;
 }
 
 
@@ -180,7 +188,7 @@ export async function runWithProgress<T = AiImage>(
 /** A new image from a prompt, with GPT Image or, for a local model, the local engine. */
 export const generateImage = (requestId: string, payload: GeneratePayload, onProgress: (progress: AiProgress) => void) =>
   isLocalModel(payload.model)
-    ? runWithProgress("local_generate", requestId, { model: payload.model, prompt: payload.prompt, quality: payload.quality, size: payload.size }, onProgress)
+    ? runWithProgress("local_generate", requestId, { model: payload.model, prompt: payload.prompt, quality: payload.quality, size: payload.size, seed: payload.seed, recipe: payload.recipe }, onProgress)
     : runWithProgress("ai_generate", requestId, payload, onProgress);
 
 /**
@@ -189,7 +197,7 @@ export const generateImage = (requestId: string, payload: GeneratePayload, onPro
  */
 export const editWholeImage = (requestId: string, payload: WholeEditPayload, onProgress: (progress: AiProgress) => void) =>
   isLocalModel(payload.model)
-    ? runWithProgress("local_generate", requestId, { model: payload.model, prompt: payload.prompt, quality: payload.quality, size: payload.size, image: payload.imagePng }, onProgress)
+    ? runWithProgress("local_generate", requestId, { model: payload.model, prompt: payload.prompt, quality: payload.quality, size: payload.size, image: payload.imagePng, seed: payload.seed, recipe: payload.recipe }, onProgress)
     : runWithProgress("ai_edit_whole", requestId, payload, onProgress);
 
 /**

@@ -59,8 +59,11 @@ import {
   wholeImageSize
 } from "../editor/region";
 import { localImageSize } from "../editor/localSize";
+import { layerSettings, parseRecipe, sameShape, type LayerSettings } from "../editor/recipe";
+import { InspectLayerDialog } from "./InspectLayerDialog";
+import { PasteSettingsDialog } from "./PasteSettingsDialog";
 import { CLIP_QUALITIES, CLIP_SOURCE_PIXELS, clipSize } from "../editor/clipSize";
-import type { Adjustment, BlendMode, EditStep, LayerAdjust, LayerPart, MaskImage, Point, Rect, SentRegion, TransformSource } from "../editor/types";
+import type { Adjustment, BlendMode, EditStep, LayerAdjust, LayerPart, LocalRecipe, MaskImage, Point, Rect, SentRegion, TransformSource } from "../editor/types";
 import {
   CANCELLED_MESSAGE,
   canAbort,
@@ -69,6 +72,7 @@ import {
   isLocalModel,
   jobCanCancel,
   localEdits,
+  modelLabel,
   LOCAL_MODELS,
   LOCAL_STEPS,
   editWholeImage,
@@ -650,7 +654,7 @@ export type LayerExport = { name: string; render: () => Promise<string> };
  * `documentId`. `nonce` changes each time, so the same command can run again,
  * and an editor runs each nonce only once.
  */
-export type EditorCommand = { name: "export-image" | "export-video" | "export-layers" | "export-layer-videos" | "import-image" | "undo" | "redo" | "snapshot" | "animate-layer" | "canvas-size" | "image-size"; documentId: string; nonce: number };
+export type EditorCommand = { name: "export-image" | "export-video" | "export-layers" | "export-layer-videos" | "import-image" | "undo" | "redo" | "snapshot" | "animate-layer" | "inspect-layer" | "paste-settings" | "canvas-size" | "image-size"; documentId: string; nonce: number };
 
 /** Ctrl+wheel zoom: the scale changes by exp(-deltaY × this); one wheel notch (100) is about 5%. */
 const WHEEL_ZOOM_RATE = 0.0005;
@@ -786,6 +790,8 @@ export function Editor({
   const [exportDialogOpen, setExportDialogOpen] = useState(false);
   /** The Canvas Size or Image Size dialog that is open, or null. */
   const [canvasDialog, setCanvasDialog] = useState<"canvas" | "image" | null>(null);
+  /** Edit → Inspect Layer: the settings of one layer, shown in a dialog. */
+  const [inspected, setInspected] = useState<{ name: string; settings: LayerSettings } | null>(null);
   /** The layer waiting for the user to confirm Delete. */
   const [confirmDelete, setConfirmDelete] = useState<number[] | null>(null);
   /**
@@ -1010,6 +1016,16 @@ export function Editor({
   const localChosen = isLocalModel(settings.wholeModel);
   const wholeSize = localChosen ? localImageSize(width, height) : wholeImageSize(width, height);
   const lastStep = imageDocument.historyIndex > 0 ? imageDocument.history[imageDocument.historyIndex - 1] : null;
+  /** With a local model, the next image uses the selected layer's seed, so it comes out like that layer. */
+  const [sameSeed, setSameSeed] = useState(false);
+  /**
+   * Use These Settings: a layer's saved settings (or pasted JSON) that the
+   * next local images use in place of Settings → Local, until the user
+   * clears them or picks another model. `from` names where they came from.
+   */
+  const [savedSettings, setSavedSettings] = useState<{ recipe: LocalRecipe; from: string } | null>(null);
+  const [pasteSettingsOpen, setPasteSettingsOpen] = useState(false);
+  const selectedSeed = lastStep?.seed;
   /** The selected layer's adjustments; the original image keeps its own on the document. */
   const selectedAdjust = lastStep ? lastStep.adjust : imageDocument.baseAdjust;
   /**
@@ -1632,14 +1648,21 @@ export function Editor({
     const model = choice?.model ?? settings.wholeModel;
     const quality = choice?.quality ?? settings.wholeQuality;
     const local = isLocalModel(model);
-    if (local ? !readyLocalModels.includes(model) : !openaiConnected) {
+    /** Saved settings bring their own model files, so the model's files in Settings → Local need not be set. */
+    const recipe = !choice && savedSettings?.recipe.modelId === model ? savedSettings.recipe : undefined;
+    if (local ? !recipe && !readyLocalModels.includes(model) : !openaiConnected) {
       if (local) onRequestLocalSettings();
       else onRequestOpenAiSettings();
       return;
     }
     const imageWidth = current.surface.width;
     const imageHeight = current.surface.height;
-    const size = local ? localImageSize(imageWidth, imageHeight) : wholeImageSize(imageWidth, imageHeight);
+    if (recipe && !sameShape(recipe.width, recipe.height, imageWidth, imageHeight)) {
+      onNotice({ tone: "error", message: `These settings make a ${recipe.width} × ${recipe.height} image, which has another shape than this image. Open File → New Image at that size, then use the settings there.` });
+      return;
+    }
+    /** Saved settings make their own size; the result is scaled to the image, as every local image is. */
+    const size = recipe ? { width: recipe.width, height: recipe.height } : local ? localImageSize(imageWidth, imageHeight) : wholeImageSize(imageWidth, imageHeight);
     if (!size) {
       onNotice({ tone: "error", message: local ? "A local model cannot make an image wider or taller than 4:1." : "GPT Image cannot edit an image wider or taller than 3:1." });
       return;
@@ -1669,9 +1692,11 @@ export function Editor({
           partialDataUrl: progress.partialDataUrl ?? existing.partialDataUrl
         }));
       };
+      const selected = current.historyIndex > 0 ? current.history[current.historyIndex - 1] : null;
+      const seed = recipe ? recipe.seed : local && sameSeed && selected?.seed !== undefined ? selected.seed : undefined;
       const result = generate
-        ? await generateImage(requestId, { prompt: instruction.trim(), model, quality, size: sizeText }, onProgress)
-        : await editWholeImage(requestId, { prompt: instruction.trim(), model, quality, size: sizeText, imagePng: await buildWholeUpload(work, size.width, size.height) }, onProgress);
+        ? await generateImage(requestId, { prompt: instruction.trim(), model, quality, size: sizeText, seed, recipe }, onProgress)
+        : await editWholeImage(requestId, { prompt: instruction.trim(), model, quality, size: sizeText, seed, recipe, imagePng: await buildWholeUpload(work, size.width, size.height) }, onProgress);
       const resultImage = await loadImage(result.dataUrl);
       const workContext = context2d(work);
       workContext.imageSmoothingEnabled = true;
@@ -1692,6 +1717,8 @@ export function Editor({
         sent,
         layer: await canvasToDataUrl(work),
         ...(cost !== null ? { cost } : {}),
+        ...(typeof result.seed === "number" ? { seed: result.seed } : {}),
+        ...(parseRecipe(result.recipe) ? { recipe: parseRecipe(result.recipe)! } : {}),
         ...(hiddenJobsRef.current.has(requestId) ? { hidden: true } : {}),
         /** The first image in an empty document is its original. */
         ...(!replaceId && documentRef.current.base === "" && !documentRef.current.history.length ? { name: ORIGINAL_LAYER_NAME } : {})
@@ -1711,7 +1738,7 @@ export function Editor({
     } finally {
       endJob(current.id, requestId);
     }
-  }, [appendStep, endJob, readyLocalModels, videoExportRunning, onCommit, onNotice, onRequestLocalSettings, onRequestOpenAiSettings, openaiConnected, settings, startJob, undoReplace, updateJob]);
+  }, [appendStep, endJob, readyLocalModels, videoExportRunning, onCommit, onNotice, onRequestLocalSettings, onRequestOpenAiSettings, openaiConnected, sameSeed, savedSettings, settings, startJob, undoReplace, updateJob]);
 
   /** A new image from a prompt: generate it once, as the first layer, when the tab opens. */
   const startedGenerationRef = useRef(false);
@@ -2042,6 +2069,38 @@ export function Editor({
     } catch (error) {
       onNotice({ tone: "error", message: `Could not open the video window: ${error instanceof Error ? error.message : String(error)}` });
     }
+  };
+
+  /** Edit → Inspect Layer, or Inspect in a layer's right-click menu: every setting that made the layer. `node` none means the selected layer. */
+  const inspectLayer = (node?: number) => {
+    const doc = documentRef.current;
+    const layerNode = node ?? doc.historyIndex;
+    const step = layerNode > 0 ? doc.history[layerNode - 1] : undefined;
+    if (!step) {
+      onNotice({ tone: "error", message: "The original image has no saved generation settings. Select a layer that a model made." });
+      return;
+    }
+    const settings = layerSettings(step, { name: modelLabel(step.model), local: isLocalModel(step.model) }, doc.surface);
+    setInspected({ name: step.name || step.prompt || `Layer ${layerNode}`, settings });
+  };
+
+  /**
+   * Use These Settings: the prompt bar takes the recipe's model and its
+   * exact positive prompt (with the prompt start, which the job then does not
+   * add again); the next local images use its files, LoRAs, seed and sampling.
+   */
+  const applySavedSettings = (recipe: LocalRecipe, from: string) => {
+    if (!recipe.modelId || !isLocalModel(recipe.modelId)) {
+      onNotice({ tone: "error", message: "These settings name no local model of Image Sage." });
+      return;
+    }
+    const steps = LOCAL_STEPS[recipe.modelId] ?? {};
+    const wholeQuality = Object.keys(steps).find((quality) => steps[quality] === recipe.steps) ?? settings.wholeQuality;
+    onSettingsChange({ ...settings, wholeModel: recipe.modelId, wholeQuality });
+    setPrompt(recipe.prompt);
+    setSavedSettings({ recipe, from });
+    setInspected(null);
+    setPasteSettingsOpen(false);
   };
 
   const submit = () => {
@@ -2593,6 +2652,9 @@ export function Editor({
         return;
       case "make-video":
         void animateLayer(node);
+        return;
+      case "inspect":
+        inspectLayer(node);
         return;
       case "click-select": {
         const source = step ? step.layer : current.base;
@@ -4778,6 +4840,10 @@ export function Editor({
       void snapshotVisible();
     } else if (command.name === "animate-layer") {
       void animateLayer();
+    } else if (command.name === "inspect-layer") {
+      inspectLayer();
+    } else if (command.name === "paste-settings") {
+      setPasteSettingsOpen(true);
     } else if (command.name === "canvas-size" || command.name === "image-size") {
       if (resizeRef.current || clickSelectRef.current || gradientRef.current) {
         onNotice({ tone: "error", message: "Apply or cancel the current tool (Enter or Esc) first." });
@@ -5948,11 +6014,24 @@ export function Editor({
               onChange={(event) => {
                 const wholeModel = event.target.value;
                 const wholeQuality = qualitiesFor(wholeModel).includes(settings.wholeQuality) ? settings.wholeQuality : "high";
+                /** Saved settings belong to one model; another model goes back to Settings → Local. */
+                setSavedSettings(null);
                 onSettingsChange({ ...settings, wholeModel, wholeQuality });
               }}
             >
               {editModels.map((model) => <option key={model.id} value={model.id}>{model.label}</option>)}
             </select>
+              {savedSettings ? (
+                <div
+                  className="prompt-recipe"
+                  data-help={`Settings of ${savedSettings.from}: seed ${savedSettings.recipe.seed}, ${savedSettings.recipe.sampler} / ${savedSettings.recipe.scheduler}, ${savedSettings.recipe.steps} steps, CFG ${savedSettings.recipe.cfgScale}, ${savedSettings.recipe.width} × ${savedSettings.recipe.height}${savedSettings.recipe.loras.length ? `, LoRA ${savedSettings.recipe.loras.map((lora) => `${lora.file.split(/[\\/]/).pop()} ${lora.strength}`).join(", ")}` : ", no LoRA"}. The next local image uses them in place of Settings → Local. The same prompt makes the same image again.`}
+                >
+                  <span>Saved settings · seed {savedSettings.recipe.seed} · {savedSettings.recipe.steps} steps{savedSettings.recipe.loras.length ? ` · ${savedSettings.recipe.loras.length} LoRA` : ""}</span>
+                  <button type="button" aria-label="Stop using the saved settings" data-help="Stop using the saved settings; go back to Settings → Local" onClick={() => setSavedSettings(null)}>
+                    <X size={12} weight="bold" />
+                  </button>
+                </div>
+              ) : (<>
               <select
                 aria-label="Quality"
                 data-help={localChosen ? "More steps take longer and add detail." : "Higher quality costs more and takes longer."}
@@ -5970,6 +6049,23 @@ export function Editor({
                   );
                 })}
               </select>
+              {localChosen && (
+                <label
+                  className={`prompt-seed${selectedSeed === undefined ? " disabled" : ""}`}
+                  data-help={selectedSeed === undefined
+                    ? "Select a layer made by a local model to use its seed. With the same seed, a similar prompt makes a similar image."
+                    : `Use seed ${selectedSeed} of ${regenName}. The same prompt makes the same image again; a changed prompt makes a similar image.`}
+                >
+                  <input
+                    type="checkbox"
+                    checked={sameSeed && selectedSeed !== undefined}
+                    disabled={selectedSeed === undefined}
+                    onChange={(event) => setSameSeed(event.target.checked)}
+                  />
+                  Same seed
+                </label>
+              )}
+              </>)}
           </div>
           <div className="primary-split" role="group" aria-label="Send the prompt">
             <button
@@ -6166,6 +6262,15 @@ export function Editor({
           onExport={(options) => void exportSlideshow(options)}
         />
       )}
+      {inspected && (
+        <InspectLayerDialog
+          name={inspected.name}
+          settings={inspected.settings}
+          onUse={() => inspected.settings.recipe && applySavedSettings(inspected.settings.recipe, inspected.name)}
+          onClose={() => setInspected(null)}
+        />
+      )}
+      {pasteSettingsOpen && <PasteSettingsDialog onUse={(recipe) => applySavedSettings(recipe, "the pasted settings")} onClose={() => setPasteSettingsOpen(false)} />}
       {canvasDialog && (
         <CanvasSizeDialog
           mode={canvasDialog}

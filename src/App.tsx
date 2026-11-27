@@ -3,7 +3,7 @@ import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { open, save } from "@tauri-apps/plugin-dialog";
-import { ArrowClockwise, ArrowCounterClockwise, ArrowsOut, Camera, CheckCircle, CornersOut, DownloadSimple, FilePlus, FilmStrip, FloppyDisk, FolderOpen, GearSix, ImageSquare, Info, Keyboard, Question, SpinnerGap, Stack, VideoCamera, Warning, WarningCircle, X } from "@phosphor-icons/react";
+import { ArrowClockwise, ArrowCounterClockwise, ArrowsOut, Camera, CheckCircle, ClipboardText, CornersOut, DownloadSimple, FilePlus, FilmStrip, FloppyDisk, FolderOpen, GearSix, ImageSquare, Info, Keyboard, MagnifyingGlass, Question, SpinnerGap, Stack, VideoCamera, Warning, WarningCircle, X } from "@phosphor-icons/react";
 import { AboutDialog } from "./components/AboutDialog";
 import { ShortcutsDialog } from "./components/ShortcutsDialog";
 import { ConnectDialog, type SettingsSection } from "./components/ConnectDialog";
@@ -966,6 +966,8 @@ export default function App() {
         "separator",
         { label: "Snapshot Visible Layers", icon: <Camera size={15} />, shortcut: "Ctrl+Alt+S", disabled: !activeDocument, run: () => sendCommand("snapshot") },
         { label: "Animate Layer…", icon: <VideoCamera size={15} />, disabled: !activeDocument, run: () => sendCommand("animate-layer") },
+        { label: "Inspect Layer…", icon: <MagnifyingGlass size={15} />, disabled: !activeDocument, run: () => sendCommand("inspect-layer") },
+        { label: "Use Settings From JSON…", icon: <ClipboardText size={15} />, disabled: !activeDocument, run: () => sendCommand("paste-settings") },
         "separator",
         { label: "Image Size…", icon: <ArrowsOut size={15} />, disabled: !activeDocument, run: () => sendCommand("image-size") },
         { label: "Canvas Size…", icon: <CornersOut size={15} />, disabled: !activeDocument, run: () => sendCommand("canvas-size") }

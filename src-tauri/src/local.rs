@@ -174,6 +174,9 @@ struct EngineZip {
     sha256: &'static str,
 }
 
+/// The engine release that `ENGINE_ZIPS` downloads; a layer's settings name it, since another release can draw a different image.
+const ENGINE_RELEASE: &str = "stable-diffusion.cpp master-1024-77b72a2";
+
 const ENGINE_ZIPS: [EngineZip; 2] = [
     EngineZip {
         name: "sd-master-77b72a2-bin-win-cuda12-x64.zip",
@@ -409,6 +412,93 @@ pub struct LocalGenerateRequest {
     size: String,
     /// The image to edit, as a PNG data URL at `size`; none makes a new image from the prompt alone.
     image: Option<String>,
+    /// The seed of an earlier image, to make a similar one; none picks a new seed.
+    seed: Option<u32>,
+    /// A layer's saved settings (see `job_recipe`) to use in place of Settings → Local for this one job.
+    recipe: Option<JobRecipe>,
+}
+
+/**
+ * The part of a saved recipe that replaces Settings → Local for one job: the
+ * model files, the LoRAs, the negative prompt and the sampling settings. The
+ * prompt, the seed and the size come with the request itself.
+ */
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JobRecipe {
+    files: RecipeFiles,
+    #[serde(default)]
+    loras: Vec<RecipeLora>,
+    #[serde(default)]
+    negative_prompt: String,
+    sampler: String,
+    scheduler: String,
+    steps: u32,
+    cfg_scale: f64,
+    flow_shift: Option<f64>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RecipeFiles {
+    diffusion_model: String,
+    text_encoder: String,
+    vae: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RecipeLora {
+    file: String,
+    strength: f64,
+    #[serde(default)]
+    high_noise: bool,
+}
+
+/**
+ * The model settings of a recipe: its files, LoRAs, negative prompt, sampler
+ * and scheduler over the model's own settings. It has no prompt start, since
+ * the recipe's prompt already includes it. Each file must be on this
+ * computer; the engine uses one LoRA for each model.
+ */
+fn recipe_files(base: &ModelConfig, recipe: &JobRecipe) -> Result<ModelConfig, String> {
+    if !(1..=200).contains(&recipe.steps) || !recipe.cfg_scale.is_finite() {
+        return Err("The saved settings have steps or a CFG scale that the engine cannot use.".into());
+    }
+    let mut files = ModelConfig {
+        diffusion_model: recipe.files.diffusion_model.clone(),
+        text_encoder: recipe.files.text_encoder.clone(),
+        vae: recipe.files.vae.clone(),
+        negative_prompt: recipe.negative_prompt.clone(),
+        prompt_prefix: Some(String::new()),
+        sampler: recipe.sampler.clone(),
+        scheduler: recipe.scheduler.clone(),
+        lora: String::new(),
+        lora_strength: 0.0,
+        high_noise_lora: String::new(),
+        high_noise_lora_strength: 0.0,
+        ..base.clone()
+    };
+    for lora in &recipe.loras {
+        let (slot, strength) = if lora.high_noise {
+            (&mut files.high_noise_lora, &mut files.high_noise_lora_strength)
+        } else {
+            (&mut files.lora, &mut files.lora_strength)
+        };
+        if !slot.is_empty() {
+            return Err("The saved settings have more than one LoRA for the model. Image Sage uses one LoRA for each model.".into());
+        }
+        *slot = lora.file.clone();
+        *strength = lora.strength;
+    }
+    let lora_files = recipe.loras.iter().map(|lora| lora.file.as_str());
+    for path in [files.diffusion_model.as_str(), files.text_encoder.as_str(), files.vae.as_str()].into_iter().chain(lora_files) {
+        if path.trim().is_empty() || !Path::new(path.trim()).is_file() {
+            let name = if path.trim().is_empty() { "a model file with no name" } else { path };
+            return Err(format!("The saved settings use {name}, which is not on this computer."));
+        }
+    }
+    Ok(files)
 }
 
 #[derive(Deserialize)]
@@ -923,8 +1013,13 @@ impl Drop for Session {
  * but not while it has a job; the new job is then refused.
  */
 async fn open_session(app: &AppHandle, engine: &LocalEngine, reporter: &ProgressReporter, model: LocalModel) -> Result<Session, String> {
+    open_session_with(app, &load_config(app)?, engine, reporter, model).await
+}
+
+/// The same as `open_session`, with the given settings in place of the saved ones.
+async fn open_session_with(app: &AppHandle, config: &LocalConfig, engine: &LocalEngine, reporter: &ProgressReporter, model: LocalModel) -> Result<Session, String> {
     let dir = engines_dir(app)?.join(ENGINE_BUILD);
-    start_session(&dir, &load_config(app)?, engine, Some(reporter), model).await
+    start_session(&dir, config, engine, Some(reporter), model).await
 }
 
 /// The same as `open_session`, from the engine's folder and the settings; a request with no window has no reporter.
@@ -1078,12 +1173,22 @@ fn parse_size(size: &str) -> Result<(u32, u32), String> {
 }
 
 /**
- * The engine's job request: the prompt, the size, the sampling settings from
- * Settings → Local, and for an edit the image as Qwen-Image-2.1's reference.
- * A new image's prompt starts with the model's prompt start; an edit keeps
- * the image's own style.
+ * A new seed for a job. Image Sage picks it, not the engine, so it knows the
+ * seed and can use it again. It stays below 2^31 for the engine.
  */
-fn generate_body(model: LocalModel, prompt: &str, width: u32, height: u32, steps: u32, files: &ModelConfig, image: Option<&str>) -> Value {
+fn random_seed() -> u32 {
+    use std::hash::{BuildHasher, Hasher};
+    (std::collections::hash_map::RandomState::new().build_hasher().finish() % (1 << 31)) as u32
+}
+
+/**
+ * The engine's job request: the prompt, the size, the seed, the sampling
+ * settings from Settings → Local, and for an edit the image as
+ * Qwen-Image-2.1's reference. A new image's prompt starts with the model's
+ * prompt start; an edit keeps the image's own style.
+ */
+#[allow(clippy::too_many_arguments)]
+fn generate_body(model: LocalModel, prompt: &str, width: u32, height: u32, steps: u32, files: &ModelConfig, image: Option<&str>, seed: u32) -> Value {
     let sampler = files.sampler.trim();
     let mut sample_params = json!({
         "sample_method": if sampler.is_empty() { "euler" } else { sampler },
@@ -1102,7 +1207,7 @@ fn generate_body(model: LocalModel, prompt: &str, width: u32, height: u32, steps
         "negative_prompt": files.negative_prompt.trim(),
         "width": width,
         "height": height,
-        "seed": -1,
+        "seed": seed,
         "sample_params": sample_params,
         "preview": "proj",
         "preview_interval": 1,
@@ -1116,6 +1221,71 @@ fn generate_body(model: LocalModel, prompt: &str, width: u32, height: u32, steps
         body["lora"] = json!(loras);
     }
     body
+}
+
+/**
+ * Everything that made a local image, read from the engine's job request so
+ * it matches what was sent: the engine build, the model files, the LoRAs and
+ * their strengths, the exact prompts, the seed, the sampling settings and
+ * the size. The layer keeps it, so the user can inspect it and make the same
+ * image again.
+ */
+fn job_recipe(model: LocalModel, files: &ModelConfig, body: &Value) -> Value {
+    let params = &body["sample_params"];
+    let lora_dir = files.lora_dir();
+    let loras: Vec<Value> = body["lora"]
+        .as_array()
+        .map(|list| {
+            list.iter()
+                .map(|lora| {
+                    let name = lora["path"].as_str().unwrap_or_default();
+                    let file = lora_dir.as_ref().map(|dir| dir.join(name).to_string_lossy().into_owned()).unwrap_or_else(|| name.to_string());
+                    let mut entry = json!({ "file": file, "strength": lora["multiplier"] });
+                    if lora["is_high_noise"] == true {
+                        entry["highNoise"] = json!(true);
+                    }
+                    entry
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    json!({
+        "engine": ENGINE_RELEASE,
+        "model": model.name(),
+        "modelId": model,
+        "files": {
+            "diffusionModel": files.diffusion_model,
+            "textEncoder": files.text_encoder,
+            "vae": files.vae
+        },
+        "loras": loras,
+        "prompt": body["prompt"],
+        "negativePrompt": body["negative_prompt"],
+        "seed": body["seed"],
+        "sampler": params["sample_method"],
+        "scheduler": params["scheduler"],
+        "steps": params["sample_steps"],
+        "cfgScale": params["guidance"]["txt_cfg"],
+        "flowShift": params.get("flow_shift"),
+        "modelArgs": model.model_args(),
+        "width": body["width"],
+        "height": body["height"],
+        "edit": body.get("ref_images").is_some()
+    })
+}
+
+/// A recipe's CFG scale and flow shift, which Settings → Local does not hold; none is the engine's own shift for the size.
+fn apply_recipe_sampling(body: &mut Value, recipe: &JobRecipe) {
+    let params = &mut body["sample_params"];
+    params["guidance"]["txt_cfg"] = json!(recipe.cfg_scale);
+    match recipe.flow_shift {
+        Some(shift) => params["flow_shift"] = json!(shift),
+        None => {
+            if let Some(params) = params.as_object_mut() {
+                params.remove("flow_shift");
+            }
+        }
+    }
 }
 
 /// Makes a new image from a prompt, or with Qwen-Image-2.1 edits the given image, on this computer.
@@ -1134,16 +1304,27 @@ pub async fn local_generate(
     if request.image.is_some() && !model.edits() {
         return Err(format!("{} makes new images only; it cannot edit an image.", model.name()));
     }
-    let steps = model.steps(&request.quality);
+    let recipe = request.recipe;
+    let steps = recipe.as_ref().map_or_else(|| model.steps(&request.quality), |recipe| recipe.steps);
     let engine = engine.inner().clone();
     let handle = app.clone();
     let prompt = request.prompt;
     let image = request.image;
+    let seed = request.seed.unwrap_or_else(random_seed);
     requests::run_cancellable(app, &requests, request.request_id, move |reporter| async move {
-        let session = open_session(&handle, &engine, &reporter, model).await?;
-        let files = load_config(&handle)?.model(model);
+        /* Saved settings replace the model's settings for this job only; the engine restarts when their files differ. */
+        let mut config = load_config(&handle)?;
+        if let Some(recipe) = &recipe {
+            let files = recipe_files(&config.model(model), recipe)?;
+            config.models.insert(model, files);
+        }
+        let session = open_session_with(&handle, &config, &engine, &reporter, model).await?;
+        let files = config.model(model);
         reporter.progress("generating", 0.0);
-        let body = generate_body(model, &prompt, width, height, steps, &files, image.as_deref());
+        let mut body = generate_body(model, &prompt, width, height, steps, &files, image.as_deref(), seed);
+        if let Some(recipe) = &recipe {
+            apply_recipe_sampling(&mut body, recipe);
+        }
         let made = run_image_job(session.port, &body, |job| {
             if job.step >= job.total {
                 reporter.stage("finishing");
@@ -1159,7 +1340,7 @@ pub async fn local_generate(
             Ok(image) => image,
             Err(error) => return Err(job_error(&engine, session.port, error).await),
         };
-        Ok(AiImage { data_url: format!("data:image/png;base64,{image}"), usage: None })
+        Ok(AiImage { data_url: format!("data:image/png;base64,{image}"), usage: None, seed: Some(seed), recipe: Some(job_recipe(model, &files, &body)) })
     })
     .await
 }
@@ -1557,7 +1738,7 @@ async fn make_plan_images(plan: &FilePlan, dir: &Path, config: &LocalConfig, eng
         .unwrap_or_default();
     let mut paths = Vec::new();
     for number in 1..=plan.count {
-        let body = generate_body(plan.model, &plan.prompt, plan.width, plan.height, plan.steps, &files, None);
+        let body = generate_body(plan.model, &plan.prompt, plan.width, plan.height, plan.steps, &files, None, random_seed());
         let image = run_image_job(session.port, &body, |job| {
             tell(json!({ "event": "progress", "image": number, "count": plan.count, "step": job.step, "steps": job.total }));
         })
@@ -1718,7 +1899,8 @@ mod tests {
     #[test]
     fn job_request_has_the_sampling_settings() {
         let mut files = ModelConfig { sampler: "dpm++2m".into(), ..ModelConfig::defaults(LocalModel::Chroma) };
-        let body = generate_body(LocalModel::Chroma, "a cat", 1024, 768, 30, &files, None);
+        let body = generate_body(LocalModel::Chroma, "a cat", 1024, 768, 30, &files, None, 7);
+        assert_eq!(body["seed"], 7);
         assert_eq!(body["negative_prompt"], DEFAULT_NEGATIVE_PROMPT);
         assert_eq!(body["prompt"], "A photo. a cat");
         assert_eq!(body["sample_params"]["sample_method"], "dpm++2m");
@@ -1728,29 +1910,78 @@ mod tests {
         assert!(body.get("ref_images").is_none());
         files.scheduler = "karras".into();
         files.sampler = " ".into();
-        let body = generate_body(LocalModel::Chroma, "a cat", 1024, 768, 30, &files, None);
+        let body = generate_body(LocalModel::Chroma, "a cat", 1024, 768, 30, &files, None, 7);
         assert_eq!(body["sample_params"]["scheduler"], "karras");
         assert_eq!(body["sample_params"]["sample_method"], "euler");
         files.scheduler = String::new();
         files.prompt_prefix = Some(" ".into());
-        let body = generate_body(LocalModel::Chroma, "a cat", 1024, 768, 30, &files, None);
+        let body = generate_body(LocalModel::Chroma, "a cat", 1024, 768, 30, &files, None, 7);
         assert_eq!(body["sample_params"]["scheduler"], "beta");
         assert_eq!(body["prompt"], "a cat");
+    }
+
+    #[test]
+    fn recipe_matches_the_job_request() {
+        let files = ModelConfig { lora: "D:\\models\\loras\\FineArtPhoto2.safetensors".into(), ..ModelConfig::defaults(LocalModel::Chroma) };
+        let body = generate_body(LocalModel::Chroma, "a cat", 1024, 768, 30, &files, None, 7);
+        let recipe = job_recipe(LocalModel::Chroma, &files, &body);
+        assert_eq!(recipe["seed"], 7);
+        assert_eq!(recipe["prompt"], "A photo. a cat");
+        assert_eq!(recipe["negativePrompt"], DEFAULT_NEGATIVE_PROMPT);
+        assert_eq!(recipe["sampler"], body["sample_params"]["sample_method"]);
+        assert_eq!(recipe["scheduler"], "beta");
+        assert_eq!(recipe["steps"], 30);
+        assert_eq!(recipe["cfgScale"], 3.5);
+        assert_eq!(recipe["flowShift"], 1.0);
+        assert_eq!(recipe["width"], 1024);
+        assert_eq!(recipe["edit"], false);
+        assert_eq!(recipe["loras"], json!([{ "file": "D:\\models\\loras\\FineArtPhoto2.safetensors", "strength": 0.75 }]));
+        assert!(ENGINE_ZIPS.iter().all(|zip| zip.url.contains(ENGINE_RELEASE.trim_start_matches("stable-diffusion.cpp "))));
+    }
+
+    #[test]
+    fn a_recipe_makes_the_same_job_again() {
+        let dir = std::env::temp_dir().join(format!("imagesage-recipe-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("loras")).unwrap();
+        let file = |name: &str| {
+            let path = dir.join(name);
+            std::fs::write(&path, b"x").unwrap();
+            path.to_string_lossy().into_owned()
+        };
+        let files = ModelConfig {
+            diffusion_model: file("chroma.gguf"),
+            text_encoder: file("t5.gguf"),
+            vae: file("ae.safetensors"),
+            lora: file("loras/style.safetensors"),
+            sampler: "dpm++2m".into(),
+            ..ModelConfig::defaults(LocalModel::Chroma)
+        };
+        let body = generate_body(LocalModel::Chroma, "a cat", 1024, 768, 30, &files, None, 42);
+        let saved = job_recipe(LocalModel::Chroma, &files, &body);
+        assert_eq!(saved["modelId"], "chroma1-hd");
+        let recipe: JobRecipe = serde_json::from_value(saved.clone()).unwrap();
+        let again = recipe_files(&ModelConfig::defaults(LocalModel::Chroma), &recipe).unwrap();
+        let mut body_again = generate_body(LocalModel::Chroma, saved["prompt"].as_str().unwrap(), 1024, 768, recipe.steps, &again, None, 42);
+        apply_recipe_sampling(&mut body_again, &recipe);
+        assert_eq!(body_again, body);
+        let missing = JobRecipe { files: RecipeFiles { vae: dir.join("gone.safetensors").to_string_lossy().into_owned(), ..recipe.files }, ..recipe };
+        assert!(recipe_files(&files, &missing).unwrap_err().contains("gone.safetensors"));
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
     fn lora_goes_by_name_from_its_folder() {
         let mut files = ModelConfig::defaults(LocalModel::Chroma);
         assert!(files.lora_dir().is_none());
-        assert!(generate_body(LocalModel::Chroma, "a cat", 1024, 768, 30, &files, None).get("lora").is_none());
+        assert!(generate_body(LocalModel::Chroma, "a cat", 1024, 768, 30, &files, None, 7).get("lora").is_none());
         files.lora = "D:\\models\\loras\\FineArtPhoto2.safetensors".into();
         assert_eq!(files.lora_dir(), Some(PathBuf::from("D:\\models\\loras")));
         assert_eq!(files.lora_name(&files.lora).as_deref(), Some("FineArtPhoto2.safetensors"));
-        let body = generate_body(LocalModel::Chroma, "a cat", 1024, 768, 30, &files, None);
+        let body = generate_body(LocalModel::Chroma, "a cat", 1024, 768, 30, &files, None, 7);
         assert_eq!(body["lora"], json!([{ "path": "FineArtPhoto2.safetensors", "multiplier": 0.75 }]));
         assert!(files.missing(LocalModel::Chroma).contains(&"LoRA"));
         files.lora_strength = 0.0;
-        assert!(generate_body(LocalModel::Chroma, "a cat", 1024, 768, 30, &files, None).get("lora").is_none());
+        assert!(generate_body(LocalModel::Chroma, "a cat", 1024, 768, 30, &files, None, 7).get("lora").is_none());
         let other_strength = ModelConfig { lora_strength: 1.0, ..files.clone() };
         assert!(same_files(&files, &other_strength));
         let other_folder = ModelConfig { lora: "E:\\loras\\FineArtPhoto2.safetensors".into(), ..files.clone() };
@@ -1763,7 +1994,7 @@ mod tests {
     #[test]
     fn qwen_edit_sends_the_image_and_keeps_the_engine_shift() {
         let files = ModelConfig { prompt_prefix: Some("A photo.".into()), ..ModelConfig::defaults(LocalModel::Qwen) };
-        let body = generate_body(LocalModel::Qwen, "make it night", 1024, 768, 25, &files, Some("data:image/png;base64,AAAA"));
+        let body = generate_body(LocalModel::Qwen, "make it night", 1024, 768, 25, &files, Some("data:image/png;base64,AAAA"), 7);
         assert_eq!(body["prompt"], "make it night");
         assert_eq!(body["ref_images"], json!(["data:image/png;base64,AAAA"]));
         assert!(body["sample_params"].get("flow_shift").is_none());

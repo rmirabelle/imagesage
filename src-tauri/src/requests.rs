@@ -30,6 +30,10 @@ struct AiProgress {
 pub struct AiImage {
     pub data_url: String,
     pub usage: Option<Value>,
+    /// The local engine's seed for the image; GPT Image has none.
+    pub seed: Option<u32>,
+    /// The local engine's full settings for the image (see `local::job_recipe`); GPT Image has none.
+    pub recipe: Option<Value>,
 }
 
 /// Sends `ai-progress` events for one request.

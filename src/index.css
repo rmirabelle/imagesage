@@ -1842,6 +1842,13 @@ select option:disabled { color: #777d8e; }
 .prompt-options { display: flex; gap: 6px; }
 .prompt-options select { height: 28px; min-width: 0; flex: 1; padding-left: 9px; padding-right: 28px; background-position: right 10px center; font-size: 11px; }
 .prompt-options select:first-child { flex: 1.7; }
+.prompt-seed { display: flex; flex: 0 0 auto; align-items: center; gap: 5px; color: #c4c8d2; font-size: 11px; white-space: nowrap; cursor: pointer; }
+.prompt-seed.disabled { color: #7d8291; cursor: default; }
+/* Saved settings in use: a chip in place of the quality and seed controls, with a button that clears it. */
+.prompt-recipe { display: flex; flex: 1.2; min-width: 0; align-items: center; gap: 4px; height: 28px; padding: 0 4px 0 9px; border: 1px solid #4a5063; border-radius: 6px; color: #e6e8ee; background: #262a35; font-size: 11px; }
+.prompt-recipe span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.prompt-recipe button { display: grid; place-items: center; width: 20px; height: 20px; padding: 0; border: 0; border-radius: 4px; color: #a7abb7; background: transparent; cursor: pointer; }
+.prompt-recipe button:hover { color: #f1f2f5; background: #3a3e4d; }
 .prompt-controls .primary-action { height: 34px; }
 /* Generate and Regenerate: two separate buttons side by side. */
 .primary-split { display: flex; gap: 4px; }
@@ -1967,6 +1974,17 @@ select option:disabled { color: #777d8e; }
 .shortcuts-body kbd { min-width: 22px; padding: 1px 6px; border: 1px solid #5a6074; border-bottom-width: 2px; border-radius: 4px; color: #a9ddf8; background: #1d2029; font: 600 11px/1.5 "Cascadia Mono", Consolas, monospace; text-align: center; }
 .shortcuts-plus, .shortcuts-or { color: #6f7585; font-size: 11px; }
 .shortcuts-or { margin: 0 3px; }
+/* Inspect Layer: each setting on one row, its name on the left; prompts and file paths wrap and can be selected. */
+.inspect-dialog { width: min(680px, 100%); max-height: min(760px, 100%); display: flex; flex-direction: column; overflow: hidden; }
+.inspect-body { min-height: 0; overflow: auto; display: flex; flex-direction: column; gap: 14px; padding: 14px 22px 18px; user-select: text; }
+.inspect-note { margin: 0; color: #9aa1b0; font-size: 12px; line-height: 1.45; }
+.inspect-body h3 { margin: 0 0 7px; color: #9aa1b0; font-size: 10.5px; font-weight: 750; letter-spacing: .07em; text-transform: uppercase; }
+.inspect-body dl { display: grid; grid-template-columns: 130px minmax(0, 1fr); align-items: baseline; gap: 6px 12px; margin: 0; }
+.inspect-body dt { color: #9aa1b0; font-size: 12px; }
+.inspect-body dd { margin: 0; color: #e6e8ee; font-size: 12px; line-height: 1.45; overflow-wrap: anywhere; }
+.paste-settings-text { min-height: 260px; resize: vertical; padding: 8px 10px; border: 1px solid #3a3e4d; border-radius: 5px; color: #e6e8ee; background: #1d2029; font: 11.5px/1.5 "Cascadia Mono", Consolas, monospace; }
+.paste-settings-error { margin: 0; color: #f2a0a0; font-size: 12px; }
+.inspect-body dd.wide { padding: 5px 8px; border: 1px solid #3a3e4d; border-radius: 5px; background: #1d2029; font: 11.5px/1.5 "Cascadia Mono", Consolas, monospace; white-space: pre-wrap; }
 .settings-layout { flex: 1; min-height: 0; display: grid; grid-template-columns: 200px minmax(0, 1fr); }
 .settings-nav {
   display: flex;
