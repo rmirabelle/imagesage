@@ -1596,6 +1596,8 @@ struct FileRequest {
     quality: Option<String>,
     /// Chroma1-HD when it is not given.
     model: Option<LocalModel>,
+    /// The seed of the first image; the next images use the seeds after it. Random when it is not given.
+    seed: Option<u64>,
 }
 
 /// A request file's contents after the checks.
@@ -1608,6 +1610,18 @@ struct FilePlan {
     height: u32,
     steps: u32,
     model: LocalModel,
+    seed: Option<u32>,
+}
+
+/** The engine takes seeds below 2^31. */
+const SEED_LIMIT: u64 = 1 << 31;
+
+/** The seed of image `number` (from 1): the first seed, then each next one, or a random seed. */
+fn image_seed(first: Option<u32>, number: u32) -> u32 {
+    match first {
+        Some(seed) => ((u64::from(seed) + u64::from(number) - 1) % SEED_LIMIT) as u32,
+        None => random_seed(),
+    }
 }
 
 fn plan_file_request(text: &str) -> Result<FilePlan, String> {
@@ -1633,7 +1647,11 @@ fn plan_file_request(text: &str) -> Result<FilePlan, String> {
     if model.video() {
         return Err(format!("{} makes video only. Use chroma1-hd or qwen-image-2.1.", model.name()));
     }
-    Ok(FilePlan { prompt, output_folder, count, width, height, steps: model.steps(quality), model })
+    let seed = match request.seed {
+        Some(seed) if seed >= SEED_LIMIT => return Err(format!("The seed {seed} is too large. Use a number from 0 to {}.", SEED_LIMIT - 1)),
+        seed => seed.map(|seed| seed as u32),
+    };
+    Ok(FilePlan { prompt, output_folder, count, width, height, steps: model.steps(quality), model, seed })
 }
 
 /// The app's identifier, which names its data folders. It comes from the Tauri settings file at build time.
@@ -1738,7 +1756,8 @@ async fn make_plan_images(plan: &FilePlan, dir: &Path, config: &LocalConfig, eng
         .unwrap_or_default();
     let mut paths = Vec::new();
     for number in 1..=plan.count {
-        let body = generate_body(plan.model, &plan.prompt, plan.width, plan.height, plan.steps, &files, None, random_seed());
+        let seed = image_seed(plan.seed, number);
+        let body = generate_body(plan.model, &plan.prompt, plan.width, plan.height, plan.steps, &files, None, seed);
         let image = run_image_job(session.port, &body, |job| {
             tell(json!({ "event": "progress", "image": number, "count": plan.count, "step": job.step, "steps": job.total }));
         })
@@ -1747,7 +1766,7 @@ async fn make_plan_images(plan: &FilePlan, dir: &Path, config: &LocalConfig, eng
         let file = plan.output_folder.join(format!("imagesage-{stamp}-{number}.png"));
         std::fs::write(&file, bytes).map_err(|error| format!("Could not save {}: {error}", file.display()))?;
         let file = file.to_string_lossy().into_owned();
-        tell(json!({ "event": "image", "image": number, "count": plan.count, "path": file }));
+        tell(json!({ "event": "image", "image": number, "count": plan.count, "path": file, "seed": seed }));
         paths.push(file);
     }
     Ok(paths)
@@ -1801,8 +1820,20 @@ mod tests {
                 height: 1024,
                 steps: 30,
                 model: LocalModel::Chroma,
+                seed: None,
             }
         );
+    }
+
+    #[test]
+    fn a_request_file_seed_counts_up_for_each_image() {
+        let plan = plan_file_request(r#"{"prompt":"x","outputFolder":"C:\\Out","count":3,"seed":42}"#).unwrap();
+        assert_eq!(plan.seed, Some(42));
+        assert_eq!([1, 2, 3].map(|number| image_seed(plan.seed, number)), [42, 43, 44]);
+        /** The seeds wrap below the engine's limit. */
+        assert_eq!(image_seed(Some((SEED_LIMIT - 1) as u32), 2), 0);
+        assert!(plan_file_request(r#"{"prompt":"x","outputFolder":"C:\\Out","seed":2147483648}"#).is_err());
+        assert!(plan_file_request(r#"{"prompt":"x","outputFolder":"C:\\Out","seed":-1}"#).is_err());
     }
 
     #[test]

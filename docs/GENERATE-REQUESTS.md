@@ -20,10 +20,11 @@ A JSON file. Only `prompt` and `outputFolder` are necessary.
 | --- | --- | --- |
 | `prompt` | What the image shows. Image Sage adds the model's prompt start and negative prompt from the settings. | |
 | `outputFolder` | Full path of the folder for the PNG files. Image Sage creates it. | |
-| `count` | How many images, 1 to 50. Each image gets a new random seed. | 1 |
+| `count` | How many images, 1 to 50. | 1 |
 | `size` | Width and height, each a multiple of 16 from 256 to 4096. | `1024x1024` |
 | `quality` | `low`, `medium`, or `high`. It sets the sampling steps. | `medium` |
 | `model` | `chroma1-hd` or `qwen-image-2.1`. | `chroma1-hd` |
+| `seed` | The seed of image 1, from 0 to 2147483647. Image 2 uses the next seed, and so on. The same seed, prompt, size, quality, and model make the same image again. Image Sage 0.19.0 and later; an older version ignores it. | A new random seed for each image |
 
 ## The answer
 
@@ -33,11 +34,12 @@ program that starts Image Sage must give it a pipe for standard output.
 ```
 {"event":"loading"}
 {"event":"progress","image":1,"count":2,"step":5,"steps":30}
-{"event":"image","image":1,"count":2,"path":"D:\\Out\\imagesage-1794330000-1.png"}
+{"event":"image","image":1,"count":2,"path":"D:\\Out\\imagesage-1794330000-1.png","seed":1234567}
 {"event":"done","paths":["D:\\Out\\imagesage-1794330000-1.png","D:\\Out\\imagesage-1794330000-2.png"]}
 ```
 
-A failure ends with `{"event":"error","message":"..."}`. The exit code is 0
+Each `image` line has the seed of that image (0.19.0 and later). A failure
+ends with `{"event":"error","message":"..."}`. The exit code is 0
 when every image was made, and 1 after an error.
 
 ## Rules for the caller
